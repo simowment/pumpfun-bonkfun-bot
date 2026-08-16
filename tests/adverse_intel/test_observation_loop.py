@@ -210,7 +210,9 @@ class ObservationLoopTests(unittest.TestCase):
                 endpoint="https://rpc.example",
                 source_id="restart-source",
                 raw_observation_path=raw_path,
-                handled_evidence_path=Path(directory) / "handled.jsonl",
+                handled_ledger=JsonlHandledEvidenceLedger(
+                    Path(directory) / "handled.jsonl"
+                ),
                 transport=second_transport,
                 max_signatures=1,
                 max_transactions=1,
@@ -233,7 +235,9 @@ class ObservationLoopTests(unittest.TestCase):
                 address=ADDRESS,
                 endpoint="https://rpc.example",
                 raw_observation_path=raw_path,
-                handled_evidence_path=Path(directory) / "handled.jsonl",
+                handled_ledger=JsonlHandledEvidenceLedger(
+                    Path(directory) / "handled.jsonl"
+                ),
                 transport=transport,
             )
 
@@ -266,7 +270,7 @@ class ObservationLoopTests(unittest.TestCase):
                 address=ADDRESS,
                 endpoint="https://rpc.example",
                 raw_observation_path=raw_path,
-                handled_evidence_path=handled_path,
+                handled_ledger=JsonlHandledEvidenceLedger(handled_path),
                 transport=transport,
             )
 
@@ -438,7 +442,7 @@ class ObservationLoopTests(unittest.TestCase):
                 address=ADDRESS,
                 endpoint="https://rpc.example",
                 raw_observation_path=raw_path,
-                handled_evidence_path=handled_path,
+                handled_ledger=JsonlHandledEvidenceLedger(handled_path),
                 transport=transport,
                 max_signatures=1,
                 max_transactions=1,
@@ -464,7 +468,7 @@ class ObservationLoopTests(unittest.TestCase):
                 address=ADDRESS,
                 endpoint="https://rpc.example",
                 raw_observation_path=raw_path,
-                handled_evidence_path=handled_path,
+                handled_ledger=JsonlHandledEvidenceLedger(handled_path),
                 transport=transport,
             )
             observation = _observation_with_source(first.source_id)
@@ -477,7 +481,7 @@ class ObservationLoopTests(unittest.TestCase):
                 address=other_address,
                 endpoint="https://rpc.example",
                 raw_observation_path=raw_path,
-                handled_evidence_path=handled_path,
+                handled_ledger=JsonlHandledEvidenceLedger(handled_path),
                 transport=transport,
             )
             self.assertIsNone(other.cursor)

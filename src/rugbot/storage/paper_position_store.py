@@ -401,4 +401,28 @@ def _reject_json_constant(value: str) -> None:
     raise PaperPositionStoreError.invalid_field(value)
 
 
-__all__ = ["PaperPositionStore", "PaperPositionStoreError"]
+def paper_position_state_from_json(payload: object) -> PaperPositionState:
+    """Decode and strictly validate one persisted paper position snapshot."""
+
+    return _position_from_json(payload)
+
+
+def paper_position_state_to_json(state: PaperPositionState) -> dict[str, object]:
+    """Encode one strictly validated paper position snapshot."""
+
+    return _position_to_json(_validate_state(state))
+
+
+def validate_paper_position_state(state: object) -> PaperPositionState:
+    """Validate one paper position snapshot."""
+
+    return _validate_state(state)
+
+
+__all__ = [
+    "PaperPositionStore",
+    "PaperPositionStoreError",
+    "paper_position_state_from_json",
+    "paper_position_state_to_json",
+    "validate_paper_position_state",
+]

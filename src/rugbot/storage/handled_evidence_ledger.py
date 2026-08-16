@@ -172,26 +172,45 @@ class JsonlHandledEvidenceLedger:
 
 
 def _encode_line(identity: ObservationIdentity) -> bytes:
-    payload = {
-        "source_id": identity[0],
-        "slot": identity[1],
-        "commitment": identity[2],
-        "canonical_status": identity[3],
-        "signature": _encode_bytes(identity[4]),
-        "event_ordinal": identity[5],
-        "account_write_version": identity[6],
-        "account_pubkey": _encode_bytes(identity[7]),
-        "account_owner_program_id": _encode_bytes(identity[8]),
-        "raw_transaction_format": identity[9],
-        "source_update_kind": identity[10],
-        "raw_source_status": identity[11],
-        "raw_source_payload_hash": identity[12],
-        "raw_transaction_hash": identity[13],
-        "raw_account_data_hash": identity[14],
-    }
+    payload = handled_identity_to_json(identity)
     return (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode(
         "utf-8"
     )
+
+
+def handled_identity_to_json(identity: ObservationIdentity) -> dict[str, object]:
+    """Return the strict, raw-UUID-free JSON representation of an identity."""
+
+    validated = _validate_identity(identity)
+    return {
+        "source_id": validated[0],
+        "slot": validated[1],
+        "commitment": validated[2],
+        "canonical_status": validated[3],
+        "signature": _encode_bytes(validated[4]),
+        "event_ordinal": validated[5],
+        "account_write_version": validated[6],
+        "account_pubkey": _encode_bytes(validated[7]),
+        "account_owner_program_id": _encode_bytes(validated[8]),
+        "raw_transaction_format": validated[9],
+        "source_update_kind": validated[10],
+        "raw_source_status": validated[11],
+        "raw_source_payload_hash": validated[12],
+        "raw_transaction_hash": validated[13],
+        "raw_account_data_hash": validated[14],
+    }
+
+
+def handled_identity_from_json(payload: object) -> ObservationIdentity:
+    """Decode and validate one canonical handled-evidence identity."""
+
+    return _identity_from_json(payload)
+
+
+def validate_handled_identity(identity: object) -> ObservationIdentity:
+    """Validate one canonical handled-evidence identity."""
+
+    return _validate_identity(identity)
 
 
 def _identity_from_json(payload: object) -> ObservationIdentity:
@@ -365,4 +384,7 @@ __all__ = [
     "HandledEvidenceLedger",
     "HandledEvidenceLedgerError",
     "JsonlHandledEvidenceLedger",
+    "handled_identity_from_json",
+    "handled_identity_to_json",
+    "validate_handled_identity",
 ]

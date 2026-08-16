@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, Protocol, TypeAlias
 
 from rugbot.decision.consolidation_protection import (
     ConsolidationResult,
@@ -41,7 +41,6 @@ from rugbot.runtime.config import CoreSniperConfig
 from rugbot.runtime.config import ExecutionMode as SniperMode
 from rugbot.runtime.matcher import match_launch_target
 from rugbot.storage.paper_position_store import (
-    PaperPositionStore,
     PaperPositionStoreError,
 )
 
@@ -82,6 +81,24 @@ PositionPollResolver: TypeAlias = Callable[
     | None
     | Awaitable[PositionMarketEvidence | AbstainResult | None],
 ]
+
+
+class PositionStore(Protocol):
+    """Minimal durable position contract shared by JSON and SQLite stores."""
+
+    def read_all(self) -> tuple[PaperPositionState, ...]:
+        """Read all persisted positions."""
+
+    def get(self, market_id: str) -> PaperPositionState | None:
+        """Read one persisted position."""
+
+    def save(self, state: PaperPositionState) -> None:
+        """Persist one position."""
+
+    def remove(self, market_id: str) -> bool:
+        """Remove one position."""
+
+
 ConsolidationSignalResolver: TypeAlias = Callable[
     [RawChainObservation, PaperPositionState], ConsolidationResult
 ]
@@ -124,7 +141,7 @@ class WatchSnipeHandler:
     position_evidence_resolver: PositionEvidenceResolver | None = None
     consolidation_signal_resolver: ConsolidationSignalResolver | None = None
     execution_port_resolver: ExecutionPortResolver | None = None
-    position_store: PaperPositionStore | None = None
+    position_store: PositionStore | None = None
     consecutive_losses: int = field(default=0, init=False)
     auto_buy_paused: bool = field(default=False, init=False)
     _last_buy_slot: int | None = field(default=None, init=False, repr=False)

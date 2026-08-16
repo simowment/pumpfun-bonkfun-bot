@@ -96,7 +96,7 @@ execution:
             self.assertEqual(len(first.candidates), 1)
             self.assertFalse(first.receipts[0].would_submit_transaction)
             self.assertTrue((state_dir / "observations.jsonl").is_file())
-            self.assertTrue((state_dir / "handled.jsonl").is_file())
+            self.assertTrue((state_dir / "state.sqlite3").is_file())
 
             second_transport = _FakeTransport(
                 {

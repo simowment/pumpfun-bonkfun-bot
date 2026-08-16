@@ -14,6 +14,12 @@ implementation is not ready for live execution or for claiming that every
 displayed filter is enforced. The core delivery remains observe/paper only
 until the blocking issues below are resolved.
 
+The runtime storage boundary is now deliberately small: immutable raw
+observations stay in JSONL, while SQLite stores checkpoints, handled canonical
+identities, and paper positions in one local database. There is no migration or
+schema-version compatibility layer; a new state directory starts a fresh
+database.
+
 The most important distinction is between configuration storage and decision
 behavior:
 

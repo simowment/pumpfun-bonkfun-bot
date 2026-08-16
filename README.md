@@ -162,10 +162,13 @@ offline replay and online inspection cannot diverge.
 
 [`watch.yaml`](watch.yaml) contains the fixed quote size and observe/paper
 mode; its wallet is used when neither `--wallet` nor `--portfolio` is given.
-The watcher persists raw observations and handled identities under
-`.state/watch` for a single wallet, or under the per-wallet portfolio paths
-shown above. Restart uses that state and does not replay handled evidence. It
-detects pinned Pump
+The watcher persists immutable raw observations in
+`.state/watch/observations.jsonl` and derived restart state in
+`.state/watch/state.sqlite3` for a single wallet, or under the per-wallet
+portfolio paths shown above. SQLite stores checkpoints, handled canonical
+identities, and paper positions; raw observations remain re-decodable JSONL.
+Restart uses that state and does not replay handled evidence. Existing legacy
+JSON state files are not imported automatically. It detects pinned Pump
 `create_v2` launches and emits block-position 0/1 candidates without signing or
 submitting transactions.
 
@@ -213,7 +216,7 @@ current Pump fee-recipient requirements documented in the
 - `src/rugbot/decision`: matching, sizing, timing, and exits.
 - `src/rugbot/runtime`: shared observation loop and wallet watch mode.
 - `src/rugbot/backtest`: historical calibration and evaluation.
-- `src/rugbot/storage`: immutable JSONL evidence and handled ledger.
+- `src/rugbot/storage`: immutable JSONL evidence and the SQLite derived-state store.
 - `fixtures`: finalized protocol and backtest evidence.
 - `learning-examples`: only the small scripts still useful for core manual checks.
 

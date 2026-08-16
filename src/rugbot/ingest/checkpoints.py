@@ -1,9 +1,12 @@
 """Durable checkpoint storage for source streams."""
 
+from __future__ import annotations
+
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import cast
 
 CHECKPOINT_STORE_SCHEMA_VERSION = "source-checkpoints-v1"
 _STORE_KEYS = {"schema_version", "checkpoints"}
@@ -35,6 +38,30 @@ class SourceCheckpoint:
 
 class CheckpointStoreError(ValueError):
     """Raised when checkpoint state is malformed or unsupported."""
+
+    @classmethod
+    def read_failed(cls) -> CheckpointStoreError:
+        """Build an error for unreadable structured checkpoint state."""
+
+        return cls("checkpoint store could not be read")
+
+    @classmethod
+    def write_failed(cls) -> CheckpointStoreError:
+        """Build an error for unwritable structured checkpoint state."""
+
+        return cls("checkpoint store could not be written")
+
+    @classmethod
+    def malformed_record(cls) -> CheckpointStoreError:
+        """Build an error for a malformed structured checkpoint row."""
+
+        return cls("checkpoint record is malformed")
+
+    @classmethod
+    def invalid_source_id(cls) -> CheckpointStoreError:
+        """Build an error for an invalid source identifier."""
+
+        return cls(_SOURCE_ID_INVALID)
 
 
 class JsonCheckpointStore:
@@ -237,3 +264,12 @@ def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 def _store_error(message: str) -> CheckpointStoreError:
     return CheckpointStoreError(message)
+
+
+def validate_source_checkpoint(checkpoint: object) -> SourceCheckpoint:
+    """Validate one checkpoint for a structured durable store."""
+
+    checkpoint_error = _checkpoint_error(checkpoint)
+    if checkpoint_error is not None:
+        raise CheckpointStoreError(checkpoint_error)
+    return cast("SourceCheckpoint", checkpoint)

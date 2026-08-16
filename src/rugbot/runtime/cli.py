@@ -15,7 +15,6 @@ from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.execution.live import LivePumpExecutionPort
 from rugbot.execution.observe import ObserveExecutionPort
 from rugbot.execution.paper import PaperExecutionPort
-from rugbot.ingest.checkpoints import JsonCheckpointStore
 from rugbot.ingest.observation_pipeline import DurableObservationIngestor
 from rugbot.ingest.pump_create_observation import (
     decode_pump_create_v2_observation,
@@ -47,14 +46,11 @@ from rugbot.runtime.watch import (
     WatchSnipeCandidate,
     WatchSnipeHandler,
 )
-from rugbot.storage.handled_evidence_ledger import (
-    JsonlHandledEvidenceLedger,
-)
 from rugbot.storage.jsonl_observation_store import JsonlObservationStore
 from rugbot.storage.paper_position_store import (
-    PaperPositionStore,
     PaperPositionStoreError,
 )
+from rugbot.storage.sqlite_state_store import SqliteStateStore, SqliteStateStoreError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -126,18 +122,24 @@ async def run_watch_cycle(  # noqa: PLR0913
         )
 
     raw_path = state_dir / "observations.jsonl"
-    handled_path = state_dir / "handled.jsonl"
-    position_store = PaperPositionStore(state_dir / "positions.json")
-    source = RpcAddressObservationSource(
-        address=config.target.id,
-        endpoint=endpoint,
-        raw_observation_path=raw_path,
-        handled_evidence_path=handled_path,
-        max_signatures=MAX_WATCH_TRANSACTIONS,
-        max_transactions=max_transactions,
-        transport=transport,
-    )
     try:
+        state_store = SqliteStateStore(state_dir / "state.sqlite3")
+    except SqliteStateStoreError:
+        return AbstainResult(
+            reason=AbstainReason.UNKNOWN_PROTOCOL_STATE,
+            message="SQLite watcher state could not be opened",
+            as_of_slot=-1,
+        )
+    try:
+        source = RpcAddressObservationSource(
+            address=config.target.id,
+            endpoint=endpoint,
+            raw_observation_path=raw_path,
+            handled_ledger=state_store,
+            max_signatures=MAX_WATCH_TRANSACTIONS,
+            max_transactions=max_transactions,
+            transport=transport,
+        )
         handler = WatchSnipeHandler(
             config=config,
             resolver=decode_pump_create_v2_observation,
@@ -165,10 +167,42 @@ async def run_watch_cycle(  # noqa: PLR0913
                 )
             ),
             position_store=(
-                position_store
+                state_store
                 if config.execution.mode in (ExecutionMode.PAPER, ExecutionMode.LIVE)
                 else None
             ),
+        )
+        loop = SharedObservationLoop(
+            DurableObservationIngestor(
+                observation_store=JsonlObservationStore(raw_path),
+                checkpoint_writer=state_store,
+            ),
+            state_store,
+        )
+        report = await loop.run_once(source=source, handler=handler)
+        if (
+            report.abstention is None
+            and market is not None
+            and config.execution.mode in (ExecutionMode.PAPER, ExecutionMode.LIVE)
+        ):
+            poll_slot = await market.finalized_slot()
+            if isinstance(poll_slot, AbstainResult):
+                report = replace(report, abstention=poll_slot)
+            else:
+                poll_error = await handler.poll_open_positions(
+                    lambda position, as_of_slot: market.position_evidence_at_slot(
+                        position,
+                        as_of_slot=as_of_slot,
+                        entry_quote_lamports=config.execution.quote_size_lamports,
+                    ),
+                    as_of_slot=poll_slot,
+                )
+                if poll_error is not None:
+                    report = replace(report, abstention=poll_error)
+        return WatchCycleResult(
+            report=report,
+            candidates=tuple(handler.candidates),
+            receipts=tuple(handler.receipts),
         )
     except (PaperPositionStoreError, ValueError):
         return AbstainResult(
@@ -176,38 +210,8 @@ async def run_watch_cycle(  # noqa: PLR0913
             message="paper position state is malformed",
             as_of_slot=-1,
         )
-    loop = SharedObservationLoop(
-        DurableObservationIngestor(
-            observation_store=JsonlObservationStore(raw_path),
-            checkpoint_writer=JsonCheckpointStore(state_dir / "checkpoints.json"),
-        ),
-        JsonlHandledEvidenceLedger(handled_path),
-    )
-    report = await loop.run_once(source=source, handler=handler)
-    if (
-        report.abstention is None
-        and market is not None
-        and config.execution.mode in (ExecutionMode.PAPER, ExecutionMode.LIVE)
-    ):
-        poll_slot = await market.finalized_slot()
-        if isinstance(poll_slot, AbstainResult):
-            report = replace(report, abstention=poll_slot)
-        else:
-            poll_error = await handler.poll_open_positions(
-                lambda position, as_of_slot: market.position_evidence_at_slot(
-                    position,
-                    as_of_slot=as_of_slot,
-                    entry_quote_lamports=config.execution.quote_size_lamports,
-                ),
-                as_of_slot=poll_slot,
-            )
-            if poll_error is not None:
-                report = replace(report, abstention=poll_error)
-    return WatchCycleResult(
-        report=report,
-        candidates=tuple(handler.candidates),
-        receipts=tuple(handler.receipts),
-    )
+    finally:
+        state_store.close()
 
 
 async def run_wallet_intelligence_cycle(  # noqa: PLR0913

@@ -16,9 +16,6 @@ from rugbot.ingest.rpc_observer import (
     AddressHistoryCursor,
     observe_address,
 )
-from rugbot.storage.handled_evidence_ledger import (
-    JsonlHandledEvidenceLedger,
-)
 from rugbot.storage.jsonl_observation_store import (
     JsonlObservationStore,
     observation_identity,
@@ -85,7 +82,7 @@ class RpcAddressObservationSource:
     max_pages: int = 10
     cursor: AddressHistoryCursor | None = None
     raw_observation_path: Path | None = None
-    handled_evidence_path: Path | None = None
+    handled_ledger: HandledEvidenceLedger | None = None
     transport: RpcHttpTransport | None = None
     _boot_id: UUID = field(default_factory=uuid4, init=False)
     _receive_sequence: int = field(default=0, init=False)
@@ -96,7 +93,7 @@ class RpcAddressObservationSource:
         """Bind identity and restore only handled durable transaction evidence."""
 
         self.source_id = _address_bound_source_id(self.source_id, self.address)
-        if (self.raw_observation_path is None) != (self.handled_evidence_path is None):
+        if (self.raw_observation_path is None) != (self.handled_ledger is None):
             self._startup_abstention = _abstain(
                 AbstainReason.UNKNOWN_PROTOCOL_STATE,
                 "durable source paths must be configured as a pair",
@@ -108,7 +105,7 @@ class RpcAddressObservationSource:
             try:
                 restored_cursor = _restore_cursor(
                     path=self.raw_observation_path,
-                    handled_path=self.handled_evidence_path,
+                    handled_ledger=self.handled_ledger,
                     address=self.address,
                     source_id=self.source_id,
                 )
@@ -194,17 +191,16 @@ class RpcAddressObservationSource:
 def _restore_cursor(
     *,
     path: Path,
-    handled_path: Path | None,
+    handled_ledger: HandledEvidenceLedger | None,
     address: str,
     source_id: str,
 ) -> AddressHistoryCursor | None:
     """Restore the newest finalized transaction that was durably handled."""
 
-    if handled_path is None:
+    if handled_ledger is None:
         raise _InvalidDurableCursorStateError
 
     observations = JsonlObservationStore(path).read_all()
-    handled_ledger = JsonlHandledEvidenceLedger(handled_path)
     candidates = [
         observation
         for observation in observations
