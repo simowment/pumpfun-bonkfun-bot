@@ -62,10 +62,11 @@ uv run python -m rugbot.backtest.cli \
   --max-transactions 1000 --pretty
 ```
 
-This command reports the finalized observations, launches, and executed Pump
-trades that were actually proven. It returns `ABSTAIN` until point-in-time
-entity evidence, protocol/mint account proofs, and completed outcome proofs
-are supplied; it never fabricates a backtest case from incomplete RPC data.
+This command evaluates the typed launch outcomes already present in the fixed
+fixture and reports split metrics. It does not infer operator qualification or
+fabricate cases from incomplete RPC data. The RPC acquisition and qualified
+pipeline still return `ABSTAIN` until point-in-time entity evidence,
+protocol/mint account proofs, and completed outcome proofs are supplied.
 
 Inspect a wallet, linked wallets, wallet-switch candidates, and launch
 positions:
@@ -184,21 +185,10 @@ decision path.
 
 ## Live execution
 
-The watcher can submit Pump bonding-curve buys and sells through the same
-candidate, filter, sizing, and position state path. Live mode is intentionally
-double-gated: set `execution.mode: live` in `watch.yaml`, then explicitly set
-the process flag and signing key in the shell:
-
-```powershell
-$env:RUGBOT_ENABLE_LIVE = "1"
-$env:SOLANA_PRIVATE_KEY = "..."
-uv run rug_watch --wallet CREATOR_WALLET --interval-seconds 2
-```
-
-The live adapter refreshes the curve and mint owner before each transaction,
-uses integer slippage bounds, confirms the signature, and records the fill.
-The default sample remains `observe`; never enable live mode until the strategy
-has been validated with paper and out-of-sample replay on a separate wallet.
+Live execution is disabled in the core watcher. The configuration parser rejects
+`execution.mode: live` until the paper simulator and out-of-sample evaluation
+have proven the strategy. The legacy live adapter remains isolated as a
+reference implementation and is not part of the supported development path.
 
 The core filters live in `watch.yaml`: `max_market_cap_quote_base_units`,
 `max_token_age_minutes`, `buy_only_once`, `max_consecutive_losses`, and

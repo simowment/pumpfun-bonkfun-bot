@@ -1,6 +1,7 @@
 """Tests for the minimal Pump wallet watcher configuration."""
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,8 +13,11 @@ from rugbot.ingest.pump_create_fixture_decode import (
 from rugbot.runtime.config import (
     CoreSniperConfig,
     SniperConfigError,
+    load_sniper_config,
+    load_sniper_document,
     parse_sniper_config,
     parse_wallet_portfolio,
+    save_sniper_document,
 )
 from rugbot.runtime.matcher import match_launch_target
 
@@ -137,6 +141,26 @@ class CoreSniperConfigTests(unittest.TestCase):
         self.assertEqual(config.strategy.max_creator_pairs, 10)
         self.assertEqual(config.strategy.max_entry_transaction_index, 0)
         self.assertTrue(config.strategy.require_bundle_match)
+
+    def test_config_document_round_trip_rejects_duplicate_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "watch.yaml"
+            path.write_text(_yaml(), encoding="utf-8")
+            document = load_sniper_document(path)
+            document["strategy"] = {"max_entry_transaction_index": 0}
+
+            save_sniper_document(path, document)
+
+            self.assertEqual(
+                load_sniper_config(path).strategy.max_entry_transaction_index,
+                0,
+            )
+            path.write_text(
+                _yaml() + '\ntarget:\n  kind: wallet\n  id: "' + ZERO_ADDRESS + '"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(SniperConfigError):
+                load_sniper_document(path)
 
 
 def _launch() -> LaunchCreatedV2:

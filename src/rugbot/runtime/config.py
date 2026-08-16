@@ -4,6 +4,8 @@
 # loader derives from SafeLoader and adds only duplicate-key rejection.
 # ruff: noqa: S105, S506, TRY003
 
+import os
+import tempfile
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -148,6 +150,44 @@ def load_sniper_config(path: Path) -> CoreSniperConfig:
     return parse_sniper_config(text)
 
 
+def load_sniper_document(path: Path) -> dict[str, Any]:
+    """Load the raw watcher mapping through the strict YAML loader."""
+
+    try:
+        text = path.read_text(encoding="utf-8")
+        document = yaml.load(text, Loader=_StrictLoader)
+    except (OSError, yaml.YAMLError, TypeError, SniperConfigError) as error:
+        raise SniperConfigError(f"cannot read watcher config: {path}") from error
+    if type(document) is not dict:
+        raise SniperConfigError("watcher config must be one mapping")
+    return document
+
+
+def save_sniper_document(path: Path, document: dict[str, Any]) -> CoreSniperConfig:
+    """Validate and atomically replace one watcher YAML document."""
+
+    if type(document) is not dict:
+        raise SniperConfigError("watcher config must be one mapping")
+    try:
+        candidate = yaml.safe_dump(document, sort_keys=False)
+        config = parse_sniper_config(candidate)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            delete=False,
+            dir=path.parent,
+            encoding="utf-8",
+        ) as temporary:
+            temporary.write(candidate)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_path = Path(temporary.name)
+        temporary_path.replace(path)
+    except (OSError, TypeError, ValueError, yaml.YAMLError) as error:
+        raise SniperConfigError("watcher config was not saved") from error
+    return config
+
+
 def load_wallet_portfolio(path: Path) -> WalletPortfolio:
     """Load a strict YAML wallet portfolio document."""
 
@@ -235,6 +275,10 @@ def _parse_execution(raw: object) -> SniperExecution:
     quote_size = mapping["quote_size_lamports"]
     if not isinstance(mode, str) or mode not in {item.value for item in ExecutionMode}:
         raise SniperConfigError("execution.mode must be observe, paper, or live")
+    if mode == ExecutionMode.LIVE.value:
+        raise SniperConfigError(
+            "execution.mode live is disabled until paper and out-of-sample evidence"
+        )
     if type(quote_size) is not int or quote_size <= 0:
         raise SniperConfigError(
             "execution.quote_size_lamports must be a positive integer"

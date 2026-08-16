@@ -16,6 +16,7 @@ from rugbot.backtest.dataset import (
     FinalizedBacktestResult,
     build_finalized_dataset,
 )
+from rugbot.backtest.evaluation import build_backtest_report
 from rugbot.backtest.finalized_trade_builder import (
     build_finalized_trades_from_observations,
 )
@@ -42,7 +43,13 @@ if TYPE_CHECKING:
 
 
 def run_backtest_file(path: Path) -> BacktestReport | AbstainResult:
-    """Validate one fixed-shape document and reject unqualified evaluation."""
+    """Validate and evaluate one fixed-shape backtest artifact.
+
+    The input contains already-proven, typed launch outcomes. Qualification is
+    deliberately not inferred here; RPC acquisition and the qualified pipeline
+    remain separate entry points and still abstain when their typed evidence
+    is incomplete.
+    """
 
     document = load_backtest_document(path)
     if isinstance(document, AbstainResult):
@@ -86,13 +93,9 @@ def run_backtest_file(path: Path) -> BacktestReport | AbstainResult:
                 message="raw observation is not canonical backtest evidence",
                 as_of_slot=observation.slot,
             )
-    return AbstainResult(
-        reason=AbstainReason.MISSING_FEATURE,
-        message=(
-            "fixed-shape backtest document lacks typed qualification evidence; "
-            "completed outcomes and wallet entity evidence are required"
-        ),
-        as_of_slot=document.config.as_of_slot,
+    return build_backtest_report(
+        launches=document.launches,
+        config=document.config,
     )
 
 

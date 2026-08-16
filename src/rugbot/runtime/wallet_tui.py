@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import argparse
 import os
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
-import yaml
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, VerticalScroll
@@ -31,7 +29,8 @@ from rugbot.runtime.config import (
     SniperConfigError,
     StrategyFilterSettings,
     load_sniper_config,
-    parse_sniper_config,
+    load_sniper_document,
+    save_sniper_document,
 )
 from rugbot.runtime.wallet_intelligence import (
     WalletIntelligenceReport,
@@ -61,7 +60,7 @@ class WalletIntelApp(App[None]):
     """Display one wallet intelligence report and refresh it on demand."""
 
     TITLE = "rugbot / wallet-intel"
-    SUB_TITLE = "finalized / read-only"
+    SUB_TITLE = "finalized / config editor"
     CSS = """
     Screen {
         background: #0e0f11;
@@ -247,6 +246,10 @@ class WalletIntelApp(App[None]):
     .settings-input {
         width: 28;
     }
+    .settings-note {
+        color: #d3a96b;
+        margin-bottom: 1;
+    }
     #settings-save {
         width: 12;
         margin-top: 1;
@@ -398,6 +401,11 @@ class WalletIntelApp(App[None]):
                         id="settings-path",
                         classes="section-title",
                     )
+                    yield Static(
+                        "operator evidence gates are stored; missing evidence abstains",
+                        id="settings-note",
+                        classes="settings-note",
+                    )
                     yield from self._settings_inputs()
                     yield Button("Save", id="settings-save", variant="primary")
                     yield Static("--", id="settings-status")
@@ -413,7 +421,7 @@ class WalletIntelApp(App[None]):
             ("minimum win rate (ppm)", "min-win-rate", "500000"),
             ("maximum buys / hour", "max-buys-hour", "1"),
             ("maximum entry index", "max-entry-index", "1"),
-            ("maximum entry market cap", "max-entry-mc", "0"),
+            ("maximum market cap (quote units)", "max-entry-mc", "0"),
             ("entry deviation (ppm)", "entry-deviation", "250000"),
         )
         rows: list[object] = []
@@ -534,7 +542,7 @@ class WalletIntelApp(App[None]):
             "min-win-rate": settings.min_win_rate_ppm,
             "max-buys-hour": settings.max_buys_per_hour,
             "max-entry-index": settings.max_entry_transaction_index,
-            "max-entry-mc": settings.max_entry_market_cap_quote_base_units,
+            "max-entry-mc": config.rules.max_market_cap_quote_base_units,
             "entry-deviation": settings.max_entry_deviation_ppm,
         }
         for input_id, value in values.items():
@@ -558,6 +566,11 @@ class WalletIntelApp(App[None]):
 
         status = self.query_one("#settings-status", Static)
         try:
+            current_config = load_sniper_config(self._config_path)
+            max_market_cap = _optional_setting_int(
+                self.query_one("#max-entry-mc", Input).value,
+                "maximum market cap",
+            )
             settings = StrategyFilterSettings(
                 min_volume_usd_micro=_optional_setting_int(
                     self.query_one("#min-volume", Input).value,
@@ -583,9 +596,8 @@ class WalletIntelApp(App[None]):
                     self.query_one("#max-entry-index", Input).value,
                     "maximum entry index",
                 ),
-                max_entry_market_cap_quote_base_units=_optional_setting_int(
-                    self.query_one("#max-entry-mc", Input).value,
-                    "maximum entry market cap",
+                max_entry_market_cap_quote_base_units=(
+                    current_config.strategy.max_entry_market_cap_quote_base_units
                 ),
                 max_entry_deviation_ppm=_setting_int(
                     self.query_one("#entry-deviation", Input).value,
@@ -599,21 +611,21 @@ class WalletIntelApp(App[None]):
                     "#require-zero-balance", Checkbox
                 ).value,
             )
-            document = yaml.safe_load(self._config_path.read_text(encoding="utf-8"))
-            if type(document) is not dict:
-                status.add_class("abstain")
-                status.update("ABSTAIN  watcher config must be one mapping")
-                return
+            document = load_sniper_document(self._config_path)
             document["strategy"] = _strategy_to_yaml(settings)
-            candidate = yaml.safe_dump(document, sort_keys=False)
-            parse_sniper_config(candidate)
-            _atomic_write(self._config_path, candidate)
+            rules = document.setdefault("rules", {})
+            if type(rules) is not dict:
+                status.add_class("abstain")
+                status.update("ABSTAIN  watcher config.rules must be one mapping")
+                return
+            rules["max_market_cap_quote_base_units"] = max_market_cap
+            save_sniper_document(self._config_path, document)
         except (OSError, TypeError, ValueError, SniperConfigError) as error:
             status.add_class("abstain")
             status.update(f"ABSTAIN  settings not saved: {error}")
             return
         status.remove_class("abstain")
-        status.update("saved  watcher will use these settings on its next cycle")
+        status.update("saved  restart rug_watch to apply the new config")
 
     async def _scan_and_render(self, wallet: str) -> None:
         """Scan one wallet and update the UI on the Textual event loop."""
@@ -1013,21 +1025,6 @@ def _strategy_to_yaml(settings: StrategyFilterSettings) -> dict[str, object]:
         "require_double_signature": settings.require_double_signature,
         "require_prior_zero_balance": settings.require_prior_zero_balance,
     }
-
-
-def _atomic_write(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        delete=False,
-        dir=path.parent,
-        encoding="utf-8",
-    ) as temporary:
-        temporary.write(text)
-        temporary.flush()
-        os.fsync(temporary.fileno())
-        temporary_path = Path(temporary.name)
-    temporary_path.replace(path)
 
 
 def format_sol(lamports: int) -> str:

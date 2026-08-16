@@ -23,14 +23,12 @@ FIXTURE = Path("fixtures/backtest/demo.json")
 class BacktestCliTests(unittest.TestCase):
     """Verify loading, evaluation, output, and fail-closed behavior."""
 
-    def test_demo_fixture_abstains_without_typed_qualification_evidence(self) -> None:
+    def test_demo_fixture_returns_a_leakage_safe_report(self) -> None:
         result = run_backtest_file(FIXTURE)
 
-        if isinstance(result, AbstainResult):
-            self.assertIn("typed qualification evidence", result.message)
-            self.assertEqual(result.reason.value, "missing_feature")
-        else:
-            self.fail("expected incomplete qualification to abstain")
+        self.assertNotIsInstance(result, AbstainResult)
+        self.assertEqual(result.source_launch_count, 3)
+        self.assertEqual(result.reason_codes, ("leakage_safe_backtest_report_built",))
 
     def test_cli_prints_machine_readable_abstention(self) -> None:
         output = io.StringIO()
@@ -38,10 +36,10 @@ class BacktestCliTests(unittest.TestCase):
         with redirect_stdout(output):
             exit_code = main(["--input", str(FIXTURE)])
 
-        self.assertEqual(exit_code, 1)
+        self.assertEqual(exit_code, 0)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["status"], "abstain")
-        self.assertEqual(payload["reason"], "missing_feature")
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["report"]["source_launch_count"], 3)
 
     def test_cli_does_not_treat_unqualified_run_result_as_success(self) -> None:
         qualification = OperatorQualification(

@@ -241,12 +241,19 @@ decision functions, execution ports, and a small composition root.
 
 ## Verification
 
-- Focused config/watch/TUI run: **42 passed, 1 failed**.
-- The failure is the pre-existing contract mismatch where the test expects
-  `live` mode parsing to fail, while the parser accepts it and the CLI defers
-  the gate.
-- Focused Ruff and formatting checks passed before the aggregate command was
-  interrupted by that expected test failure.
+### Follow-up completed after this review
+
+- The documented fixed-shape fixture command now evaluates its typed launch
+  outcomes and emits train/validation/test/stress metrics. It still does not
+  infer operator qualification or fabricate RPC cases.
+- TUI document writes now use the strict duplicate-key loader and the shared
+  atomic config writer. The status explicitly says to restart `rug_watch`.
+- `execution.mode: live` is rejected at configuration parsing time while the
+  core remains observe/paper only.
+
+- Focused config/backtest/TUI run: **20 passed**.
+- Full `tests/adverse_intel` run: **933 passed, 250 subtests passed**.
+- Focused Ruff and formatting checks pass for the changed files.
 - No live transaction was run.
 
 ## Required Order Before Live Authorization
