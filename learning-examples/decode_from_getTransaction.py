@@ -40,7 +40,11 @@ def decode_create_instruction(data):
         results.append(string_data)
         offset += length
 
-    creator = base58.b58encode(data[offset : offset + 32]).decode("utf-8") if offset + 32 <= len(data) else None
+    creator = (
+        base58.b58encode(data[offset : offset + 32]).decode("utf-8")
+        if offset + 32 <= len(data)
+        else None
+    )
 
     return {
         "name": results[0],
@@ -67,7 +71,11 @@ def decode_create_v2_instruction(data):
         results.append(string_data)
         offset += length
 
-    creator = base58.b58encode(data[offset : offset + 32]).decode("utf-8") if offset + 32 <= len(data) else None
+    creator = (
+        base58.b58encode(data[offset : offset + 32]).decode("utf-8")
+        if offset + 32 <= len(data)
+        else None
+    )
     offset += 32
 
     is_mayhem_mode = bool(data[offset]) if offset < len(data) else False

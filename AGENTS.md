@@ -16,7 +16,7 @@ If you add or update dependencies:
 1. Use `uv add <package>` to add new dependencies.
 2. The `uv.lock` file will be automatically updated.
 3. Restart any running bots after dependency changes.
-4. Verify compatibility with Python 3.9+ as specified in the project.
+4. Verify compatibility with Python 3.11+ as specified in the project.
 
 ## 3. Coding Conventions
 
@@ -108,6 +108,61 @@ When adding features:
 | `pump_bot`                                         | Run the main bot                  |
 | `uv run learning-examples/manual_buy.py`          | Test manual buy                   |
 | `uv run learning-examples/manual_sell.py`         | Test manual sell                  |
+
+---
+
+## 11. Adverse Intelligence System Invariants
+
+These rules are non-negotiable for any work on the adverse insider sell
+intelligence system described in `TODO_RUG_RISK_SYSTEM.md`.
+
+1. Unknown protocol state must return `ABSTAIN`.
+2. Never infer an account layout when no pinned decoder exists.
+3. Never use `float` for financial amounts, reserves, fees, or PnL.
+4. Pure quote, feature, selector, timing, sizing, and scoring functions may not
+   call RPC or databases.
+5. Every feature, label, model input, and decision must have an `as_of_slot`.
+6. Raw observations are immutable and must remain re-decodable.
+7. Observe and paper execution processes may not load signing keys.
+8. Every decoder or quote-engine change requires golden finalized fixtures.
+9. No historical feature may include evidence discovered after its `as_of_slot`.
+10. A model error, decoder mismatch, missing feature, or stale state results in
+    abstention, not fallback trading.
+
+---
+
+## 12. Core-Only Delivery Policy
+
+This is a private solo project. Optimize for the smallest reliable system that
+answers the core question: can the system identify a known operator pattern and
+demonstrate a fully executable, net-profitable exit in paper/backtest mode?
+
+1. Do not add backward-compatibility layers, migration paths, deprecation
+   shims, version negotiation, version overrides, or new application/API/
+   schema/artifact versioning. Do not preserve old interfaces unless the user
+   explicitly requests it.
+2. Do not add ad hoc scripts, one-off JSON contracts, improvised decoders,
+   fake readiness evidence, or parallel implementations. Use the canonical
+   typed contracts and fixtures already in the repository.
+3. Prioritize only core functionality: read-only observation ingestion,
+   finalized replay, point-in-time wallet/entity tracking, operator behavior
+   features, adverse-event attribution, executable quote simulation, paper
+   entry/exit decisions, leakage-safe backtesting, and fail-closed safety
+   gates.
+4. Defer dashboards, UI, deployment automation, multi-provider abstractions,
+   optional low-latency transports, generalized plugin systems, broad
+   refactors, and operational polish unless they are required to validate a
+   core decision path.
+5. Every agent must state the concrete core behavior it enables, keep changes
+   within a disjoint scope, add focused tests, and stop when the acceptance
+   behavior is proven. Do not expand a task merely because a more general
+   architecture would be interesting.
+6. Existing code may contain strict identifiers needed to reject mismatched
+   evidence. Treat them as fixed validation constants; do not extend them into
+   compatibility or version-management systems.
+7. Never run live trading while developing this system. Observe and paper
+   execution remain the only permitted execution modes until the user gives a
+   separate explicit authorization after out-of-sample evidence exists.
 
 ---
 

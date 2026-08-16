@@ -1,0 +1,1 @@
+"""Leakage-safe backtest contracts."""

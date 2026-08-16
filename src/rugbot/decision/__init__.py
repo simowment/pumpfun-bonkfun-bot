@@ -1,0 +1,41 @@
+"""Pure decision logic for adverse-intel entry, sizing, and exit."""
+
+from rugbot.decision.playbook_rules import (
+    BuyTheDipLevel,
+    EntryRuleAction,
+    EntryRuleDecision,
+    EntryRuleInput,
+    EntryRuleState,
+    ExitRuleAction,
+    ExitRuleDecision,
+    ExitRuleInput,
+    ExitRuleState,
+    PlaybookRules,
+    RootLossCounterState,
+    SellLevel,
+    SellRules,
+    TrailingStopLevel,
+    advance_root_loss_counter,
+    evaluate_entry_rules,
+    evaluate_exit_rules,
+)
+
+__all__ = [
+    "BuyTheDipLevel",
+    "EntryRuleAction",
+    "EntryRuleDecision",
+    "EntryRuleInput",
+    "EntryRuleState",
+    "ExitRuleAction",
+    "ExitRuleDecision",
+    "ExitRuleInput",
+    "ExitRuleState",
+    "PlaybookRules",
+    "RootLossCounterState",
+    "SellLevel",
+    "SellRules",
+    "TrailingStopLevel",
+    "advance_root_loss_counter",
+    "evaluate_entry_rules",
+    "evaluate_exit_rules",
+]

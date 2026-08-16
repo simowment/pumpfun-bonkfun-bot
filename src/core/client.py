@@ -70,9 +70,14 @@ class SolanaClient:
         self._client = None
         self._cached_blockhash: Hash | None = None
         self._blockhash_lock = asyncio.Lock()
-        self._blockhash_updater_task = asyncio.create_task(
-            self.start_blockhash_updater()
-        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._blockhash_updater_task = None
+        else:
+            self._blockhash_updater_task = loop.create_task(
+                self.start_blockhash_updater()
+            )
         self._rate_limiter = TokenBucketRateLimiter(max_rps=max_rps)
         self._session: aiohttp.ClientSession | None = None
         self._session_lock = asyncio.Lock()
@@ -93,7 +98,7 @@ class SolanaClient:
         """Return the most recently cached blockhash."""
         async with self._blockhash_lock:
             if self._cached_blockhash is None:
-                raise RuntimeError("No cached blockhash available yet")
+                self._cached_blockhash = await self.get_latest_blockhash()
             return self._cached_blockhash
 
     async def get_client(self) -> AsyncClient:
@@ -384,9 +389,7 @@ class SolanaClient:
         # Check for transaction execution errors (e.g., MaxLoadedAccountsDataSizeExceeded)
         tx_err = meta.get("err")
         if tx_err:
-            logger.error(
-                f"Transaction {signature[:16]}... failed with error: {tx_err}"
-            )
+            logger.error(f"Transaction {signature[:16]}... failed with error: {tx_err}")
             return None, None
 
         mint_str = str(mint)

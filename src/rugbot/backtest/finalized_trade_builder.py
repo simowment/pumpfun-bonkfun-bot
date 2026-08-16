@@ -19,7 +19,11 @@ from rugbot.backtest.dataset import FinalizedTrade
 from rugbot.domain.amounts import QuoteBaseUnits, Slot, TokenBaseUnits
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.observations import RawChainObservation
-from rugbot.domain.trades import PumpTradeInstructionEvidence, TradeSide
+from rugbot.domain.trades import (
+    PumpSwapTradeInstructionEvidence,
+    PumpTradeInstructionEvidence,
+    TradeSide,
+)
 from rugbot.storage.jsonl_observation_store import observation_identity
 
 TRADE_EVENT_DISCRIMINATOR = bytes([189, 219, 127, 211, 78, 230, 97, 238])
@@ -42,8 +46,17 @@ class PumpTradeEventProof:
     real_token_reserves_base_units: int
     protocol_fee_base_units: int
     creator_fee_base_units: int
+    protocol_fee_basis_points: int
+    creator_fee_basis_points: int
     cashback_base_units: int
     encoded_event: bytes
+    buyback_fee_basis_points: int = 0
+    buyback_fee_base_units: int = 0
+    shareholders: tuple[tuple[str, int], ...] = ()
+    quote_mint: str = ""
+    quote_amount_base_units: int = 0
+    virtual_quote_reserves_base_units: int = 0
+    real_quote_reserves_base_units: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +133,9 @@ def build_finalized_trades_from_observations(
             )
         join_by_key[key] = join
 
+    from rugbot.ingest.pump_swap_trade_observation import (  # noqa: PLC0415
+        decode_pump_swap_trade_observation,
+    )
     from rugbot.ingest.pump_trade_observation import (  # noqa: PLC0415
         decode_pump_trade_observation,
     )
@@ -158,6 +174,34 @@ def build_finalized_trades_from_observations(
             built.append(fill)
             seen_join_keys.add(key)
 
+        decoded_swap = decode_pump_swap_trade_observation(observation)
+        if isinstance(decoded_swap, AbstainResult):
+            return decoded_swap
+        for instruction in decoded_swap:
+            signature = observation.signature
+            if signature is None:
+                return _abstain(
+                    AbstainReason.MISSING_FEATURE,
+                    "decoded Pump AMM trade lacks a signature",
+                    cutoff,
+                )
+            key = (signature, instruction.outer_instruction_index)
+            join = join_by_key.get(key)
+            if join is None:
+                continue
+            fill = build_finalized_pump_swap_trade(
+                observation=observation,
+                instruction=instruction,
+                launch_id=join.launch_id,
+                token_mint=join.token_mint,
+                wallet=join.wallet,
+                as_of_slot=Slot(cutoff),
+            )
+            if isinstance(fill, AbstainResult):
+                return fill
+            built.append(fill)
+            seen_join_keys.add(key)
+
     missing = set(join_by_key).difference(seen_join_keys)
     if missing:
         return _abstain(
@@ -166,6 +210,122 @@ def build_finalized_trades_from_observations(
             cutoff,
         )
     return tuple(built)
+
+
+def build_finalized_pump_swap_trade(
+    *,
+    observation: RawChainObservation,
+    instruction: PumpSwapTradeInstructionEvidence,
+    launch_id: str,
+    token_mint: str,
+    wallet: str,
+    as_of_slot: Slot,
+) -> FinalizedTrade | AbstainResult:
+    """Build one AMM fill from its exact event and instruction join."""
+
+    cutoff = as_of_slot if type(as_of_slot) is int else -1
+    if type(observation) is not RawChainObservation:
+        return _abstain(
+            AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+            "Pump AMM fill observation is malformed",
+            cutoff,
+        )
+    if (
+        observation.commitment != "finalized"
+        or observation.canonical_status != "canonical"
+        or observation.source_update_kind != "transaction"
+        or observation.slot > cutoff
+        or not isinstance(observation.raw_source_payload, bytes)
+        or observation.signature is None
+        or observation.transaction_index is None
+    ):
+        return _abstain(
+            AbstainReason.STALE_STATE,
+            "Pump AMM fill requires finalized transaction evidence",
+            cutoff,
+        )
+    if type(instruction) is not PumpSwapTradeInstructionEvidence:
+        return _abstain(
+            AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+            "Pump AMM instruction proof is malformed",
+            cutoff,
+        )
+    accounts = instruction.account_pubkeys
+    if accounts is None:
+        return _abstain(
+            AbstainReason.MISSING_FEATURE,
+            "Pump AMM instruction account proof is missing",
+            cutoff,
+        )
+    mint = _account_at(accounts, instruction.base_mint_account_index)
+    user = _account_at(accounts, instruction.user_account_index)
+    if mint != token_mint or user != wallet:
+        return _abstain(
+            AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+            "Pump AMM instruction identity does not match its join",
+            cutoff,
+        )
+    from rugbot.ingest.pump_swap_event_observation import (  # noqa: PLC0415
+        decode_pump_swap_events_observation,
+    )
+
+    events = decode_pump_swap_events_observation(observation)
+    if isinstance(events, AbstainResult):
+        return events
+    matching = tuple(
+        event
+        for event in events
+        if event.user == wallet
+        and event.side is instruction.side
+        and event.instruction_name == instruction.instruction_name
+    )
+    if len(matching) != 1:
+        return _abstain(
+            AbstainReason.MISSING_FEATURE,
+            "Pump AMM instruction has no unique finalized event",
+            cutoff,
+        )
+    event = matching[0]
+    amount_matches = instruction.base_amount_base_units is not None and int(
+        instruction.base_amount_base_units
+    ) == int(event.base_amount_base_units)
+    if instruction.instruction_name == "buy_exact_quote_in":
+        amount_matches = instruction.min_base_output_base_units is not None and int(
+            event.base_amount_base_units
+        ) >= int(instruction.min_base_output_base_units)
+    if not amount_matches or int(event.user_quote_amount_base_units) <= 0:
+        return _abstain(
+            AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+            "Pump AMM executed amount does not match its instruction",
+            cutoff,
+        )
+    transaction_fee = _transaction_fee(observation)
+    if isinstance(transaction_fee, AbstainResult):
+        return transaction_fee
+    execution_cost = (
+        transaction_fee
+        + int(event.lp_fee_base_units)
+        + int(event.protocol_fee_base_units)
+        + int(event.creator_fee_base_units)
+    )
+    evidence_root = _evidence_root(observation)
+    return FinalizedTrade(
+        as_of_slot=Slot(cutoff),
+        launch_id=launch_id,
+        token_mint=token_mint,
+        wallet=wallet,
+        side=event.side,
+        slot=Slot(observation.slot),
+        transaction_index=observation.transaction_index,
+        signature=observation.signature,
+        base_amount_base_units=TokenBaseUnits(event.base_amount_base_units),
+        quote_amount_base_units=QuoteBaseUnits(event.user_quote_amount_base_units),
+        execution_cost_quote_base_units=QuoteBaseUnits(execution_cost),
+        evidence_ids=(
+            f"{evidence_root}:pump-amm-trade-event",
+            f"{evidence_root}:transaction-fee",
+        ),
+    )
 
 
 def build_finalized_pump_trade(
@@ -230,6 +390,7 @@ def build_finalized_pump_trade(
         transaction_fee
         + event.protocol_fee_base_units
         + event.creator_fee_base_units
+        + event.buyback_fee_base_units
         - event.cashback_base_units
     )
     if execution_cost < 0:
@@ -266,6 +427,57 @@ def build_finalized_pump_trade(
             f"{evidence_root}:transaction-fee",
         ),
     )
+
+
+def decode_pump_trade_event_proofs(
+    observation: RawChainObservation,
+) -> tuple[tuple[int, PumpTradeEventProof], ...] | AbstainResult:
+    """Decode every pinned Pump ``TradeEvent`` in one finalized observation.
+
+    The returned ordinal is the encounter order of matching ``Program data``
+    log records. It is provenance for trajectory ordering only; it does not
+    replace missing protocol, mint, or account-state proofs.
+    """
+
+    validation = _validate_trade_event_observation(observation)
+    if validation is not None:
+        return validation
+    payload = _load_transaction_payload(observation)
+    if isinstance(payload, AbstainResult):
+        return payload
+    _, event_payloads = payload
+    decoded: list[tuple[int, PumpTradeEventProof]] = []
+    for event_index, event_payload in enumerate(event_payloads):
+        event = _decode_trade_event(event_payload, observation.slot)
+        if isinstance(event, AbstainResult):
+            return event
+        decoded.append((event_index, event))
+    return tuple(decoded)
+
+
+def _validate_trade_event_observation(
+    observation: object,
+) -> AbstainResult | None:
+    if type(observation) is not RawChainObservation:
+        return _abstain(
+            AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+            "Pump TradeEvent observation is malformed",
+            -1,
+        )
+    if (
+        observation.commitment != "finalized"
+        or observation.canonical_status != "canonical"
+        or observation.source_update_kind != "transaction"
+        or not isinstance(observation.raw_source_payload, bytes)
+        or observation.signature is None
+        or observation.transaction_index is None
+    ):
+        return _abstain(
+            AbstainReason.STALE_STATE,
+            "Pump TradeEvent requires finalized transaction evidence",
+            observation.slot,
+        )
+    return None
 
 
 def _validate_inputs(
@@ -490,10 +702,10 @@ def _decode_trade_event(
     real_sol_reserves = reader.read_u64()
     real_token_reserves = reader.read_u64()
     reader.skip_pubkey()
-    reader.skip_u64()
+    protocol_fee_basis_points = reader.read_u64()
     protocol_fee = reader.read_u64()
     reader.skip_pubkey()
-    reader.skip_u64()
+    creator_fee_basis_points = reader.read_u64()
     creator_fee = reader.read_u64()
     reader.skip_bool()
     reader.skip_u64(3)
@@ -502,6 +714,13 @@ def _decode_trade_event(
     reader.skip_bool()
     reader.skip_u64()
     cashback = reader.read_u64()
+    buyback_fee_basis_points = reader.read_u64()
+    buyback_fee = reader.read_u64()
+    shareholders = reader.read_shareholders()
+    quote_mint = reader.read_pubkey()
+    quote_amount = reader.read_u64()
+    virtual_quote_reserves = reader.read_u64()
+    real_quote_reserves = reader.read_u64()
     if reader.error is not None or reader.remaining != 0:
         return _abstain(
             AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
@@ -522,8 +741,17 @@ def _decode_trade_event(
         real_token_reserves_base_units=real_token_reserves,
         protocol_fee_base_units=protocol_fee,
         creator_fee_base_units=creator_fee,
+        protocol_fee_basis_points=protocol_fee_basis_points,
+        creator_fee_basis_points=creator_fee_basis_points,
         cashback_base_units=cashback,
         encoded_event=payload,
+        buyback_fee_basis_points=buyback_fee_basis_points,
+        buyback_fee_base_units=buyback_fee,
+        shareholders=shareholders,
+        quote_mint=quote_mint,
+        quote_amount_base_units=quote_amount,
+        virtual_quote_reserves_base_units=virtual_quote_reserves,
+        real_quote_reserves_base_units=real_quote_reserves,
     )
 
 
@@ -555,6 +783,14 @@ class _EventReader:
         value = self.read_bytes(8)
         return unpack_from("<q", value)[0] if len(value) == 8 else 0
 
+    def read_u16(self) -> int:
+        value = self.read_bytes(2)
+        return unpack_from("<H", value)[0] if len(value) == 2 else 0
+
+    def read_u32(self) -> int:
+        value = self.read_bytes(4)
+        return unpack_from("<I", value)[0] if len(value) == 4 else 0
+
     def read_pubkey(self) -> str:
         value = self.read_bytes(32)
         return base58.b58encode(value).decode("ascii") if len(value) == 32 else ""
@@ -580,6 +816,16 @@ class _EventReader:
             self.error = "event string is not UTF-8"
             return ""
 
+    def read_shareholders(self) -> tuple[tuple[str, int], ...]:
+        count = self.read_u32()
+        if self.error is not None:
+            return ()
+        entry_size = 32 + 2
+        if count > self.remaining // entry_size:
+            self.error = "shareholder vector is truncated"
+            return ()
+        return tuple((self.read_pubkey(), self.read_u16()) for _ in range(count))
+
     def skip_bool(self) -> None:
         self.read_bool()
 
@@ -598,6 +844,40 @@ def _evidence_root(observation: RawChainObservation) -> str:
     return f"observation:{hashlib.sha256(identity).hexdigest()}"
 
 
+def _account_at(accounts: tuple[str, ...], index: int) -> str | None:
+    if type(index) is not int or index < 0 or index >= len(accounts):
+        return None
+    value = accounts[index]
+    return value if isinstance(value, str) and value else None
+
+
+def _transaction_fee(observation: RawChainObservation) -> int | AbstainResult:
+    try:
+        envelope = json.loads(observation.raw_source_payload or b"")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return _abstain(
+            AbstainReason.UNKNOWN_PROTOCOL_STATE,
+            "finalized AMM transaction payload is invalid JSON",
+            observation.slot,
+        )
+    if not isinstance(envelope, Mapping):
+        return _abstain(
+            AbstainReason.UNKNOWN_PROTOCOL_STATE,
+            "finalized AMM transaction envelope is malformed",
+            observation.slot,
+        )
+    result = envelope.get("result")
+    meta = result.get("meta") if isinstance(result, Mapping) else None
+    fee = meta.get("fee") if isinstance(meta, Mapping) else None
+    if type(fee) is not int or fee < 0:
+        return _abstain(
+            AbstainReason.MISSING_FEATURE,
+            "finalized AMM transaction fee is missing",
+            observation.slot,
+        )
+    return fee
+
+
 def _abstain(
     reason: AbstainReason,
     message: str,
@@ -610,6 +890,8 @@ __all__ = [
     "TRADE_EVENT_DISCRIMINATOR",
     "FinalizedTradeJoin",
     "PumpTradeEventProof",
+    "build_finalized_pump_swap_trade",
     "build_finalized_pump_trade",
     "build_finalized_trades_from_observations",
+    "decode_pump_trade_event_proofs",
 ]

@@ -328,7 +328,9 @@ class LetsBonkAddressProvider(AddressProvider):
             "global_config": global_config,
             "platform_config": platform_config,
             "pool_state": additional_accounts["pool_state"],
-            "user_base_token": self.derive_user_token_account(user, token_info.mint, token_program_id),
+            "user_base_token": self.derive_user_token_account(
+                user, token_info.mint, token_program_id
+            ),
             "base_vault": additional_accounts["base_vault"],
             "quote_vault": additional_accounts["quote_vault"],
             "base_token_mint": token_info.mint,
@@ -390,7 +392,9 @@ class LetsBonkAddressProvider(AddressProvider):
             "global_config": global_config,
             "platform_config": platform_config,
             "pool_state": additional_accounts["pool_state"],
-            "user_base_token": self.derive_user_token_account(user, token_info.mint, token_program_id),
+            "user_base_token": self.derive_user_token_account(
+                user, token_info.mint, token_program_id
+            ),
             "base_vault": additional_accounts["base_vault"],
             "quote_vault": additional_accounts["quote_vault"],
             "base_token_mint": token_info.mint,

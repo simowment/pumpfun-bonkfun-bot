@@ -1,243 +1,240 @@
-<img width="1200" alt="Labs" src="https://user-images.githubusercontent.com/99700157/213291931-5a822628-5b8a-4768-980d-65f324985d32.png">
+# Pump.fun Repeat-Rugger Bot
 
-<p>
- <h3 align="center">Chainstack is the leading suite of services connecting developers with Web3 infrastructure</h3>
-</p>
+Private research bot for identifying repeat Pump.fun operators, watching their
+next launch, and evaluating fixed-size entries in observe, paper, and backtest
+modes.
 
-<p align="center">
-  • <a target="_blank" href="https://chainstack.com/">Homepage</a> •
-  <a target="_blank" href="https://chainstack.com/protocols/">Supported protocols</a> •
-  <a target="_blank" href="https://chainstack.com/blog/">Chainstack blog</a> •
-  <a target="_blank" href="https://docs.chainstack.com/quickstart/">Blockchain API reference</a> • <br> 
-  • <a target="_blank" href="https://console.chainstack.com/user/account/create">Start for free</a> •
-</p>
+The repository also retains the original configurable Pump.fun/letsbonk.fun
+trader as an execution reference. Do not run it with real funds while developing
+the repeat-rugger strategy.
 
-The project allows you to create bots for trading on pump.fun and letsbonk.fun. Its core feature is to snipe new tokens. Besides that, learning examples contain a lot of useful scripts for different types of listeners (new tokens, migrations) and deep dive into calculations required for trading.
+## Setup
 
-For the full walkthrough, see [Solana: Creating a trading and sniping pump.fun bot](https://docs.chainstack.com/docs/solana-creating-a-pumpfun-bot).
+Python 3.11 or newer and [uv](https://docs.astral.sh/uv/) are required.
 
-For near-instantaneous transaction propagation, you can use the [Chainstack Solana Trader nodes](https://docs.chainstack.com/docs/trader-nodes).
-
-For instant updates from the network, you can enable [Yellowstone gRPC Geyser plugin](https://docs.chainstack.com/docs/yellowstone-grpc-geyser-plugin) (Jito ShredStream enabled by default).
-
-The official maintainers are in the [MAINTAINERS.md](MAINTAINERS.md) file. Leave your feedback by opening **Issues**.
-
-> **Also by Chainstack** — if you prefer a terminal interface or want to give an AI agent trading capabilities:
-> - [**pumpfun-cli**](https://github.com/chainstacklabs/pumpfun-cli) — CLI for trading, launching, and managing tokens on pump.fun; buy, sell, wallet management, and smart routing between bonding curve and PumpSwap AMM.
-> - [**pumpclaw**](https://github.com/chainstacklabs/pumpclaw) — agent skill that equips AI assistants (OpenClaw, Claude Code, Cursor, Codex) with the ability to operate pumpfun-cli.
-
----
-
-**🚨 SCAM ALERT**: Issues section is often targeted by scam bots willing to redirect you to an external resource and drain your funds. I have enabled a GitHub actions script to detect the common patterns and tag them, which obviously is not 100% accurate. This is also why you will see deleted comments in the issues—I only delete the scam bot comments targeting your private keys. Not everyone is a scammer though, sometimes there are helpful outside devs who comment and I absolutely appreciate it.
-
-**⚠️ NOT FOR PRODUCTION**: This code is for learning purposes only. We assume no responsibility for the code or its usage. Modify for your needs and learn from it (examples, issues, and PRs contain valuable insights).
-
----
-
-
-## 🚀 Getting started
-
-### Prerequisites
-- Install [uv](https://github.com/astral-sh/uv), a fast Python package manager.
-
-> If Python is already installed, `uv` will detect and use it automatically.
-
-### Installation
-
-#### 1️⃣ Clone the repository
-```bash
-git clone https://github.com/chainstacklabs/pump-fun-bot.git
-cd pump-fun-bot
-```
-
-#### 2️⃣ Set up a virtual environment
-```bash
-# Create virtual environment
+```powershell
 uv sync
-
-# Activate (Unix/macOS)
-source .venv/bin/activate  
-
-# Activate (Windows)
-.venv\Scripts\activate
-```
-> Virtual environments help keep dependencies isolated and prevent conflicts.
-
-#### 3️⃣ Configure the bot
-```bash
-# Copy example config
-cp .env.example .env  # Unix/macOS
-
-# Windows
-copy .env.example .env
-```
-Edit the `.env` file and add your **Solana RPC endpoints** and **private key**.
-
-Edit `.yaml` templates in the `bots/` directory. Each file is a separate instance of a trading bot. Examine its parameters and apply your preferred strategy.
-
-For example, to run the pump.fun bot, set `platform: "pump_fun"`; to run the bonk.fun bot, set `platform: "lets_bonk"`.
-
-#### 4️⃣ Install the bot as a package
-```bash
-uv pip install -e .
-```
-> **Why `-e` (editable mode)?** Lets you modify the code without reinstalling the package—useful for development!
-
-### Running the bot
-
-```bash
-# Option 1: run as installed package
-pump_bot
-
-# Option 2: run directly
-uv run src/bot_runner.py
 ```
 
-> **You're all set! 🎉** 
+Yellowstone Geyser is optional:
 
----
+```powershell
+uv sync --extra geyser
+```
 
-## Note on throughput & limits
+HTTP observation and backtesting do not require gRPC.
 
-Solana is an amazing piece of web3 architecture, but it's also very complex to maintain.
+Environment variables used by the remaining tools:
 
-Chainstack is daily (literally, including weekends) working on optimizing our Solana infrastructure to make it the best in the industry.
+```env
+SOLANA_RPC_HTTP=https://...
+SOLANA_NODE_WSS_ENDPOINT=wss://...
+SOLANA_PRIVATE_KEY=...
+```
 
-That said, all node providers have their own setup recommendations & limits, like method availability, requests per second (RPS), free and paid plan specific limitations and so on.
+Observe and paper processes use only the RPC endpoint. They must not load
+`SOLANA_PRIVATE_KEY`.
 
-So please make sure you consult the docs of the node provider you are going to use for the bot here. And obviously the public RPC nodes won't work for the heavier use case scenarios like this bot.
+## Commands
 
-For Chainstack, all of the details and limits you need to be aware of are consolidated here: [Throughput guidelines](https://docs.chainstack.com/docs/limits) <— we are _always_ keeping this piece up to date so you can rely on it.
+Run the leakage-safe demo backtest:
 
-### Built-in RPC Rate Limiting
+```powershell
+uv run python -m rugbot.backtest.cli \
+  --input fixtures/backtest/demo.json --pretty
+```
 
-The bot now includes built-in RPC rate limiting to prevent hitting provider limits:
+Replay finalized observations through the same dataset boundary used by RPC
+callers:
 
-- **Token bucket algorithm**: Smoothly controls request rate while allowing short bursts
-- **Configurable max RPS**: Set `max_rps` parameter in `SolanaClient` (defaults to 25 RPS)
-- **Automatic retry logic**: Handles 429 (Too Many Requests) errors with exponential backoff
-- **Shared session management**: Reuses connections for improved performance
+```powershell
+uv run python -m rugbot.backtest.cli \
+  --replay path/to/observations.jsonl --as-of-slot SLOT --pretty
+```
 
-This helps ensure reliable operation within your node provider's rate limits without manual throttling.
+Acquire one known operator and its explicitly attributed launch mints through
+the same finalized HTTP path:
 
-## IDLs
+```powershell
+uv run python -m rugbot.backtest.cli \
+  --operator-wallet CREATOR_WALLET \
+  --start-slot START_SLOT --end-slot END_SLOT \
+  --max-transactions 1000 --pretty
+```
 
-The IDLs under [`idl/`](idl/) are vendored from [pump-fun/pump-public-docs](https://github.com/pump-fun/pump-public-docs). To refresh, copy `pump.json`, `pump_amm.json`, `pump_fees.json` from that repo into `pump_fun_idl.json`, `pump_swap_idl.json`, `pump_fees.json` respectively, and reference the upstream commit hash in your commit message.
+This command reports the finalized observations, launches, and executed Pump
+trades that were actually proven. It returns `ABSTAIN` until point-in-time
+entity evidence, protocol/mint account proofs, and completed outcome proofs
+are supplied; it never fabricates a backtest case from incomplete RPC data.
 
-> **The IDL is incomplete.** It doesn't list two PDAs that the on-chain program actually requires:
-> - `bonding-curve-v2` — required on every BC `buy` (18 accounts) and `sell` (16/17 accounts). Seed: `["bonding-curve-v2", mint]` under the pump program.
-> - `pool-v2` — required on every PumpSwap `buy`/`sell`. Seed: `["pool-v2", base_mint]` under the pump-amm program. **Without it, pump-amm throws `AnchorError 6023 (Overflow)` after the trade transfers complete** — a misleading error code for a missing-account issue.
->
-> Always cross-check your account lists against a recent successful on-chain tx (`getSignaturesForAddress` + `getTransaction`) before trusting the IDL.
+Inspect a wallet, linked wallets, wallet-switch candidates, and launch
+positions:
 
-## 2026-04-28 program upgrade
+```powershell
+uv run rug_watch --intelligence --wallet CREATOR_WALLET --pretty
+```
 
-Pump.fun shipped a breaking program upgrade on **2026-04-28 16:00 UTC** ([BREAKING_FEE_RECIPIENT.md](https://github.com/pump-fun/pump-public-docs/blob/main/docs/BREAKING_FEE_RECIPIENT.md)). The bot is updated for it:
+Watch one known wallet through finalized HTTP RPC evidence:
 
-- BC `buy` ix is now **18 accounts** (was 17). Trailing account is one of 8 `BREAKING_FEE_RECIPIENTS` (mutable), AFTER `bonding-curve-v2`.
-- BC `sell` ix is now **16 accounts non-cashback / 17 cashback** (was 15/16). Same trailing fee recipient.
-- PumpSwap `buy`/`sell` get **+2 accounts** appended after `pool-v2`: a fee recipient (readonly) and its quote-mint ATA (mutable). Counts: buy = 26 non-cashback / 27 cashback; sell = 24 / 26. Cashback pools insert `user_volume_accumulator_quote_ata` (writable) BEFORE `pool-v2` on buys; sells insert both that ATA and `user_volume_accumulator` (both writable) BEFORE `pool-v2`. Detect cashback via pool data byte 244.
+```powershell
+uv run rug_watch --wallet CREATOR_WALLET
+```
 
-The 8 fee recipients are randomized per tx in code (per pump.fun's recommendation to spread program-tx throughput).
+Watch a persistent portfolio of known creator wallets in paper mode:
 
-## Changelog
+```yaml
+# watch-portfolio.yaml
+wallets:
+  - "CREATOR_WALLET_A"
+  - "CREATOR_WALLET_B"
+```
 
-Quick note on a couple on a few new scripts in `/learning-examples`:
+```powershell
+uv run rug_watch --portfolio watch-portfolio.yaml --mode paper `
+  --interval-seconds 5 --state-dir .state/portfolio
+```
 
-*(this is basically a changelog now)*
+The portfolio file is strict: it accepts only the `wallets` list, requires
+valid unique Solana public keys, and has no schema or version field. Each
+wallet is polled through the same finalized observation and paper-execution
+path and gets isolated durable state under
+`.state/portfolio/wallets/<wallet>/`. A per-wallet abstention is reported in
+that cycle without stopping the other wallets or the persistent loop. Use
+`--once` for one real RPC pass while keeping the same state layout.
 
-Also, here's a quick doc: [Listening to pump.fun migrations to Raydium](https://docs.chainstack.com/docs/solana-listening-to-pumpfun-migrations-to-raydium)
+Inspect wallet history and linked-wallet evidence:
 
-## Bonding curve state check
+```powershell
+uv run rug_wallet --wallet CREATOR_WALLET --pretty
+```
 
-`get_bonding_curve_status.py` — checks the state of the bonding curve associated with a token. When the bonding curve state is completed, the token is migrated to Raydium.
+Interactive terminal UI:
 
-To run:
+```powershell
+uv run rug_wallet_tui --wallet CREATOR_WALLET --config watch.yaml
+```
 
-`uv run learning-examples/bonding-curve-progress/get_bonding_curve_status.py TOKEN_ADDRESS`
+Press `r` to refresh, `f` to focus the wallet field, `1`/`2`/`3` to switch
+between Overview, Launches, and Graph, and `q` to quit. The Launches tab has a
+local filter for symbol, mint, creator, or signature. The dashboard shows the
+bounded activity window, native SOL flow, creator and wallet-switch signals,
+refresh deltas, and a compact directional graph before the detailed tables.
+The UI refreshes every 30 seconds by default and uses the same bounded,
+finalized-RPC report as the JSON command. The Settings tab edits the same
+strict `watch.yaml` consumed by `rug_watch`; saving validates the whole file
+and replaces it atomically. It exposes the volume, creator-history, win-rate,
+frequency, entry-position, entry-deviation, bundle, double-signature, and
+prior-zero-balance settings without creating a second runtime configuration.
 
-## Listening to the Pump AMM migration
+The result contains `stats`, a `rug_evidence` summary, historical Pump creates,
+and a `graph` payload with nodes and direct native-transfer edges. It also
+includes `creator_history` from the official read-only GMGN CLI when available.
+That section reports creator-wide creation count, open count, token list, and
+ATH information; it is explicitly external/non-finalized and is not used as a
+backtest or decision input. Install the provider once with:
 
-When the bonding curve state completes, the liquidity and the token graduate to Pump AMM (PumpSwap).
+```powershell
+npm install -g gmgn-cli
+```
 
-`listen_logsubscribe.py` — listens to the migration events of the tokens from bonding curves to AMM and prints the signature of the migration, the token address, and the liquidity pool address on Pump AMM.
+The CLI uses GMGN's public read-only testing key by default. Set
+`GMGN_API_KEY` to use a personal key. If the CLI is unavailable, the report
+keeps the finalized RPC result and shows the provider as unavailable instead
+of treating a bounded RPC scan as proof that the creator has no history. The rug
+summary exposes repeat-launch evidence, position 0/1 launches, linked creator
+wallets, wallet-switch candidates, proven fresh wallets, multi-hop paths, and
+native flow. These are observed signals, not a scam score or proof of common
+control. The scan is
+bounded to 50 transactions and 8 counterparties by default; increase those
+limits deliberately because each linked wallet adds finalized RPC requests.
 
-`listen_blocksubscribe_old_raydium.py` — listens to the migration events of the tokens from bonding curves to AMM and prints the signature of the migration, the token address, and the liquidity pool address on Pump AMM (previously, tokens migrated to Raydium).
+For Helius endpoints, the observer uses `getTransactionsForAddress` with
+`transactionDetails: "full"`, so one finalized page carries both transaction
+history and raw transaction evidence. Standard Solana RPC keeps the bounded
+`getSignaturesForAddress` plus `getTransaction` path. Neither path fabricates a
+missing account snapshot, entity proof, or completed outcome; the backtest
+returns `ABSTAIN` until those typed proofs exist. This uses the existing
+Helius/Solana JSON-RPC endpoint and requires no second paid data provider.
+Helius Enhanced Transactions can be useful for later display-only enrichment,
+but the canonical graph continues to use raw finalized RPC evidence so
+offline replay and online inspection cannot diverge.
 
-Note that it's using the [blockSubscribe]([url](https://docs.chainstack.com/reference/blocksubscribe-solana)) method that not all providers support, but Chainstack does and I (although obviously biased) found it pretty reliable.
+[`watch.yaml`](watch.yaml) contains the fixed quote size and observe/paper
+mode; its wallet is used when neither `--wallet` nor `--portfolio` is given.
+The watcher persists raw observations and handled identities under
+`.state/watch` for a single wallet, or under the per-wallet portfolio paths
+shown above. Restart uses that state and does not replay handled evidence. It
+detects pinned Pump
+`create_v2` launches and emits block-position 0/1 candidates without signing or
+submitting transactions.
 
-To run:
+The sell rules also accept up to three bounded `auto_sell_big_buy.levels`
+ranges under `rules.sell`; each range uses integer quote base units and a
+`sell_fraction_ppm`.
 
-`uv run learning-examples/listen-migrations/listen_logsubscribe.py`
+Run the original bot only after reviewing and enabling its YAML:
 
-`uv run learning-examples/listen-migrations/listen_blocksubscribe_old_raydium.py`
+```powershell
+uv run pump_bot
+```
 
-**The following two new additions are based on this question [associatedBondingCurve #26](https://github.com/chainstacklabs/pump-fun-bot/issues/26)**
+The default watch configuration uses `observe`. Changing it to `paper` fails
+closed until an executable Pump quote simulator is connected to the same
+decision path.
 
-You can take the compute the associatedBondingCurve address following the [Solana docs PDA](https://solana.com/docs/core/pda) description logic. Take the following as input *as seed* (order seems to matter):
+## Live execution
 
-- bondingCurve address
-- the Solana system token program address: `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`
-- the token mint address
+The watcher can submit Pump bonding-curve buys and sells through the same
+candidate, filter, sizing, and position state path. Live mode is intentionally
+double-gated: set `execution.mode: live` in `watch.yaml`, then explicitly set
+the process flag and signing key in the shell:
 
-And compute against the Solana system associated token account program address: `ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL`.
+```powershell
+$env:RUGBOT_ENABLE_LIVE = "1"
+$env:SOLANA_PRIVATE_KEY = "..."
+uv run rug_watch --wallet CREATOR_WALLET --interval-seconds 2
+```
 
-The implications of this are kinda huge:
-* you can now use `logsSubscribe` to snipe the tokens and you are not limited to the `blockSubscribe` method
-* see which one is faster
-* not every provider supports `blockSubscribe` on lower tier plans or at all, but everyone supports `logsSubscribe`
+The live adapter refreshes the curve and mint owner before each transaction,
+uses integer slippage bounds, confirms the signature, and records the fill.
+The default sample remains `observe`; never enable live mode until the strategy
+has been validated with paper and out-of-sample replay on a separate wallet.
 
-The following script showcase the implementation.
+The core filters live in `watch.yaml`: `max_market_cap_quote_base_units`,
+`max_token_age_minutes`, `buy_only_once`, `max_consecutive_losses`, and
+`execution.max_slippage_bps`. Exits support multiple PnL take-profit and
+stop-loss levels, market-cap-tiered trailing stops, inactivity exits, and
+partial sells. Amounts are integer base units: SOL quote values are lamports
+and PnL/percentage values use parts per million.
 
-## Compute associated bonding curve
+The live poll currently supplies curve-price evidence for TP/SL/trailing
+decisions. Inactivity exits remain fail-closed until an activity timestamp is
+available for the position.
 
-`compute_associated_bonding_curve.py` — computes the associated bonding curve for a given token.    
+Transaction account layouts follow the repository's pinned Pump IDL and the
+current Pump fee-recipient requirements documented in the
+[official Pump public docs](https://github.com/pump-fun/pump-public-docs).
 
-To run:
+## Layout
 
-`uv run learning-examples/compute_associated_bonding_curve.py` and then enter the token mint address.
+- `src/rugbot/ingest`: finalized HTTP observations and decoding inputs.
+- `src/rugbot/protocol`: pinned Pump decoders, state, and integer quotes.
+- `src/rugbot/graph`: point-in-time wallet and operator evidence.
+- `src/rugbot/decision`: matching, sizing, timing, and exits.
+- `src/rugbot/runtime`: shared observation loop and wallet watch mode.
+- `src/rugbot/backtest`: historical calibration and evaluation.
+- `src/rugbot/storage`: immutable JSONL evidence and handled ledger.
+- `fixtures`: finalized protocol and backtest evidence.
+- `learning-examples`: only the small scripts still useful for core manual checks.
 
-## Listen to new tokens
+The strategy and remaining work are in
+[`TODO_RUG_RISK_SYSTEM.md`](TODO_RUG_RISK_SYSTEM.md).
 
-`listen_logsubscribe_abc.py` — listens to new tokens and prints the signature, the token address, the user, the bonding curve address, and the associated bonding curve address using just the `logsSubscribe` method. Basically everything you need for sniping using just `logsSubscribe` (with some [limitations](https://github.com/chainstacklabs/pump-fun-bot/issues/87)) and no extra calls like doing `getTransaction` to get the missing data. It's just computed on the fly now.
+## Safety
 
-To run:
-
-`uv run learning-examples/listen-new-tokens/listen_logsubscribe_abc.py`
-
-So now you can run `compare_listeners.py` see which one is faster.
-
-`uv run learning-examples/listen-new-tokens/compare_listeners.py`
-
-Also here's a doc on this: [Solana: Listening to pump.fun token mint using only logsSubscribe](https://docs.chainstack.com/docs/solana-listening-to-pumpfun-token-mint-using-only-logssubscribe)
-
----
-
-# Pump.fun bot development roadmap (March - April 2025, mostly completed)
-
-~~As of March 21, 2025, the bot from the **refactored/main-v2** branch is signficantly better over the **main** version, so the suggestion is to FAFO with v2.~~
-
-As of April 30, 2025, all changes from **refactored/main-v2** are merged into the **main** version.
-
-| Stage | Feature | Comments | Implementation status |
-|-------|---------|----------|---------------------|
-| **Stage 1: General updates & QoL** | Lib updates | Updating to the latest libraries | ✅ |
-| | Error handling | Improving error handling | ✅ |
-| | Configurable RPS | Ability to set RPS in the config to match your provider's and plan RPS (preferably [Chainstack](https://console.chainstack.com/) 🤩) | ✅ |
-| | Dynamic priority fees | Ability to set dynamic priority fees | ✅ |
-| | Review & optimize `json`, `jsonParsed`, `base64` | Improve speed and traffic for calls, not just `getBlock`. [Helpful overview](https://docs.chainstack.com/docs/solana-optimize-your-getblock-performance#json-jsonparsed-base58-base64).| ✅ | 
-| **Stage 2: Bonding curve and migration management** | `logsSubscribe` integration | Integrate `logsSubscribe` instead of `blockSubscribe` for sniping minted tokens into the main bot | ✅ |
-| | Dual subscription methods | Keep both `logsSubscribe` & `blockSubscribe` in the main bot for flexibility and adapting to Solana node architecture changes | ✅ |
-| | Transaction retries | Do retries instead of cooldown and/or keep the cooldown | ✅ |
-| | Bonding curve status tracking | Checking a bonding curve status progress. Predict how soon a token will start the migration process | ✅ | 
-| | Account closure script | Script to close the associated bonding curve account if the rest of the flow txs fails | ✅ |
-| | PumpSwap migration listening | pump_fun migrated to their own DEX — [PumpSwap](https://x.com/pumpdotfun/status/1902762309950292010), so we need to FAFO with that instead of Raydium (and attempt `logSubscribe` implementation) | ✅ |
-| **Stage 3: Trading experience** | Take profit/stop loss | Implement take profit, stop loss exit strategies | ✅ |
-| | Market cap-based selling | Sell when a specific market cap has been reached | Not started |
-| | Copy trading | Enable copy trading functionality | Not started |
-| | Token analysis script | Script for basic token analysis (market cap, creator investment, liquidity, token age) | Not started |
-| | Archive node integration | Use Solana archive nodes for historical analysis (accounts that consistently print tokens, average mint to raydium time) | Not started |
-| | Geyser implementation | Leverage Solana Geyser for real-time data stream processing | ✅ |
-| **Stage 4: Minting experience** | Token minting | Ability to mint tokens (based on user request - someone minted 18k tokens) | ✅ |
-
----
+- Unknown or stale protocol state abstains.
+- Financial calculations use integer base units.
+- Historical features are bounded by `as_of_slot`.
+- Paper and observe modes never submit transactions.
+- Test manual buys and sells only with minimal amounts after paper validation.
+- Never commit RPC credentials or private keys.

@@ -21,7 +21,9 @@ load_dotenv()
 
 # Configuration
 WSS_ENDPOINT = os.environ.get("SOLANA_NODE_WSS_ENDPOINT")
-WALLET_TO_TRACK = sys.argv[1] if len(sys.argv) > 1 else "..."  # Pass wallet as argv[1] or hardcode
+WALLET_TO_TRACK = (
+    sys.argv[1] if len(sys.argv) > 1 else "..."
+)  # Pass wallet as argv[1] or hardcode
 
 # Pump.fun program constants
 PUMP_BONDING_CURVE_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
@@ -186,7 +188,7 @@ def decode_trade_event(data):
         fee = struct.unpack("<Q", data[offset : offset + 8])[0]
         offset += 8
     else:
-        fee_recipient = b'\x00' * 32
+        fee_recipient = b"\x00" * 32
         fee_basis_points = 0
         fee = 0
 
@@ -199,7 +201,7 @@ def decode_trade_event(data):
         creator_fee = struct.unpack("<Q", data[offset : offset + 8])[0]
         offset += 8
     else:
-        creator = b'\x00' * 32
+        creator = b"\x00" * 32
         creator_fee_basis_points = 0
         creator_fee = 0
 
@@ -244,10 +246,14 @@ def decode_trade_event(data):
         "virtual_token_reserves": virtual_token_reserves,
         "real_sol_reserves": real_sol_reserves,
         "real_token_reserves": real_token_reserves,
-        "fee_recipient": base58.b58encode(fee_recipient).decode() if fee_recipient != b'\x00' * 32 else None,
+        "fee_recipient": base58.b58encode(fee_recipient).decode()
+        if fee_recipient != b"\x00" * 32
+        else None,
         "fee_basis_points": fee_basis_points,
         "fee": fee,
-        "creator": base58.b58encode(creator).decode() if creator != b'\x00' * 32 else None,
+        "creator": base58.b58encode(creator).decode()
+        if creator != b"\x00" * 32
+        else None,
         "creator_fee_basis_points": creator_fee_basis_points,
         "creator_fee": creator_fee,
         "track_volume": track_volume,
@@ -274,8 +280,8 @@ def display_transaction_info(signature, logs):
     trade_data = parse_trade_event(logs)
     if trade_data:
         # Core transaction info (always present)
-        ix_name = trade_data.get('ix_name', '')
-        trade_type = 'BUY' if trade_data['is_buy'] else 'SELL'
+        ix_name = trade_data.get("ix_name", "")
+        trade_type = "BUY" if trade_data["is_buy"] else "SELL"
         print(f"  Type: {trade_type}{f' ({ix_name})' if ix_name else ''}")
         print(f"  Token: {trade_data['mint']}")
         print(f"  SOL Amount: {trade_data['sol_amount'] / 1_000_000_000:.6f} SOL")
@@ -286,23 +292,31 @@ def display_transaction_info(signature, logs):
         print(f"  Trader: {trade_data['user']}")
 
         # Fee info (may not be present in older transactions)
-        if trade_data['fee'] > 0 or trade_data['fee_basis_points'] > 0:
-            print(f"  Fee: {trade_data['fee'] / 1_000_000_000:.6f} SOL ({trade_data['fee_basis_points']} bps)")
+        if trade_data["fee"] > 0 or trade_data["fee_basis_points"] > 0:
+            print(
+                f"  Fee: {trade_data['fee'] / 1_000_000_000:.6f} SOL ({trade_data['fee_basis_points']} bps)"
+            )
 
-        if trade_data['creator_fee'] > 0 or trade_data['creator_fee_basis_points'] > 0:
-            print(f"  Creator Fee: {trade_data['creator_fee'] / 1_000_000_000:.6f} SOL ({trade_data['creator_fee_basis_points']} bps)")
+        if trade_data["creator_fee"] > 0 or trade_data["creator_fee_basis_points"] > 0:
+            print(
+                f"  Creator Fee: {trade_data['creator_fee'] / 1_000_000_000:.6f} SOL ({trade_data['creator_fee_basis_points']} bps)"
+            )
 
-        if trade_data['creator']:
+        if trade_data["creator"]:
             print(f"  Creator: {trade_data['creator']}")
 
-        if trade_data['fee_recipient']:
+        if trade_data["fee_recipient"]:
             print(f"  Fee Recipient: {trade_data['fee_recipient']}")
 
         # Reserve info
-        print(f"  Virtual Reserves: {trade_data['virtual_sol_reserves'] / 1_000_000_000:.6f} SOL / {trade_data['virtual_token_reserves']:,} tokens")
+        print(
+            f"  Virtual Reserves: {trade_data['virtual_sol_reserves'] / 1_000_000_000:.6f} SOL / {trade_data['virtual_token_reserves']:,} tokens"
+        )
 
-        if trade_data['real_sol_reserves'] > 0 or trade_data['real_token_reserves'] > 0:
-            print(f"  Real Reserves: {trade_data['real_sol_reserves'] / 1_000_000_000:.6f} SOL / {trade_data['real_token_reserves']:,} tokens")
+        if trade_data["real_sol_reserves"] > 0 or trade_data["real_token_reserves"] > 0:
+            print(
+                f"  Real Reserves: {trade_data['real_sol_reserves'] / 1_000_000_000:.6f} SOL / {trade_data['real_token_reserves']:,} tokens"
+            )
 
     # Extract and display program info
     display_program_info(logs)

@@ -158,10 +158,14 @@ class LetsBonkInstructionBuilder(InstructionBuilder):
                 pubkey=SystemAddresses.SOL_MINT, is_signer=False, is_writable=False
             ),  # quote_token_mint
             AccountMeta(
-                pubkey=accounts_info["base_token_program"], is_signer=False, is_writable=False
+                pubkey=accounts_info["base_token_program"],
+                is_signer=False,
+                is_writable=False,
             ),  # base_token_program
             AccountMeta(
-                pubkey=accounts_info["quote_token_program"], is_signer=False, is_writable=False
+                pubkey=accounts_info["quote_token_program"],
+                is_signer=False,
+                is_writable=False,
             ),  # quote_token_program
             AccountMeta(
                 pubkey=accounts_info["event_authority"],
@@ -313,10 +317,14 @@ class LetsBonkInstructionBuilder(InstructionBuilder):
                 pubkey=SystemAddresses.SOL_MINT, is_signer=False, is_writable=False
             ),  # quote_token_mint
             AccountMeta(
-                pubkey=accounts_info["base_token_program"], is_signer=False, is_writable=False
+                pubkey=accounts_info["base_token_program"],
+                is_signer=False,
+                is_writable=False,
             ),  # base_token_program
             AccountMeta(
-                pubkey=accounts_info["quote_token_program"], is_signer=False, is_writable=False
+                pubkey=accounts_info["quote_token_program"],
+                is_signer=False,
+                is_writable=False,
             ),  # quote_token_program
             AccountMeta(
                 pubkey=accounts_info["event_authority"],

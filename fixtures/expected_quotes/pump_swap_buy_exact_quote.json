@@ -1,0 +1,22 @@
+{
+  "fixture_id": "fixture:pump_swap_buy:3enYokNkLEXQwWPTkdRqJeLrkK1jTjADvb6ay2vTiNeBFUXxCqxD9179r5Peq6jHN9hyQsGQGnDxYkvnV6C6k79s",
+  "fixture_version": "pump-swap-golden",
+  "path": "canonical_pumpswap",
+  "as_of_slot": 436909298,
+  "source_transaction_signature": "3enYokNkLEXQwWPTkdRqJeLrkK1jTjADvb6ay2vTiNeBFUXxCqxD9179r5Peq6jHN9hyQsGQGnDxYkvnV6C6k79s",
+  "virtual_base_reserves": 8219230553681,
+  "raw_quote_reserves": 2126185397795,
+  "virtual_quote_reserves": 17584505288,
+  "quote_input_amount": 6999999,
+  "expected_output_amount": 26757683,
+  "expected_fee_amount": 20939,
+  "base_decimals": 6,
+  "quote_decimals": 9,
+  "lp_fee_bps": 20,
+  "protocol_fee_bps": 5,
+  "creator_fee_bps": 5,
+  "fee_config_version": "pump-swap-fees-finalized-436909298",
+  "decoder_version": "pump-swap-pool-v1",
+  "idl_hash": "da268f6f26a1e89fa83ec47f1db7dbff8ce16f96564a683fad00353e1bf19443",
+  "program_config_version": "pump-amm-v1"
+}

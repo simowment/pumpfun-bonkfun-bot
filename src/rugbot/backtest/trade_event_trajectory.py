@@ -249,14 +249,19 @@ def _validate_source(  # noqa: C901
             "trajectory metadata and TradeEvent use different slots",
             cutoff,
         )
+    if type(metadata.event_index) is not int or metadata.event_index < 0:
+        return _abstain(
+            AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+            "trajectory event index is malformed",
+            cutoff,
+        )
     if (
-        type(metadata.event_index) is not int
-        or metadata.event_index < 0
-        or metadata.event_index != observation.event_ordinal
+        observation.event_ordinal is not None
+        and observation.event_ordinal != metadata.event_index
     ):
         return _abstain(
             AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
-            "trajectory event index is not joined to the observation",
+            "trajectory event index conflicts with the observation",
             cutoff,
         )
     if (
@@ -360,6 +365,15 @@ def _validate_fee_and_metadata(
         return _abstain(
             AbstainReason.UNKNOWN_FEE_CONFIG,
             "historical Pump fee configuration is unknown or malformed",
+            cutoff,
+        )
+    if (
+        event.protocol_fee_basis_points != fee.protocol_fee_bps
+        or event.creator_fee_basis_points != fee.creator_fee_bps
+    ):
+        return _abstain(
+            AbstainReason.UNKNOWN_FEE_CONFIG,
+            "TradeEvent fee rates conflict with the historical Pump fee snapshot",
             cutoff,
         )
     if (

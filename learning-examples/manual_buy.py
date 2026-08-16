@@ -489,8 +489,13 @@ async def listen_for_create_transaction():
                                                 # Skip txs that use Address Lookup Tables — their
                                                 # instruction account indices reference ALT-loaded keys
                                                 # not present in transaction.message.account_keys.
-                                                static_keys = transaction.message.account_keys
-                                                if any(idx >= len(static_keys) for idx in ix.accounts):
+                                                static_keys = (
+                                                    transaction.message.account_keys
+                                                )
+                                                if any(
+                                                    idx >= len(static_keys)
+                                                    for idx in ix.accounts
+                                                ):
                                                     continue
                                                 account_keys = [
                                                     str(static_keys[index])

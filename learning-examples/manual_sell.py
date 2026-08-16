@@ -20,7 +20,9 @@ from spl.token.instructions import get_associated_token_address
 # Here and later all the discriminators are precalculated. See learning-examples/calculate_discriminator.py
 EXPECTED_DISCRIMINATOR = struct.pack("<Q", 6966180631402821399)
 TOKEN_DECIMALS = 6
-TOKEN_MINT = Pubkey.from_string(sys.argv[1] if len(sys.argv) > 1 else "...")  # Pass mint as argv[1] or hardcode here
+TOKEN_MINT = Pubkey.from_string(
+    sys.argv[1] if len(sys.argv) > 1 else "..."
+)  # Pass mint as argv[1] or hardcode here
 
 # Global constants
 PUMP_PROGRAM = Pubkey.from_string("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
@@ -361,21 +363,23 @@ async def sell_token(
                     is_writable=True,
                 )
             )
-        accounts.extend([
-            # bonding_curve_v2 (readonly, required for all coins)
-            AccountMeta(
-                pubkey=_find_bonding_curve_v2(mint),
-                is_signer=False,
-                is_writable=False,
-            ),
-            # Breaking-upgrade fee recipient (mutable) — required from 2026-04-28.
-            # 16 accounts non-cashback / 17 accounts cashback.
-            AccountMeta(
-                pubkey=random.choice(BREAKING_FEE_RECIPIENTS),
-                is_signer=False,
-                is_writable=True,
-            ),
-        ])
+        accounts.extend(
+            [
+                # bonding_curve_v2 (readonly, required for all coins)
+                AccountMeta(
+                    pubkey=_find_bonding_curve_v2(mint),
+                    is_signer=False,
+                    is_writable=False,
+                ),
+                # Breaking-upgrade fee recipient (mutable) — required from 2026-04-28.
+                # 16 accounts non-cashback / 17 accounts cashback.
+                AccountMeta(
+                    pubkey=random.choice(BREAKING_FEE_RECIPIENTS),
+                    is_signer=False,
+                    is_writable=True,
+                ),
+            ]
+        )
 
         discriminator = struct.pack("<Q", 12502976635542562355)
         # Encode OptionBool for track_volume: [1, 1] = Some(true)

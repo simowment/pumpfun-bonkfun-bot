@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "artifact_version": "pump-bonding-curve-account-fixture-v1",
+  "description": "Finalized read-only getAccountInfo fixture for a Pump bonding-curve account with the pinned current IDL prefix layout and zero trailing padding.",
+  "rpc": {
+    "method": "getAccountInfo",
+    "commitment": "finalized",
+    "encoding": "base64",
+    "context_slot": 429994593,
+    "api_version": "4.0.3"
+  },
+  "account": {
+    "pubkey": "FFzxakVNzpirwMFtLyD22UZ6UM3KLF2EAGC2RxNPaYoH",
+    "owner": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+    "executable": false,
+    "lamports": 124795702,
+    "rent_epoch": 18446744073709551615,
+    "space": 151,
+    "data_base64": "F7f4N2DYrGCDANFh6MsDAOVFdgMHAAAAg2i+FVfNAgDlmVIHAAAAAACAxqR+jQMAAN0QsFdumei71UE0T9w/IatQ85pk4JEI1dEkqI1gmS5+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+    "data_encoding": "base64",
+    "data_sha256": "1cea0d750c6205222a9598a57bfc3ba7936fbc2a41ea8e1ebceac56ce966a748"
+  },
+  "expected": {
+    "virtual_token_reserves": 1068623864070275,
+    "virtual_sol_reserves": 30122853861,
+    "real_token_reserves": 788723864070275,
+    "real_sol_reserves": 122853861,
+    "token_total_supply": 1000000000000000,
+    "complete": false,
+    "creator_hex": "dd10b0576e99e8bbd541344fdc3f21ab50f39a64e09108d5d124a88d60992e7e",
+    "is_mayhem_mode": false,
+    "is_cashback_coin": false,
+    "current_layout_size": 83,
+    "trailing_zero_padding_length": 68
+  }
+}

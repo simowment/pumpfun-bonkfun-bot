@@ -3,7 +3,7 @@ name = "pump_bot"
 version = "2.0"
 description = "Trade tokens on pump.fun"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 
 dependencies = [
     "base58>=2.1.1",
@@ -15,21 +15,27 @@ dependencies = [
     "websockets>=15.0",
     "python-dotenv>=1.2.1",
     "aiohttp>=3.11.13",
-    "grpcio>=1.71.0",
-    "grpcio-tools>=1.71.0",
-    "protobuf>=5.29.4",
     "pyyaml>=6.0.2",
     "uvloop>=0.21.0; sys_platform != 'win32'",
     "winloop>=0.1.0; sys_platform == 'win32'",
+    "textual>=1.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "ruff>=0.10.0"
 ]
+geyser = [
+    "grpcio>=1.71.0",
+    "grpcio-tools>=1.71.0",
+    "protobuf>=5.29.4",
+]
 
 [project.scripts]
 pump_bot = "bot_runner:main"
+rug_watch = "rugbot.runtime.cli:main"
+rug_wallet = "rugbot.runtime.wallet_cli:main"
+rug_wallet_tui = "rugbot.runtime.wallet_tui:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -90,3 +96,11 @@ ignore = ["E501"]
 quote-style = "double"
 indent-style = "space"
 line-ending = "auto"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

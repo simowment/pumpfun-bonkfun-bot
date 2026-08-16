@@ -429,6 +429,7 @@ def _validate_artifacts(
             or type(outcome.completed_slot) is not int
             or outcome.launch_slot < 0
             or outcome.completed_slot < outcome.launch_slot
+            or outcome.completed_slot > outcome.as_of_slot
             or _validate_ids(outcome.evidence_ids) is not None
         ):
             return _abstain(
@@ -563,6 +564,7 @@ def _build_history(
             return fill
         sample_as_of = max(
             int(outcome.as_of_slot),
+            int(outcome.completed_slot),
             int(entity[2]),
             int(artifact.as_of_slot),
             int(label.as_of_slot),
@@ -698,6 +700,17 @@ def _first_buy(
         sorted(candidates, key=lambda fill: (fill.slot, fill.transaction_index))
     )
     first = ordered[0]
+    same_position = tuple(
+        fill
+        for fill in ordered
+        if fill.slot == first.slot and fill.transaction_index == first.transaction_index
+    )
+    if len(same_position) != 1:
+        return _abstain(
+            AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+            "multiple finalized wallet buys share the first position",
+            boundary,
+        )
     if (
         type(first.transaction_index) is not int
         or first.transaction_index < 0

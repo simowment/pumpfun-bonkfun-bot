@@ -71,9 +71,7 @@ class PlatformAwareBuyer(Trader):
                 # readable, so retry briefly. One handful of RPC calls is cheap
                 # relative to a failed buy.
                 try:
-                    pool_address = self._get_pool_address(
-                        token_info, address_provider
-                    )
+                    pool_address = self._get_pool_address(token_info, address_provider)
                     pool_state = None
                     last_err: Exception | None = None
                     # Use processed commitment — geyser/logs fire on processed

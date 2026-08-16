@@ -72,6 +72,29 @@ class CaseBuilderTests(unittest.TestCase):
         if isinstance(result, AbstainResult):
             self.assertIs(result.reason, AbstainReason.UNSUPPORTED_PROTOCOL_STATE)
 
+    def test_future_completion_slot_abstains(self) -> None:
+        inputs = _inputs()
+        inputs["outcomes"] = (replace(inputs["outcomes"][0], completed_slot=Slot(16)),)
+
+        result = assemble_copy_trade_cases(**inputs)
+
+        self.assertIsInstance(result, AbstainResult)
+        if isinstance(result, AbstainResult):
+            self.assertIs(result.reason, AbstainReason.MISSING_FEATURE)
+
+    def test_ambiguous_first_buy_position_abstains(self) -> None:
+        inputs = _inputs()
+        inputs["fills"] = (
+            *inputs["fills"],
+            replace(inputs["fills"][0], signature=b"another-fill"),
+        )
+
+        result = assemble_copy_trade_cases(**inputs)
+
+        self.assertIsInstance(result, AbstainResult)
+        if isinstance(result, AbstainResult):
+            self.assertIs(result.reason, AbstainReason.UNSUPPORTED_PROTOCOL_STATE)
+
 
 def _inputs() -> dict[str, object]:
     launches = (_launch("launch-a", "mint-a", 10), _launch("launch-b", "mint-b", 20))

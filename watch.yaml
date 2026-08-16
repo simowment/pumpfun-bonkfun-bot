@@ -1,0 +1,38 @@
+target:
+  kind: wallet
+  id: "11111111111111111111111111111111"
+execution:
+  mode: observe
+  quote_size_lamports: 1000000
+  max_slippage_bps: 500
+strategy:
+  min_volume_usd_micro: 30000000000
+  max_creator_pairs: 10
+  history_sample_count: 10
+  min_win_rate_ppm: 500000
+  max_buys_per_hour: 1
+  max_entry_transaction_index: 1
+  max_entry_deviation_ppm: 250000
+  require_bundle_match: false
+  require_double_signature: false
+  require_prior_zero_balance: false
+rules:
+  snipe_delay_seconds: 0
+  max_market_cap_quote_base_units: 50000000000
+  max_token_age_minutes: 1
+  buy_only_once: true
+  max_consecutive_losses: 3
+  sell:
+    take_profit_levels:
+      - trigger_pnl_ppm: 50000
+        sell_fraction_ppm: 200000
+      - trigger_pnl_ppm: 150000
+        sell_fraction_ppm: 300000
+      - trigger_pnl_ppm: 300000
+        sell_fraction_ppm: 500000
+    stop_loss_levels:
+      - trigger_pnl_ppm: -100000
+        sell_fraction_ppm: 1000000
+    trailing_levels:
+      - min_market_cap_quote_base_units: null
+        drawdown_ppm: 150000

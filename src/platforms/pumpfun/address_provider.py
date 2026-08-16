@@ -237,7 +237,10 @@ class PumpFunAddressProvider(AddressProvider):
         return accounts
 
     def derive_associated_bonding_curve(
-        self, mint: Pubkey, bonding_curve: Pubkey, token_program_id: Pubkey | None = None
+        self,
+        mint: Pubkey,
+        bonding_curve: Pubkey,
+        token_program_id: Pubkey | None = None,
     ) -> Pubkey:
         """Derive the associated bonding curve (ATA of bonding curve for the token).
 

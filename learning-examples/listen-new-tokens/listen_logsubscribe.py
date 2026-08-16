@@ -70,7 +70,6 @@ def print_token_info(token_data, signature=None):
     print("=" * 80 + "\n")
 
 
-
 def parse_create_instruction(data):
     """
     Parse CreateEvent data from legacy Create instruction (Metaplex tokens).
@@ -125,16 +124,22 @@ def _parse_create_event(data, token_standard_hint):
         for field_name, field_type in _CREATE_EVENT_FIELDS:
             if field_type == "string":
                 if offset + 4 > len(data):
-                    raise ValueError(f"Not enough data for {field_name} length at offset {offset}")
+                    raise ValueError(
+                        f"Not enough data for {field_name} length at offset {offset}"
+                    )
                 length = struct.unpack("<I", data[offset : offset + 4])[0]
                 offset += 4
                 if offset + length > len(data):
-                    raise ValueError(f"Not enough data for {field_name} value (length={length}) at offset {offset}")
+                    raise ValueError(
+                        f"Not enough data for {field_name} value (length={length}) at offset {offset}"
+                    )
                 value = data[offset : offset + length].decode("utf-8")
                 offset += length
             elif field_type == "publicKey":
                 if offset + 32 > len(data):
-                    raise ValueError(f"Not enough data for {field_name} at offset {offset}")
+                    raise ValueError(
+                        f"Not enough data for {field_name} at offset {offset}"
+                    )
                 value = base58.b58encode(data[offset : offset + 32]).decode("utf-8")
                 offset += 32
             elif field_type == "u64":
@@ -219,18 +224,27 @@ async def listen_for_new_tokens():
                                                 continue
 
                                             event_discriminator = decoded_data[:8]
-                                            if event_discriminator != CREATE_EVENT_DISCRIMINATOR:
+                                            if (
+                                                event_discriminator
+                                                != CREATE_EVENT_DISCRIMINATOR
+                                            ):
                                                 # Skip non-CreateEvent logs (e.g., TradeEvent, ExtendAccountEvent)
                                                 continue
 
-                                            print(f"\n🔍 Found CreateEvent, length: {len(decoded_data)} bytes")
-                                            print(f"   Signature: {log_data.get('signature')}")
+                                            print(
+                                                f"\n🔍 Found CreateEvent, length: {len(decoded_data)} bytes"
+                                            )
+                                            print(
+                                                f"   Signature: {log_data.get('signature')}"
+                                            )
 
                                             # Both create and create_v2 emit the same CreateEvent
                                             # The difference is in the optional is_mayhem_mode field
                                             if is_create_v2:
-                                                parsed_data = parse_create_v2_instruction(
-                                                    decoded_data
+                                                parsed_data = (
+                                                    parse_create_v2_instruction(
+                                                        decoded_data
+                                                    )
                                                 )
                                             else:
                                                 parsed_data = parse_create_instruction(
@@ -241,10 +255,12 @@ async def listen_for_new_tokens():
                                                 # Print token information in consistent format
                                                 print_token_info(
                                                     parsed_data,
-                                                    signature=log_data.get("signature")
+                                                    signature=log_data.get("signature"),
                                                 )
                                             else:
-                                                print(f"⚠️  Parsing failed for CreateEvent")
+                                                print(
+                                                    f"⚠️  Parsing failed for CreateEvent"
+                                                )
                                         except Exception as e:
                                             print(f"❌ Error processing log: {e!s}")
 

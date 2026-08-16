@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from uuid import UUID
 
 from rugbot.backtest.finalized_trade_builder import PumpTradeEventProof
@@ -95,6 +96,32 @@ class TradeEventTrajectoryTests(unittest.TestCase):
 
         self._assert_abstains(result, AbstainReason.UNKNOWN_FEE_CONFIG)
 
+    def test_event_fee_rates_must_match_snapshot(self) -> None:
+        source = _source(slot=7, event_index=0)
+        mismatched_event = replace(source.event, protocol_fee_basis_points=101)
+        source = TradeEventTrajectorySource(
+            observation=source.observation,
+            event=mismatched_event,
+            metadata=source.metadata,
+        )
+
+        result = build_trade_event_trajectory_point(
+            source=source,
+            as_of_slot=Slot(10),
+        )
+
+        self._assert_abstains(result, AbstainReason.UNKNOWN_FEE_CONFIG)
+
+    def test_rpc_transaction_observation_without_source_event_ordinal_is_valid(
+        self,
+    ) -> None:
+        result = build_trade_event_trajectory_point(
+            source=_source(slot=7, event_index=0, event_ordinal=None),
+            as_of_slot=Slot(10),
+        )
+
+        self.assertFalse(isinstance(result, AbstainResult))
+
     def test_missing_or_zero_reserve_state_abstains(self) -> None:
         source = _source(slot=7, event_index=0, real_sol_reserves=0)
 
@@ -121,13 +148,14 @@ class TradeEventTrajectoryTests(unittest.TestCase):
             self.assertIs(result.reason, reason)
 
 
-def _source(
+def _source(  # noqa: PLR0913
     *,
     slot: int,
     event_index: int,
     timestamp: int = 100,
     real_sol_reserves: int = 1_000_000_000,
     missing_mint_metadata: bool = False,
+    event_ordinal: int | None = None,
 ) -> TradeEventTrajectorySource:
     observation = RawChainObservation(
         raw_id=UUID("00000000-0000-0000-0000-000000000001"),
@@ -144,7 +172,7 @@ def _source(
         inner_instruction_group_index=None,
         inner_instruction_index=None,
         stack_height=None,
-        event_ordinal=event_index,
+        event_ordinal=event_ordinal,
         commitment="finalized",
         canonical_status="canonical",
         received_wall_ns=slot,
@@ -178,6 +206,8 @@ def _source(
         real_token_reserves_base_units=1_000_000_000,
         protocol_fee_base_units=1,
         creator_fee_base_units=1,
+        protocol_fee_basis_points=100,
+        creator_fee_basis_points=100,
         cashback_base_units=0,
         encoded_event=b"event",
     )

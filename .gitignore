@@ -3,6 +3,7 @@ trades/*
 .vscode
 .pylintrc
 .ruff_cache
+.state/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
