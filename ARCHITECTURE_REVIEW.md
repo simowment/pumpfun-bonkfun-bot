@@ -39,6 +39,11 @@ behavior:
 so paper submissions are rejected instead of producing executable simulated
 fills. The existing exact paper-context resolver is not wired into this path.
 
+The underlying exact-context simulator now supports sequential paper buy and
+sell fills, including partial sells, when that resolver is injected. The
+online CLI still abstains without the resolver because it cannot infer
+historical Pump fees, mint metadata, or finalized reserve state safely.
+
 References:
 
 - `src/rugbot/runtime/cli.py:141`

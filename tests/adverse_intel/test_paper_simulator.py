@@ -1,6 +1,7 @@
 """Focused tests for the pure paper round-trip simulator."""
 
 import unittest
+from dataclasses import replace
 from typing import cast
 
 from rugbot.decision.sizing import EntryLatencySnapshot
@@ -222,6 +223,39 @@ class PaperRoundTripTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(receipt.accepted)
         self.assertFalse(receipt.would_submit_transaction)
         self.assertIsNotNone(receipt.simulated_output_base_units)
+
+    async def test_paper_port_fills_full_sell_after_buy(self) -> None:
+        simulator = PaperRoundTripSimulator(
+            as_of_slot=10,
+            path=QuotePath.PUMP_BONDING_CURVE,
+            reserves=_reserves(),
+            fee_config=_fee_config(),
+            stress=PaperStress(
+                latency_snapshot=_latency(),
+                max_entry_latency_ms=200,
+                max_exit_latency_ms=300,
+            ),
+        )
+        port = PaperExecutionPort(simulator)
+        buy = await port.submit(_intent())
+        if buy.simulated_output_base_units is None:
+            self.fail("paper buy did not produce a position")
+
+        sell = await port.submit(
+            replace(
+                _intent(),
+                intent_id="paper-test-exit",
+                side="sell",
+                quote_amount_base_units=None,
+                base_amount_base_units=buy.simulated_output_base_units,
+                reason_codes=("paper_exit",),
+            )
+        )
+
+        self.assertTrue(sell.accepted)
+        self.assertFalse(sell.would_submit_transaction)
+        self.assertIsNone(sell.signature)
+        self.assertIsNotNone(sell.simulated_output_base_units)
 
 
 def _inputs(

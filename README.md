@@ -184,7 +184,11 @@ uv run pump_bot
 
 The default watch configuration uses `observe`. Changing it to `paper` fails
 closed until an executable Pump quote simulator is connected to the same
-decision path.
+decision path. The core simulator is already available through
+`PaperContextInput`: it uses the pinned Pump quote engine and exact
+point-in-time protocol, mint, reserve, and stress evidence, and fills paper
+buy/sell intents without signing. It refuses stale contexts instead of
+inventing later market state.
 
 ## Live execution
 

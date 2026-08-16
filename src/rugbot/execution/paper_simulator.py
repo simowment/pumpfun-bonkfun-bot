@@ -90,6 +90,16 @@ class PaperRoundTripResult:
 PaperRoundTripOutcome = PaperRoundTripResult | AbstainResult
 
 
+@dataclass(slots=True)
+class _OpenPaperPosition:
+    """State needed to fill later paper sells for one fixed context."""
+
+    original_base_amount: int
+    remaining_base_amount: int
+    full_exit_output: int
+    full_exit_fee: int
+
+
 def simulate_paper_round_trip(*, inputs: PaperRoundTripInputs) -> PaperRoundTripOutcome:
     """Simulate a paper buy and a complete stressed sell without I/O.
 
@@ -272,6 +282,7 @@ class PaperRoundTripSimulator:
             entry_intent=_placeholder_intent(as_of_slot),
             stress=stress,
         )
+        self._open_positions: dict[str, _OpenPaperPosition] = {}
 
     def simulate_round_trip(self, intent: ExecutionIntent) -> PaperRoundTripOutcome:
         """Run the pure round-trip simulation for ``intent``."""
@@ -281,7 +292,10 @@ class PaperRoundTripSimulator:
         )
 
     async def simulate(self, intent: ExecutionIntent) -> ExecutionReceipt:
-        """Return the non-submitting receipt expected by ``PaperExecutionPort``."""
+        """Fill a paper buy or sell without submitting a transaction."""
+
+        if intent.side == "sell":
+            return self._simulate_sell(intent)
 
         result = self.simulate_round_trip(intent)
         if isinstance(result, AbstainResult):
@@ -291,7 +305,87 @@ class PaperRoundTripSimulator:
                 estimated_fee_lamports=Lamports(0),
                 message=f"paper round trip abstained: {result.message}",
             )
+        if not result.accepted:
+            return result.entry_receipt
+        full_exit_output = result.stressed_full_exit_output_quote_base_units
+        full_exit_fee = result.exit_fee_quote_base_units
+        if full_exit_output is None or full_exit_fee is None:
+            return non_submitting_receipt(
+                mode=ExecutionMode.PAPER,
+                intent=intent,
+                estimated_fee_lamports=Lamports(0),
+                message="paper round trip did not produce an executable exit",
+            )
+        if intent.market_id in self._open_positions:
+            return non_submitting_receipt(
+                mode=ExecutionMode.PAPER,
+                intent=intent,
+                estimated_fee_lamports=Lamports(0),
+                message="paper position is already open",
+            )
+        self._open_positions[intent.market_id] = _OpenPaperPosition(
+            original_base_amount=int(result.stressed_entry_output_base_units),
+            remaining_base_amount=int(result.stressed_entry_output_base_units),
+            full_exit_output=int(full_exit_output),
+            full_exit_fee=int(full_exit_fee),
+        )
         return result.entry_receipt
+
+    def _simulate_sell(self, intent: ExecutionIntent) -> ExecutionReceipt:
+        """Fill a full or partial sell against the fixed paper context."""
+
+        intent_error = validate_execution_intent(intent)
+        if intent_error is not None:
+            return non_submitting_receipt(
+                mode=ExecutionMode.PAPER,
+                intent=intent,
+                estimated_fee_lamports=Lamports(0),
+                message=intent_error,
+            )
+        if intent.as_of_slot != self._inputs.as_of_slot:
+            return non_submitting_receipt(
+                mode=ExecutionMode.PAPER,
+                intent=intent,
+                estimated_fee_lamports=Lamports(0),
+                message="paper sell context is stale",
+            )
+        position = self._open_positions.get(intent.market_id)
+        if position is None:
+            return non_submitting_receipt(
+                mode=ExecutionMode.PAPER,
+                intent=intent,
+                estimated_fee_lamports=Lamports(0),
+                message="paper position is not open",
+            )
+        sell_amount = int(intent.base_amount_base_units or 0)
+        if sell_amount > position.remaining_base_amount:
+            return non_submitting_receipt(
+                mode=ExecutionMode.PAPER,
+                intent=intent,
+                estimated_fee_lamports=Lamports(0),
+                message="paper sell exceeds open position",
+            )
+        output = (
+            position.full_exit_output * sell_amount // position.original_base_amount
+        )
+        fee = position.full_exit_fee * sell_amount // position.original_base_amount
+        if output <= 0:
+            return non_submitting_receipt(
+                mode=ExecutionMode.PAPER,
+                intent=intent,
+                estimated_fee_lamports=Lamports(fee),
+                message="paper sell fill would be zero",
+            )
+        position.remaining_base_amount -= sell_amount
+        if position.remaining_base_amount == 0:
+            del self._open_positions[intent.market_id]
+        return _receipt(
+            intent=intent,
+            accepted=True,
+            simulated_output=output,
+            estimated_fee=fee,
+            message="paper sell filled",
+        )
 
 
 def _validate_inputs(inputs: object) -> AbstainResult | None:  # noqa: PLR0911
