@@ -3,7 +3,7 @@
 import unittest
 from dataclasses import replace
 
-from textual.widgets import DataTable, Input, Static, TabbedContent
+from textual.widgets import Checkbox, DataTable, Input, Static, TabbedContent
 
 from rugbot.runtime.wallet_intelligence import (
     WalletIntelligenceReport,
@@ -176,6 +176,23 @@ class WalletTuiTests(unittest.IsolatedAsyncioTestCase):
             app.action_focus_wallet()
             await pilot.pause()
             self.assertTrue(app.query_one("#wallet-input", Input).has_focus)
+
+    async def test_settings_expose_playbook_entry_controls(self) -> None:
+        """The TUI exposes the strict playbook entry controls."""
+
+        app = WalletIntelApp("not-a-wallet", endpoint="https://rpc.example")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for input_id in (
+                "snipe-delay",
+                "min-mc",
+                "max-mc",
+                "max-age",
+                "follow-cooldown",
+                "max-losses",
+            ):
+                self.assertIsInstance(app.query_one(f"#{input_id}", Input), Input)
+            self.assertIsInstance(app.query_one("#buy-once", Checkbox), Checkbox)
 
 
 if __name__ == "__main__":

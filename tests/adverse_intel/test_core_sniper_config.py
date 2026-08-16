@@ -13,6 +13,7 @@ from rugbot.ingest.pump_create_fixture_decode import (
 from rugbot.runtime.config import (
     CoreSniperConfig,
     SniperConfigError,
+    TrackingMode,
     load_sniper_config,
     load_sniper_document,
     parse_sniper_config,
@@ -68,6 +69,17 @@ class CoreSniperConfigTests(unittest.TestCase):
             parse_sniper_config(_yaml() + "\nfeatures: {}\n")
         with self.assertRaises(SniperConfigError):
             parse_sniper_config(_yaml() + "\nplatforms: [pump_fun]\n")
+
+    def test_tracking_mode_distinguishes_creation_and_buy_tracking(self) -> None:
+        creations = parse_sniper_config(
+            _yaml() + "\ntracking_mode: new_token_creations\n"
+        )
+        buys = parse_sniper_config(_yaml() + "\ntracking_mode: track_buys\n")
+
+        self.assertIs(creations.tracking_mode, TrackingMode.NEW_TOKEN_CREATIONS)
+        self.assertIs(buys.tracking_mode, TrackingMode.TRACK_BUYS)
+        with self.assertRaises(SniperConfigError):
+            parse_sniper_config(_yaml() + "\ntracking_mode: track_sells\n")
 
     def test_config_rejects_missing_fields_live_mode_and_float_money(self) -> None:
         with self.assertRaises(SniperConfigError):

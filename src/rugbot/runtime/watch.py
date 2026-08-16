@@ -37,7 +37,7 @@ from rugbot.execution.position_runtime import (
     PositionMarketEvidence,
     advance_paper_position,
 )
-from rugbot.runtime.config import CoreSniperConfig
+from rugbot.runtime.config import CoreSniperConfig, TrackingMode
 from rugbot.runtime.config import ExecutionMode as SniperMode
 from rugbot.runtime.matcher import match_launch_target
 from rugbot.storage.paper_position_store import (
@@ -244,7 +244,7 @@ class WatchSnipeHandler:
         self.auto_buy_paused = False
         self.consecutive_losses = 0
 
-    async def handle(  # noqa: C901, PLR0911, PLR0912
+    async def handle(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self, observation: RawChainObservation
     ) -> AbstainResult | None:
         """Handle one immutable observation without submitting a transaction."""
@@ -254,6 +254,10 @@ class WatchSnipeHandler:
                 AbstainReason.UNKNOWN_PROTOCOL_STATE,
                 "watch handler received malformed observation",
                 as_of_slot=-1,
+            )
+        if self.config.tracking_mode is not TrackingMode.NEW_TOKEN_CREATIONS:
+            return _tracking_mode_abstention(
+                self.config.tracking_mode, as_of_slot=observation.slot
             )
         if self.config.execution.mode in (SniperMode.PAPER, SniperMode.LIVE) and (
             observation.commitment != "finalized"
@@ -791,7 +795,7 @@ def _default_entry_evidence(
         token_mint=launch.mint_pubkey,
         now_ms=event_time_ms,
         event_time_ms=event_time_ms,
-        is_copytrade=True,
+        is_copytrade=False,
         token_created_time_ms=event_time_ms,
     )
 
@@ -844,6 +848,10 @@ def build_watch_snipe_candidate(  # noqa: PLR0911, PLR0913
             "watch launch evidence is malformed",
             as_of_slot=observation.slot,
         )
+    if config.tracking_mode is not TrackingMode.NEW_TOKEN_CREATIONS:
+        return _tracking_mode_abstention(
+            config.tracking_mode, as_of_slot=observation.slot
+        )
     provenance_error = _validate_observation_alignment(
         launch=launch,
         observation=observation,
@@ -886,6 +894,24 @@ def build_watch_snipe_candidate(  # noqa: PLR0911, PLR0913
         creator_pubkey=launch.creator_pubkey,
         block_transaction_index=block_transaction_index,
         intent=intent,
+    )
+
+
+def _tracking_mode_abstention(
+    mode: object,
+    *,
+    as_of_slot: int,
+) -> AbstainResult:
+    if mode is TrackingMode.TRACK_BUYS:
+        return _abstain(
+            AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+            "track_buys requires finalized buy evidence",
+            as_of_slot=as_of_slot,
+        )
+    return _abstain(
+        AbstainReason.UNKNOWN_PROTOCOL_STATE,
+        "tracking mode is malformed",
+        as_of_slot=as_of_slot,
     )
 
 

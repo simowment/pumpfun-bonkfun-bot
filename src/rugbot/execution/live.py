@@ -67,7 +67,7 @@ class LivePumpExecutionPort:
             enable_dynamic_fee=False,
             enable_fixed_fee=self.fixed_priority_fee_microlamports > 0,
             fixed_fee=self.fixed_priority_fee_microlamports,
-            extra_fee=0.0,
+            extra_fee=0,
             hard_cap=self.fixed_priority_fee_microlamports,
         )
 

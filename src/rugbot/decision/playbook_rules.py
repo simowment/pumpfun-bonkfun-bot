@@ -352,6 +352,17 @@ def evaluate_exit_rules(
             original_position_base_units=original_position_base_units,
         )
 
+    if rules.sell.trailing_levels:
+        return ExitRuleDecision(
+            action=ExitRuleAction.HOLD,
+            as_of_slot=evidence.as_of_slot,
+            sell_amount_base_units=0,
+            sell_fraction_ppm=state.exited_fraction_ppm,
+            triggered_level_index=None,
+            reason_codes=("trailing_stop_active_no_trigger",),
+            next_state=state,
+        )
+
     take_profit = _triggered_level(
         rules.sell.take_profit_levels,
         state.filled_take_profit_level_indices,

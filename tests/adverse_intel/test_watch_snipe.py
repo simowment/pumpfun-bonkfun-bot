@@ -49,12 +49,14 @@ from rugbot.ingest.pump_create_fixture_decode import (
 )
 from rugbot.runtime.config import (
     CoreSniperConfig,
+    TrackingMode,
     parse_sniper_config,
 )
 from rugbot.runtime.watch import (
     WatchSnipeHandler as RuntimeWatchSnipeHandler,
 )
 from rugbot.runtime.watch import (
+    _default_entry_evidence,
     build_watch_snipe_candidate,
 )
 
@@ -137,6 +139,69 @@ class WatchSnipeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsInstance(result, AbstainResult)
         self.assertEqual(result.reason, AbstainReason.MISSING_FEATURE)
+
+    def test_track_buys_abstains_without_finalized_buy_evidence(self) -> None:
+        launch = _launch(position=0)
+        config = parse_sniper_config(
+            f"""target:
+  kind: wallet
+  id: "{launch.creator_pubkey}"
+execution:
+  mode: observe
+  quote_size_lamports: 1000000
+tracking_mode: track_buys
+"""
+        )
+
+        result = build_watch_snipe_candidate(
+            config=config,
+            launch=launch,
+            observation=_observation(launch),
+            qualification=_qualification(launch.creator_pubkey),
+            entity_evidence=_entity_evidence(launch.creator_pubkey),
+        )
+
+        self.assertIs(config.tracking_mode, TrackingMode.TRACK_BUYS)
+        self.assertIsInstance(result, AbstainResult)
+        self.assertEqual(result.reason, AbstainReason.UNSUPPORTED_PROTOCOL_STATE)
+
+    async def test_handler_does_not_resolve_launch_for_track_buys(self) -> None:
+        launch = _launch(position=0)
+        config = parse_sniper_config(
+            f"""target:
+  kind: wallet
+  id: "{launch.creator_pubkey}"
+execution:
+  mode: observe
+  quote_size_lamports: 1000000
+tracking_mode: track_buys
+"""
+        )
+        resolved = False
+
+        def resolver(_observation: RawChainObservation) -> LaunchCreatedV2:
+            nonlocal resolved
+            resolved = True
+            return launch
+
+        handler = WatchSnipeHandler(
+            config=config,
+            resolver=resolver,
+            execution_port=ObserveExecutionPort(),
+            buy_cooldown_slots=0,
+        )
+
+        result = await handler.handle(_observation(launch))
+
+        self.assertIsInstance(result, AbstainResult)
+        self.assertEqual(result.reason, AbstainReason.UNSUPPORTED_PROTOCOL_STATE)
+        self.assertFalse(resolved)
+
+    def test_creation_tracking_does_not_mark_launch_as_copytrade(self) -> None:
+        launch = _launch(position=0)
+        evidence = _default_entry_evidence(launch, _observation(launch))
+
+        self.assertFalse(evidence.is_copytrade)
 
     def test_matching_wallet_without_wallet_entity_binding_abstains(self) -> None:
         launch = _launch(position=0)

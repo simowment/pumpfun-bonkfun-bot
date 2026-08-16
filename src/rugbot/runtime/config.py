@@ -54,6 +54,13 @@ class ExecutionMode(StrEnum):
     LIVE = "live"
 
 
+class TrackingMode(StrEnum):
+    """Wallet event that can produce a candidate."""
+
+    NEW_TOKEN_CREATIONS = "new_token_creations"
+    TRACK_BUYS = "track_buys"
+
+
 @dataclass(frozen=True, slots=True)
 class SniperTarget:
     """One Solana wallet or token identity."""
@@ -103,6 +110,7 @@ class CoreSniperConfig:
 
     target: SniperTarget
     execution: SniperExecution
+    tracking_mode: TrackingMode = TrackingMode.NEW_TOKEN_CREATIONS
     rules: PlaybookRules = field(default_factory=PlaybookRules)
     volume_sizing: VolumeSizingPolicy = field(default_factory=VolumeSizingPolicy)
     strategy: StrategyFilterSettings = field(default_factory=StrategyFilterSettings)
@@ -242,17 +250,36 @@ def parse_sniper_config(text: str) -> CoreSniperConfig:
     if "schema" in document or "version" in document:
         raise SniperConfigError("schema and version fields are forbidden")
     _require_known_keys(
-        document, {"target", "execution", "rules", "volume_sizing", "strategy"}
+        document,
+        {
+            "target",
+            "execution",
+            "tracking_mode",
+            "rules",
+            "volume_sizing",
+            "strategy",
+        },
     )
     _require_required_keys(document, {"target", "execution"})
 
     return CoreSniperConfig(
         target=_parse_target(document["target"]),
         execution=_parse_execution(document["execution"]),
+        tracking_mode=_parse_tracking_mode(
+            document.get("tracking_mode", TrackingMode.NEW_TOKEN_CREATIONS.value)
+        ),
         rules=_parse_rules(document.get("rules")),
         volume_sizing=_parse_volume_sizing(document.get("volume_sizing")),
         strategy=_parse_strategy(document.get("strategy")),
     )
+
+
+def _parse_tracking_mode(raw: object) -> TrackingMode:
+    if not isinstance(raw, str) or raw not in {item.value for item in TrackingMode}:
+        raise SniperConfigError(
+            "tracking_mode must be new_token_creations or track_buys"
+        )
+    return TrackingMode(raw)
 
 
 def _parse_target(raw: object) -> SniperTarget:

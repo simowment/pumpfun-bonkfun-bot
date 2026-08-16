@@ -361,7 +361,7 @@ class PlaybookExitRuleTests(unittest.TestCase):
         )
         self.assertIn("no_activity_timeout", inactive.reason_codes)
 
-    def test_take_profit_still_triggers_when_no_trailing_tier_matches(self) -> None:
+    def test_take_profit_is_ignored_when_no_trailing_tier_matches(self) -> None:
         rules = PlaybookRules(
             sell=SellRules(
                 take_profit_levels=(SellLevel(100_000, 500_000),),
@@ -380,8 +380,8 @@ class PlaybookExitRuleTests(unittest.TestCase):
             current_position_base_units=100,
             original_position_base_units=100,
         )
-        self.assertEqual(result.action, ExitRuleAction.SELL)
-        self.assertIn("take_profit_level_0_triggered", result.reason_codes)
+        self.assertEqual(result.action, ExitRuleAction.HOLD)
+        self.assertIn("trailing_stop_active_no_trigger", result.reason_codes)
 
     def test_big_buy_ranges_scale_out_once_and_then_escalate(self) -> None:
         rules = PlaybookRules(

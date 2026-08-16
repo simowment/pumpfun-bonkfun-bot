@@ -27,11 +27,18 @@ from rugbot.ingest.pump_create_fixture_decode import (
 from rugbot.ingest.rpc_observer import RpcHttpResponse
 from rugbot.runtime.cli import (
     WatchCycleResult,
+    _execution_port,
     build_arg_parser,
+    main,
     run_wallet_intelligence_cycle,
     run_watch_cycle,
 )
-from rugbot.runtime.config import parse_sniper_config
+from rugbot.runtime.config import (
+    ExecutionMode as ConfigExecutionMode,
+)
+from rugbot.runtime.config import (
+    parse_sniper_config,
+)
 from rugbot.runtime.wallet_intelligence import WalletIntelligenceReport
 
 FIXTURE = Path(
@@ -243,6 +250,34 @@ execution:
         self.assertTrue(args.intelligence)
         self.assertEqual(args.wallet, "target-wallet")
         self.assertTrue(args.pretty)
+
+    def test_cli_rejects_live_mode_override(self) -> None:
+        with self.assertRaises(SystemExit) as raised:
+            build_arg_parser().parse_args(["--mode", "live"])
+
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_live_configuration_is_rejected_before_port_creation(self) -> None:
+        config = """target:
+  kind: wallet
+  id: "11111111111111111111111111111111"
+execution:
+  mode: live
+  quote_size_lamports: 1
+"""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "watch.yaml"
+            path.write_text(config, encoding="utf-8")
+            with patch.dict("os.environ", {"SOLANA_RPC_HTTP": "https://rpc.example"}):
+                with patch("rugbot.runtime.cli._execution_port") as port:
+                    exit_code = main(["--config", str(path), "--once"])
+
+        self.assertEqual(exit_code, 1)
+        port.assert_not_called()
+
+    def test_live_execution_dispatch_is_fail_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "permanently disabled"):
+            _execution_port(ConfigExecutionMode.LIVE, "https://rpc.example")
 
     def test_intelligence_cycle_reports_finalized_launch_position(self) -> None:
         artifact = json.loads(FIXTURE.read_text(encoding="utf-8"))

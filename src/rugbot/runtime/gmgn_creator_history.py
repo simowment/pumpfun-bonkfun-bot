@@ -17,6 +17,37 @@ MAX_CREATOR_TOKENS = 2_000
 MIN_PUBKEY_LENGTH = 32
 MAX_PUBKEY_LENGTH = 44
 
+_READ_ONLY_ENV_KEYS = frozenset(
+    {
+        "PATH",
+        "PATHEXT",
+        "SystemRoot",
+        "SYSTEMROOT",
+        "WINDIR",
+        "ComSpec",
+        "COMSPEC",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "HOME",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "GMGN_API_KEY",
+        "GMGN_API_URL",
+        "GMGN_BASE_URL",
+        "SOLANA_RPC_HTTP",
+        "SOLANA_NODE_RPC_ENDPOINT",
+        "SOLANA_NODE_WSS_ENDPOINT",
+        "HELIUS_API_KEY",
+        "HELIUS_RPC_URL",
+        "HELIUS_RPC_ENDPOINT",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class GmgnCreatorToken:
@@ -96,7 +127,7 @@ async def fetch_gmgn_creator_history(  # noqa: PLR0911
             "--raw",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env={**os.environ, "GMGN_API_KEY": api_key},
+            env=_read_only_subprocess_environment(api_key),
         )
         stdout, stderr = await asyncio.wait_for(
             process.communicate(), timeout=timeout_seconds
@@ -282,3 +313,13 @@ def _abstain(message: str) -> AbstainResult:
         message=message,
         as_of_slot=-1,
     )
+
+
+def _read_only_subprocess_environment(api_key: str) -> dict[str, str]:
+    """Build the minimal environment permitted for the history subprocess."""
+
+    environment = {
+        key: value for key, value in os.environ.items() if key in _READ_ONLY_ENV_KEYS
+    }
+    environment["GMGN_API_KEY"] = api_key
+    return environment

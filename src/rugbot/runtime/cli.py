@@ -12,7 +12,6 @@ from time import sleep
 from typing import TYPE_CHECKING
 
 from rugbot.domain.decisions import AbstainReason, AbstainResult
-from rugbot.execution.live import LivePumpExecutionPort
 from rugbot.execution.observe import ObserveExecutionPort
 from rugbot.execution.paper import PaperExecutionPort
 from rugbot.ingest.observation_pipeline import DurableObservationIngestor
@@ -273,7 +272,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=tuple(item.value for item in ExecutionMode),
+        choices=(ExecutionMode.OBSERVE.value, ExecutionMode.PAPER.value),
         help="override execution.mode for this run",
     )
     parser.add_argument("--once", action="store_true")
@@ -514,20 +513,15 @@ def _portfolio_json(results: dict[str, dict[str, object]]) -> dict[str, object]:
     }
 
 
-def _execution_port(mode: ExecutionMode, endpoint: str) -> ExecutionPort:
+def _execution_port(mode: ExecutionMode, _endpoint: str) -> ExecutionPort:
     if mode is ExecutionMode.OBSERVE:
         return ObserveExecutionPort()
     if mode is ExecutionMode.PAPER:
         return PaperExecutionPort()
     if mode is ExecutionMode.LIVE:
-        if os.environ.get("RUGBOT_ENABLE_LIVE") != "1":
-            raise ValueError(  # noqa: TRY003
-                "live mode is disabled; set RUGBOT_ENABLE_LIVE=1 explicitly"
-            )
-        private_key = os.environ.get("SOLANA_PRIVATE_KEY")
-        if not private_key:
-            raise ValueError("live mode requires SOLANA_PRIVATE_KEY")  # noqa: TRY003
-        return LivePumpExecutionPort(endpoint=endpoint, private_key=private_key)
+        raise ValueError(  # noqa: TRY003
+            "live mode is permanently disabled in the runtime CLI"
+        )
     raise ValueError(f"unsupported execution mode: {mode}")  # noqa: TRY003
 
 

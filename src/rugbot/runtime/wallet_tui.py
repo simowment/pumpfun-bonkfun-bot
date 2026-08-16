@@ -402,7 +402,7 @@ class WalletIntelApp(App[None]):
                         classes="section-title",
                     )
                     yield Static(
-                        "operator evidence gates are stored; missing evidence abstains",
+                        "operator gates and playbook entry controls are stored; missing evidence abstains",
                         id="settings-note",
                         classes="settings-note",
                     )
@@ -423,6 +423,12 @@ class WalletIntelApp(App[None]):
             ("maximum entry index", "max-entry-index", "1"),
             ("maximum market cap (quote units)", "max-entry-mc", "0"),
             ("entry deviation (ppm)", "entry-deviation", "250000"),
+            ("snipe delay (seconds)", "snipe-delay", "0"),
+            ("minimum MC (quote units)", "min-mc", "0"),
+            ("maximum MC (quote units)", "max-mc", "0"),
+            ("maximum token age (minutes)", "max-age", "0"),
+            ("follow cooldown (seconds)", "follow-cooldown", "0"),
+            ("maximum consecutive losses", "max-losses", "3"),
         )
         rows: list[object] = []
         for label, input_id, placeholder in fields:
@@ -442,6 +448,7 @@ class WalletIntelApp(App[None]):
                 Checkbox("require bundle match", id="require-bundle"),
                 Checkbox("require double signature", id="require-double-signature"),
                 Checkbox("require prior zero balance", id="require-zero-balance"),
+                Checkbox("buy only once", id="buy-once"),
             )
         )
         return rows
@@ -544,6 +551,16 @@ class WalletIntelApp(App[None]):
             "max-entry-index": settings.max_entry_transaction_index,
             "max-entry-mc": config.rules.max_market_cap_quote_base_units,
             "entry-deviation": settings.max_entry_deviation_ppm,
+            "snipe-delay": config.rules.snipe_delay_ms // 1000,
+            "min-mc": config.rules.min_market_cap_quote_base_units,
+            "max-mc": config.rules.max_market_cap_quote_base_units,
+            "max-age": (
+                None
+                if config.rules.max_token_age_ms is None
+                else config.rules.max_token_age_ms // 60_000
+            ),
+            "follow-cooldown": config.rules.copytrade_cooldown_ms // 1000,
+            "max-losses": config.rules.max_consecutive_losses,
         }
         for input_id, value in values.items():
             self.query_one(f"#{input_id}", Input).value = (
@@ -558,6 +575,7 @@ class WalletIntelApp(App[None]):
         self.query_one(
             "#require-zero-balance", Checkbox
         ).value = settings.require_prior_zero_balance
+        self.query_one("#buy-once", Checkbox).value = config.rules.buy_only_once
         status.remove_class("abstain")
         status.update("loaded  watcher config")
 
@@ -567,10 +585,6 @@ class WalletIntelApp(App[None]):
         status = self.query_one("#settings-status", Static)
         try:
             current_config = load_sniper_config(self._config_path)
-            max_market_cap = _optional_setting_int(
-                self.query_one("#max-entry-mc", Input).value,
-                "maximum market cap",
-            )
             settings = StrategyFilterSettings(
                 min_volume_usd_micro=_optional_setting_int(
                     self.query_one("#min-volume", Input).value,
@@ -618,7 +632,35 @@ class WalletIntelApp(App[None]):
                 status.add_class("abstain")
                 status.update("ABSTAIN  watcher config.rules must be one mapping")
                 return
-            rules["max_market_cap_quote_base_units"] = max_market_cap
+            rules.update(
+                {
+                    "snipe_delay_seconds": _setting_int(
+                        self.query_one("#snipe-delay", Input).value,
+                        "snipe delay",
+                    ),
+                    "min_market_cap_quote_base_units": _optional_setting_int(
+                        self.query_one("#min-mc", Input).value,
+                        "minimum market cap",
+                    ),
+                    "max_market_cap_quote_base_units": _optional_setting_int(
+                        self.query_one("#max-mc", Input).value,
+                        "maximum market cap",
+                    ),
+                    "max_token_age_minutes": _setting_int(
+                        self.query_one("#max-age", Input).value,
+                        "maximum token age",
+                    ),
+                    "follow_cooldown_seconds": _setting_int(
+                        self.query_one("#follow-cooldown", Input).value,
+                        "follow cooldown",
+                    ),
+                    "buy_only_once": self.query_one("#buy-once", Checkbox).value,
+                    "max_consecutive_losses": _optional_setting_int(
+                        self.query_one("#max-losses", Input).value,
+                        "maximum consecutive losses",
+                    ),
+                }
+            )
             save_sniper_document(self._config_path, document)
         except (OSError, TypeError, ValueError, SniperConfigError) as error:
             status.add_class("abstain")
