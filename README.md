@@ -81,6 +81,24 @@ Watch one known wallet through finalized HTTP RPC evidence:
 uv run rug_watch --wallet CREATOR_WALLET
 ```
 
+Use a persistent standard Solana WebSocket trigger for the next Pump.fun
+create from one wallet. The WebSocket only wakes the watcher; the transaction
+is fetched again through finalized HTTP RPC before the existing qualification
+and paper-execution path runs. `SOLANA_RPC_WEBSOCKET` is optional when the
+configured HTTP endpoint has a normal `http`/`https` URL because the watcher
+derives the corresponding `ws`/`wss` URL:
+
+```powershell
+uv run rug_watch --wallet CREATOR_WALLET --stream --mode paper `
+  --state-dir .state/stream-watch
+```
+
+The stream uses `logsSubscribe` with `processed` commitment only as a trigger,
+then requires finalized `getTransaction` and finalized block ordering. It
+reconnects after transport failure and performs durable HTTP catch-up first, so
+restarts do not rely solely on the live socket. `--stream` currently targets
+one wallet; portfolio polling remains available through `--portfolio`.
+
 Watch a persistent portfolio of known creator wallets in paper mode:
 
 ```yaml
@@ -112,20 +130,58 @@ uv run rug_wallet --wallet CREATOR_WALLET --pretty
 Interactive terminal UI:
 
 ```powershell
-uv run rug_wallet_tui --wallet CREATOR_WALLET --config watch.yaml
+uv run rug_wallet_tui --config watch.yaml
 ```
 
 Press `r` to refresh, `f` to focus the wallet field, `1`/`2`/`3` to switch
-between Overview, Launches, and Graph, and `q` to quit. The Launches tab has a
-local filter for symbol, mint, creator, or signature. The dashboard shows the
-bounded activity window, native SOL flow, creator and wallet-switch signals,
-refresh deltas, and a compact directional graph before the detailed tables.
+between Overview, Launches, and Graph, `4` for Settings, `5` for Buy, and `6`
+for Positions. Press `t` to cycle Textual themes and `q` to quit. The initial
+theme can be selected with
+`--theme nord` (or another installed Textual theme). The
+Overview presents the finalized assessment, configured signer wallet, capital flow,
+signal flags, and data-quality warnings before the detailed evidence. Launches
+combines target and linked-wallet creates, with local search and an `early only`
+filter. Graph shows directional native-transfer edges, wallet roles, and
+wallet-switch candidates. The dashboard also shows refresh deltas and the
+bounded activity window.
+The `Buy` toolbar button or `5` opens a direct Pump.fun buy/sell form. Enter the
+mint, buy amount in SOL (for example `0.001`), or sell amount in token base
+units, plus slippage in basis points. `6` opens durable paper/live positions
+from `--state-dir` and
+prefills the sell form when a position is selected. Observe and paper
+configurations never submit transactions; paper requires exact finalized market
+context and otherwise abstains. A live direct trade requires
+`execution.mode: live`, the configured public signer, `SOLANA_PRIVATE_KEY`, and
+the explicit TUI flag:
+
+```powershell
+uv run rug_wallet_tui --config watch.yaml --enable-live
+```
+
+The TUI never stores the private key. Use a dedicated funded burner wallet and
+verify the mint, amount, slippage, and returned signature before relying on a
+live transaction.
 The UI refreshes every 30 seconds by default and uses the same bounded,
 finalized-RPC report as the JSON command. The Settings tab edits the same
 strict `watch.yaml` consumed by `rug_watch`; saving validates the whole file
-and replaces it atomically. It exposes the volume, creator-history, win-rate,
-frequency, entry-position, entry-deviation, bundle, double-signature, and
-prior-zero-balance settings without creating a second runtime configuration.
+and replaces it atomically. It exposes the public target wallet, execution
+sizing, entry market-cap, timing gates, and configured qualification fields
+without creating a second configuration. The TUI preserves the execution
+behavior already configured for the watcher instead of exposing a separate
+mode switch. Missing historical or market evidence remains an abstention.
+For live submission, it also stores the signing wallet's public
+address for startup verification; it never stores the private key. After saving,
+restart the watcher with `uv run rug_watch --config watch.yaml`. RPC endpoints
+remain environment variables. Live mode additionally requires the explicit
+`--enable-live` switch and `SOLANA_PRIVATE_KEY`; the key is loaded only for
+that live process and is never stored in the TUI or `watch.yaml`:
+
+```powershell
+uv run rug_watch --config watch.yaml --enable-live
+```
+
+Use a dedicated funded burner wallet for this path. The TUI and observe/paper
+modes never load signing keys.
 
 The result contains `stats`, a `rug_evidence` summary, historical Pump creates,
 and a `graph` payload with nodes and direct native-transfer edges. It also

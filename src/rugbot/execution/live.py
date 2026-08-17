@@ -71,6 +71,12 @@ class LivePumpExecutionPort:
             hard_cap=self.fixed_priority_fee_microlamports,
         )
 
+    @property
+    def signer_pubkey(self) -> str:
+        """Return the public key derived from the locally loaded signer."""
+
+        return str(self._wallet.pubkey)
+
     async def submit(self, intent: ExecutionIntent) -> ExecutionReceipt:
         """Build, sign, submit, and confirm one live Pump intent."""
 
@@ -168,11 +174,20 @@ class LivePumpExecutionPort:
             builder.get_required_accounts_for_buy(token, self._wallet.pubkey, provider),
             builder.get_buy_compute_unit_limit(),
         )
-        if not await self._client.confirm_transaction(signature):
+        try:
+            confirmed = await self._client.confirm_transaction(signature)
+        except Exception:  # noqa: BLE001
+            return _failed_receipt(
+                intent, signature, "buy submitted; confirmation is unknown"
+            )
+        if not confirmed:
             return _failed_receipt(intent, signature, "buy confirmation failed")
-        actual_output, _ = await self._client.get_buy_transaction_details(
-            signature, token.mint, token.bonding_curve
-        )
+        try:
+            actual_output, _ = await self._client.get_buy_transaction_details(
+                signature, token.mint, token.bonding_curve
+            )
+        except Exception:  # noqa: BLE001
+            actual_output = None
         return ExecutionReceipt(
             mode=ExecutionMode.LIVE,
             intent_id=intent.intent_id,
@@ -180,9 +195,13 @@ class LivePumpExecutionPort:
             accepted=True,
             would_submit_transaction=True,
             signature=signature,
-            simulated_output_base_units=actual_output or output,
+            simulated_output_base_units=actual_output,
             estimated_fee_lamports=Lamports(0),
-            message="live buy confirmed",
+            message=(
+                "live buy confirmed"
+                if actual_output is not None
+                else "live buy confirmed; actual output lookup failed"
+            ),
         )
 
     async def _submit_sell(
@@ -213,7 +232,13 @@ class LivePumpExecutionPort:
             ),
             builder.get_sell_compute_unit_limit(),
         )
-        if not await self._client.confirm_transaction(signature):
+        try:
+            confirmed = await self._client.confirm_transaction(signature)
+        except Exception:  # noqa: BLE001
+            return _failed_receipt(
+                intent, signature, "sell submitted; confirmation is unknown"
+            )
+        if not confirmed:
             return _failed_receipt(intent, signature, "sell confirmation failed")
         return ExecutionReceipt(
             mode=ExecutionMode.LIVE,
