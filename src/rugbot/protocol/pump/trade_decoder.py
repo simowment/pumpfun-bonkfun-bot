@@ -10,17 +10,21 @@ from rugbot.domain.trades import PumpTradeInstructionEvidence, TradeSide
 
 PUMP_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 SYSTEM_PROGRAM_ID = "11111111111111111111111111111111"
+ASSOCIATED_TOKEN_PROGRAM_ID = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"  # noqa: S105
 PUMP_FEE_PROGRAM_ID = "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
 PINNED_PUMP_IDL_SHA256 = (
-    "662f9afea2feb1a4318852b65d4c1f642f1fdae8d3c9228478efd01d42dfa41d"
+    "b90bc471327f671449271d5d1d42354d1fae6f5a06502f5834459a3108138e49"
 )
 PUMP_TRADE_DECODER_VERSION = "pump-trade-instruction-v1"
 
 BUY_DISCRIMINATOR = bytes([102, 6, 61, 18, 1, 218, 235, 234])
 SELL_DISCRIMINATOR = bytes([51, 230, 133, 164, 1, 127, 131, 173])
+BUY_V2_DISCRIMINATOR = bytes([184, 23, 238, 97, 103, 197, 211, 61])
+SELL_V2_DISCRIMINATOR = bytes([93, 246, 130, 60, 231, 233, 64, 178])
 DISCRIMINATOR_SIZE = 8
 U64_SIZE = 8
 BOOL_SIZE = 1
+OPTION_BOOL_SIZE = 2
 
 BUY_ACCOUNT_NAMES = (
     "global",
@@ -56,8 +60,66 @@ SELL_ACCOUNT_NAMES = (
     "fee_config",
     "fee_program",
 )
+BUY_V2_ACCOUNT_NAMES = (
+    "global",
+    "base_mint",
+    "quote_mint",
+    "base_token_program",
+    "quote_token_program",
+    "associated_token_program",
+    "fee_recipient",
+    "associated_quote_fee_recipient",
+    "buyback_fee_recipient",
+    "associated_quote_buyback_fee_recipient",
+    "bonding_curve",
+    "associated_base_bonding_curve",
+    "associated_quote_bonding_curve",
+    "user",
+    "associated_base_user",
+    "associated_quote_user",
+    "creator_vault",
+    "associated_creator_vault",
+    "sharing_config",
+    "global_volume_accumulator",
+    "user_volume_accumulator",
+    "associated_user_volume_accumulator",
+    "fee_config",
+    "fee_program",
+    "system_program",
+    "event_authority",
+    "program",
+)
+SELL_V2_ACCOUNT_NAMES = (
+    "global",
+    "base_mint",
+    "quote_mint",
+    "base_token_program",
+    "quote_token_program",
+    "associated_token_program",
+    "fee_recipient",
+    "associated_quote_fee_recipient",
+    "buyback_fee_recipient",
+    "associated_quote_buyback_fee_recipient",
+    "bonding_curve",
+    "associated_base_bonding_curve",
+    "associated_quote_bonding_curve",
+    "user",
+    "associated_base_user",
+    "associated_quote_user",
+    "creator_vault",
+    "associated_creator_vault",
+    "sharing_config",
+    "user_volume_accumulator",
+    "associated_user_volume_accumulator",
+    "fee_config",
+    "fee_program",
+    "system_program",
+    "event_authority",
+    "program",
+)
 FIXED_ACCOUNT_PUBKEYS = {
     "system_program": SYSTEM_PROGRAM_ID,
+    "associated_token_program": ASSOCIATED_TOKEN_PROGRAM_ID,
     "program": PUMP_PROGRAM_ID,
     "fee_program": PUMP_FEE_PROGRAM_ID,
 }
@@ -89,6 +151,14 @@ class _TradeInstructionSchema:
     discriminator: bytes
     required_account_names: tuple[str, ...]
     data_length: int
+    mint_account_name: str = "mint"
+    bonding_curve_account_name: str = "bonding_curve"
+    associated_bonding_curve_account_name: str = "associated_bonding_curve"
+    associated_user_account_name: str = "associated_user"
+    user_account_name: str = "user"
+    token_role_account_name: str = "token_program"  # noqa: S105
+    fee_config_account_name: str = "fee_config"
+    fee_program_account_name: str = "fee_program"
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +187,36 @@ _TRADE_SCHEMAS = {
         discriminator=SELL_DISCRIMINATOR,
         required_account_names=SELL_ACCOUNT_NAMES,
         data_length=DISCRIMINATOR_SIZE + U64_SIZE + U64_SIZE,
+    ),
+    BUY_V2_DISCRIMINATOR: _TradeInstructionSchema(
+        name="buy_v2",
+        side=TradeSide.BUY,
+        discriminator=BUY_V2_DISCRIMINATOR,
+        required_account_names=BUY_V2_ACCOUNT_NAMES,
+        data_length=DISCRIMINATOR_SIZE + U64_SIZE + U64_SIZE,
+        mint_account_name="base_mint",
+        bonding_curve_account_name="bonding_curve",
+        associated_bonding_curve_account_name="associated_base_bonding_curve",
+        associated_user_account_name="associated_base_user",
+        user_account_name="user",
+        token_role_account_name="base_token_program",  # noqa: S106
+        fee_config_account_name="fee_config",
+        fee_program_account_name="fee_program",
+    ),
+    SELL_V2_DISCRIMINATOR: _TradeInstructionSchema(
+        name="sell_v2",
+        side=TradeSide.SELL,
+        discriminator=SELL_V2_DISCRIMINATOR,
+        required_account_names=SELL_V2_ACCOUNT_NAMES,
+        data_length=DISCRIMINATOR_SIZE + U64_SIZE + U64_SIZE,
+        mint_account_name="base_mint",
+        bonding_curve_account_name="bonding_curve",
+        associated_bonding_curve_account_name="associated_base_bonding_curve",
+        associated_user_account_name="associated_base_user",
+        user_account_name="user",
+        token_role_account_name="base_token_program",  # noqa: S106
+        fee_config_account_name="fee_config",
+        fee_program_account_name="fee_program",
     ),
 }
 
@@ -283,13 +383,38 @@ def _validate_instruction_layout(
     instruction: CompiledPumpInstruction,
     schema: _TradeInstructionSchema,
 ) -> AbstainResult | None:
-    if len(instruction.data) != schema.data_length:
+    legacy_buy_without_track_volume = (
+        schema.discriminator == BUY_DISCRIMINATOR
+        and len(instruction.data) == DISCRIMINATOR_SIZE + U64_SIZE * 2
+    )
+    legacy_buy_option_bool = (
+        schema.discriminator == BUY_DISCRIMINATOR
+        and len(instruction.data) == DISCRIMINATOR_SIZE + U64_SIZE * 2 + 2
+    )
+    legacy_sell_option_bool = (
+        schema.discriminator == SELL_DISCRIMINATOR
+        and len(instruction.data) == DISCRIMINATOR_SIZE + U64_SIZE * 2 + 2
+    )
+    if (
+        not legacy_buy_without_track_volume
+        and not legacy_buy_option_bool
+        and not legacy_sell_option_bool
+        and len(instruction.data) != schema.data_length
+    ):
         return _abstain(
             reason=AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
             message=f"{schema.name} instruction data length is unsupported",
             as_of_slot=instruction.as_of_slot,
         )
-    if len(instruction.account_indices) < len(schema.required_account_names):
+    if schema.discriminator in (BUY_V2_DISCRIMINATOR, SELL_V2_DISCRIMINATOR):
+        accounts_match = len(instruction.account_indices) == len(
+            schema.required_account_names
+        )
+    else:
+        accounts_match = len(instruction.account_indices) >= len(
+            schema.required_account_names
+        )
+    if not accounts_match:
         return _abstain(
             reason=AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
             message=f"{schema.name} required accounts are missing",
@@ -367,18 +492,41 @@ def _validate_account_role_proofs(
     return None
 
 
-def _decode_args(
+def _decode_args(  # noqa: C901, PLR0911
     instruction: CompiledPumpInstruction,
     schema: _TradeInstructionSchema,
 ) -> _DecodedArgs | AbstainResult:
-    if schema.discriminator == BUY_DISCRIMINATOR:
-        track_volume = _decode_bool(instruction.data[DISCRIMINATOR_SIZE + 16])
-        if track_volume is None:
+    if schema.discriminator == BUY_V2_DISCRIMINATOR:
+        base_amount = _u64_at(instruction.data, 8)
+        max_quote_cost = _u64_at(instruction.data, 16)
+        if base_amount <= 0 or max_quote_cost <= 0:
             return _abstain(
                 reason=AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
-                message="buy track_volume bool is unsupported",
+                message="buy_v2 amounts must be positive",
                 as_of_slot=instruction.as_of_slot,
             )
+        return _DecodedArgs(
+            base_amount_base_units=TokenBaseUnits(base_amount),
+            max_quote_cost_base_units=QuoteBaseUnits(max_quote_cost),
+        )
+    if schema.discriminator == BUY_DISCRIMINATOR:
+        track_volume = None
+        if len(instruction.data) == schema.data_length:
+            track_volume = _decode_bool(instruction.data[DISCRIMINATOR_SIZE + 16])
+            if track_volume is None:
+                return _abstain(
+                    reason=AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+                    message="buy track_volume bool is unsupported",
+                    as_of_slot=instruction.as_of_slot,
+                )
+        elif len(instruction.data) == schema.data_length + 1:
+            track_volume = _decode_option_bool(instruction.data[24:26])
+            if track_volume is _INVALID_OPTION_BOOL:
+                return _abstain(
+                    reason=AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+                    message="buy track_volume option is unsupported",
+                    as_of_slot=instruction.as_of_slot,
+                )
         base_amount = _u64_at(instruction.data, 8)
         max_quote_cost = _u64_at(instruction.data, 16)
         if base_amount <= 0 or max_quote_cost <= 0:
@@ -392,6 +540,15 @@ def _decode_args(
             max_quote_cost_base_units=QuoteBaseUnits(max_quote_cost),
             track_volume=track_volume,
         )
+    track_volume = None
+    if len(instruction.data) == schema.data_length + OPTION_BOOL_SIZE:
+        track_volume = _decode_option_bool(instruction.data[24:26])
+        if track_volume is _INVALID_OPTION_BOOL:
+            return _abstain(
+                reason=AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+                message="sell track_volume option is unsupported",
+                as_of_slot=instruction.as_of_slot,
+            )
     base_amount = _u64_at(instruction.data, 8)
     if base_amount <= 0:
         return _abstain(
@@ -402,6 +559,7 @@ def _decode_args(
     return _DecodedArgs(
         base_amount_base_units=TokenBaseUnits(base_amount),
         min_quote_output_base_units=QuoteBaseUnits(_u64_at(instruction.data, 16)),
+        track_volume=track_volume,
     )
 
 
@@ -411,6 +569,17 @@ def _decode_bool(value: int) -> bool | None:
     if value == 1:
         return True
     return None
+
+
+_INVALID_OPTION_BOOL = object()
+
+
+def _decode_option_bool(value: bytes) -> bool | None | object:
+    if len(value) != OPTION_BOOL_SIZE or value[0] not in (0, 1):
+        return _INVALID_OPTION_BOOL
+    if value[0] == 0:
+        return None if value[1] == 0 else _INVALID_OPTION_BOOL
+    return _decode_bool(value[1])
 
 
 def _u64_at(data: bytes, offset: int) -> int:
@@ -449,22 +618,30 @@ def _build_trade_instruction(
         outer_instruction_index=instruction.outer_instruction_index,
         inner_instruction_group_index=instruction.inner_instruction_group_index,
         inner_instruction_index=instruction.inner_instruction_index,
-        mint_account_index=_account_index(instruction, schema, "mint"),
+        mint_account_index=_account_index(
+            instruction, schema, schema.mint_account_name
+        ),
         bonding_curve_account_index=_account_index(
-            instruction, schema, "bonding_curve"
+            instruction, schema, schema.bonding_curve_account_name
         ),
         associated_bonding_curve_account_index=_account_index(
-            instruction, schema, "associated_bonding_curve"
+            instruction, schema, schema.associated_bonding_curve_account_name
         ),
         associated_user_account_index=_account_index(
-            instruction, schema, "associated_user"
+            instruction, schema, schema.associated_user_account_name
         ),
-        user_account_index=_account_index(instruction, schema, "user"),
+        user_account_index=_account_index(
+            instruction, schema, schema.user_account_name
+        ),
         token_program_account_index=_account_index(
-            instruction, schema, "token_program"
+            instruction, schema, schema.token_role_account_name
         ),
-        fee_config_account_index=_account_index(instruction, schema, "fee_config"),
-        fee_program_account_index=_account_index(instruction, schema, "fee_program"),
+        fee_config_account_index=_account_index(
+            instruction, schema, schema.fee_config_account_name
+        ),
+        fee_program_account_index=_account_index(
+            instruction, schema, schema.fee_program_account_name
+        ),
         base_amount_base_units=decoded_args.base_amount_base_units,
         quote_amount_base_units=decoded_args.quote_amount_base_units,
         max_quote_cost_base_units=decoded_args.max_quote_cost_base_units,

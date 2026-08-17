@@ -19,6 +19,7 @@ from rugbot.backtest.outcome_builder import (
     build_outcome_observation_point,
 )
 from rugbot.backtest.trade_event_trajectory import (
+    PumpTradeEventProtocolProof,
     TradeEventTrajectoryMetadataProof,
     TradeEventTrajectorySource,
     build_trade_event_trajectory_point,
@@ -26,6 +27,7 @@ from rugbot.backtest.trade_event_trajectory import (
 from rugbot.domain.amounts import Slot, TokenBaseUnits
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.observations import RawChainObservation
+from rugbot.domain.quotes import QuotePath
 from rugbot.models.adverse_event import (
     AdverseEvent,
     AdverseEventDetection,
@@ -61,11 +63,12 @@ class FinalizedPumpTradePoint:
     observation: RawChainObservation
     event: PumpTradeEventProof
     event_index: int
-    protocol_snapshot: PumpProtocolVersionSnapshot | None
+    protocol_snapshot: PumpProtocolVersionSnapshot | PumpTradeEventProtocolProof | None
     mint_metadata: PumpCreateMintMetadataProof | None
     curve_completed: bool
     migration_observed: bool
     evidence_ids: tuple[str, ...]
+    quote_path: QuotePath = QuotePath.PUMP_BONDING_CURVE
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +214,7 @@ def build_launch_outcome(
                 protocol_snapshot=point.protocol_snapshot,
                 mint_metadata=point.mint_metadata,
                 evidence_ids=point.evidence_ids,
+                quote_path=point.quote_path,
             ),
         )
         finalized_point = build_trade_event_trajectory_point(

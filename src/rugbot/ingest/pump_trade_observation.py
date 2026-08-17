@@ -17,15 +17,22 @@ from rugbot.domain.trades import PumpTradeInstructionEvidence
 from rugbot.protocol.pump.trade_decoder import (
     BUY_ACCOUNT_NAMES,
     BUY_DISCRIMINATOR,
+    BUY_V2_ACCOUNT_NAMES,
+    BUY_V2_DISCRIMINATOR,
     PINNED_PUMP_IDL_SHA256,
     PUMP_PROGRAM_ID,
     SELL_ACCOUNT_NAMES,
     SELL_DISCRIMINATOR,
+    SELL_V2_ACCOUNT_NAMES,
+    SELL_V2_DISCRIMINATOR,
     CompiledPumpInstruction,
     decode_pump_trade_instruction,
 )
 
 PumpTradeObservationResult = tuple[PumpTradeInstructionEvidence, ...] | AbstainResult
+
+# V2 layouts are imported from the pure decoder so ingestion and replay use
+# exactly the same pinned account contract.
 
 
 def decode_pump_trade_observation(
@@ -161,7 +168,7 @@ def _load_transaction(
     return message, account_pubkeys
 
 
-def _compiled_instruction(
+def _compiled_instruction(  # noqa: C901
     raw_instruction: object,
     *,
     observation: RawChainObservation,
@@ -216,12 +223,22 @@ def _compiled_instruction(
             observation.slot,
         )
     discriminator = data[:8]
-    if discriminator not in (BUY_DISCRIMINATOR, SELL_DISCRIMINATOR):
+    if discriminator not in (
+        BUY_DISCRIMINATOR,
+        SELL_DISCRIMINATOR,
+        BUY_V2_DISCRIMINATOR,
+        SELL_V2_DISCRIMINATOR,
+    ):
         return None
-    names = (
-        BUY_ACCOUNT_NAMES if discriminator == BUY_DISCRIMINATOR else SELL_ACCOUNT_NAMES
-    )
-    if len(accounts) < len(names):
+    names = _account_names(discriminator)
+    if discriminator in (BUY_V2_DISCRIMINATOR, SELL_V2_DISCRIMINATOR):
+        if len(accounts) != len(names):
+            return _abstain(
+                AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+                "Pump v2 trade instruction account layout is not exact",
+                observation.slot,
+            )
+    elif len(accounts) < len(names):
         return _abstain(
             AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
             "Pump trade instruction account layout is incomplete",
@@ -244,6 +261,16 @@ def _compiled_instruction(
         signature=observation.signature,
         transaction_slot_account_state_available=False,
     )
+
+
+def _account_names(discriminator: bytes) -> tuple[str, ...]:
+    if discriminator == BUY_DISCRIMINATOR:
+        return BUY_ACCOUNT_NAMES
+    if discriminator == SELL_DISCRIMINATOR:
+        return SELL_ACCOUNT_NAMES
+    if discriminator == BUY_V2_DISCRIMINATOR:
+        return BUY_V2_ACCOUNT_NAMES
+    return SELL_V2_ACCOUNT_NAMES
 
 
 def _account_pubkeys(

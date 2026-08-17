@@ -491,7 +491,11 @@ def _validate_trade(
     as_of_slot: Slot,
     launch_ids: set[str],
 ) -> AbstainResult | None:
-    if trade.as_of_slot != as_of_slot or trade.slot > as_of_slot:
+    if (
+        trade.as_of_slot < trade.slot
+        or trade.as_of_slot > as_of_slot
+        or trade.slot > as_of_slot
+    ):
         return _abstain(
             AbstainReason.STALE_STATE,
             "finalized trade is outside the dataset cutoff",

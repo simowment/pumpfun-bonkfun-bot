@@ -26,7 +26,121 @@ SOLANA_ADDRESS_BYTES = 32
 ACCOUNT_DATA_PARTS = 2
 
 AccountObservationResult: TypeAlias = RawChainObservation | AbstainResult
+AccountObservationsResult: TypeAlias = tuple[RawChainObservation, ...] | AbstainResult
 _ACCOUNT_INFO_METHODS = frozenset({"getAccountInfo"})
+_MULTIPLE_ACCOUNT_INFO_METHODS = frozenset({"getMultipleAccounts"})
+MAX_MULTIPLE_ACCOUNT_ADDRESSES = 100
+
+
+async def observe_multiple_account_info(  # noqa: PLR0911, PLR0913
+    addresses: tuple[str, ...],
+    *,
+    endpoint: str,
+    source_id: str = "solana-http-rpc-multiple-account-info",
+    observer_id: str = "rpc-multiple-account-observer",
+    boot_id: UUID | None = None,
+    receive_sequence_start: int = 0,
+    transport: RpcHttpTransport | None = None,
+    as_of_slot: int | None = None,
+) -> AccountObservationsResult:
+    """Fetch a coherent finalized account batch for one context slot.
+
+    ``getMultipleAccounts`` gives every returned account the same RPC context
+    slot. That property is required when a pure resolver combines protocol,
+    fee, mint, and curve bytes into one paper quote context. A requested slot
+    is still an exact requirement; ``minContextSlot`` never turns a newer
+    response into historical evidence.
+    """
+
+    validation = _validate_multiple_inputs(
+        addresses=addresses,
+        endpoint=endpoint,
+        source_id=source_id,
+        observer_id=observer_id,
+        boot_id=boot_id,
+        receive_sequence_start=receive_sequence_start,
+        as_of_slot=as_of_slot,
+    )
+    if validation is not None:
+        return validation
+
+    result = await _read_multiple_account_info(
+        transport or AiohttpRpcTransport(),
+        endpoint=endpoint,
+        addresses=addresses,
+        as_of_slot=as_of_slot,
+    )
+    if isinstance(result, AbstainResult):
+        return result
+
+    slot, values, response_body = result
+    resolved_boot_id = boot_id or uuid4()
+    observations: list[RawChainObservation] = []
+    for offset, (address, value) in enumerate(zip(addresses, values, strict=True)):
+        if type(value) is not dict:
+            return _abstain(
+                AbstainReason.MISSING_FEATURE,
+                "getMultipleAccounts returned missing account data",
+                slot,
+            )
+        owner = value.get("owner")
+        data = value.get("data")
+        if type(owner) is not str or not owner or "data" not in value:
+            return _abstain(
+                AbstainReason.MISSING_FEATURE,
+                "getMultipleAccounts returned incomplete account identity",
+                slot,
+            )
+        account_data = _validated_account_data(
+            (slot, owner, data),
+            as_of_slot=slot,
+        )
+        if isinstance(account_data, AbstainResult):
+            return account_data
+        owner_program_id = _decode_pubkey(
+            owner,
+            field_name="owner",
+            as_of_slot=slot,
+        )
+        if isinstance(owner_program_id, AbstainResult):
+            return owner_program_id
+        observations.append(
+            RawChainObservation(
+                raw_id=uuid4(),
+                source_id=source_id,
+                observer_id=observer_id,
+                boot_id=resolved_boot_id,
+                receive_sequence=receive_sequence_start + offset + 1,
+                slot=slot,
+                parent_slot=None,
+                blockhash=None,
+                signature=None,
+                transaction_index=None,
+                outer_instruction_index=None,
+                inner_instruction_group_index=None,
+                inner_instruction_index=None,
+                stack_height=None,
+                event_ordinal=None,
+                commitment=FINALIZED,
+                canonical_status="canonical",
+                received_wall_ns=time_ns(),
+                received_monotonic_ns=monotonic_ns(),
+                program_id=None,
+                account_pubkey=bytes(base58.b58decode(address)),
+                account_owner_program_id=owner_program_id,
+                raw_transaction=None,
+                raw_transaction_format=None,
+                raw_account_data=account_data,
+                account_write_version=None,
+                source_update_kind="account",
+                raw_source_status=None,
+                raw_source_payload=response_body,
+                decoder_name=None,
+                decoder_version=None,
+                idl_hash=None,
+            )
+        )
+    return tuple(observations)
 
 
 async def observe_account_info(  # noqa: PLR0913
@@ -187,6 +301,101 @@ async def _read_account_info(
         response_body=response_body,
         expected_slot=as_of_slot,
     )
+
+
+async def _read_multiple_account_info(  # noqa: C901, PLR0911
+    transport: RpcHttpTransport,
+    *,
+    endpoint: str,
+    addresses: tuple[str, ...],
+    as_of_slot: int | None,
+) -> tuple[int, tuple[object, ...], bytes] | AbstainResult:
+    method = "getMultipleAccounts"
+    if method not in _MULTIPLE_ACCOUNT_INFO_METHODS:
+        return _abstain(
+            AbstainReason.UNKNOWN_PROTOCOL_STATE,
+            "observer attempted a non-read-only RPC method",
+            as_of_slot=as_of_slot if as_of_slot is not None else -1,
+        )
+
+    config: dict[str, object] = {
+        "commitment": FINALIZED,
+        "encoding": ACCOUNT_INFO_ENCODING,
+    }
+    if as_of_slot is not None:
+        config["minContextSlot"] = as_of_slot
+    request_body = _request_body(method, (list(addresses), config))
+    try:
+        response_or_awaitable = transport(endpoint, request_body)
+        response = (
+            await response_or_awaitable
+            if inspect.isawaitable(response_or_awaitable)
+            else response_or_awaitable
+        )
+    except Exception as error:  # noqa: BLE001
+        return _abstain(
+            AbstainReason.MISSING_FEATURE,
+            f"{method} transport failed: {type(error).__name__}",
+            as_of_slot=as_of_slot if as_of_slot is not None else -1,
+        )
+
+    if type(response) is not RpcHttpResponse:
+        return _abstain(
+            AbstainReason.UNKNOWN_PROTOCOL_STATE,
+            f"{method} transport returned malformed response",
+            as_of_slot=as_of_slot if as_of_slot is not None else -1,
+        )
+    if response.status != HTTP_OK or type(response.body) is not bytes:
+        return _abstain(
+            AbstainReason.MISSING_FEATURE,
+            f"{method} returned incomplete HTTP evidence",
+            as_of_slot=as_of_slot if as_of_slot is not None else -1,
+        )
+
+    decoded = _decode_rpc_response(response.body, method=method)
+    if isinstance(decoded, AbstainResult):
+        return decoded
+    result, response_body = decoded
+    if type(result) is not dict:
+        return _abstain(
+            AbstainReason.MISSING_FEATURE,
+            f"{method} returned no account result",
+            as_of_slot=as_of_slot if as_of_slot is not None else -1,
+        )
+    context = result.get("context")
+    values = result.get("value")
+    if type(context) is not dict or type(context.get("slot")) is not int:
+        return _abstain(
+            AbstainReason.MISSING_FEATURE,
+            f"{method} returned no account context",
+            as_of_slot=as_of_slot if as_of_slot is not None else -1,
+        )
+    slot = context["slot"]
+    if slot < 0:
+        return _abstain(
+            AbstainReason.UNKNOWN_PROTOCOL_STATE,
+            f"{method} returned an invalid account context slot",
+            as_of_slot=-1,
+        )
+    if as_of_slot is not None and slot != as_of_slot:
+        return _abstain(
+            AbstainReason.STALE_STATE,
+            f"{method} context slot does not match the requested slot",
+            as_of_slot=slot,
+        )
+    if context.get("commitment", FINALIZED) != FINALIZED:
+        return _abstain(
+            AbstainReason.STALE_STATE,
+            f"{method} returned a non-finalized account context",
+            as_of_slot=slot,
+        )
+    if type(values) is not list or len(values) != len(addresses):
+        return _abstain(
+            AbstainReason.MISSING_FEATURE,
+            f"{method} returned an incomplete account list",
+            as_of_slot=slot,
+        )
+    return slot, tuple(values), response_body
 
 
 def _validated_result(  # noqa: PLR0911
@@ -405,6 +614,41 @@ def _validate_inputs(  # noqa: PLR0913
     return None
 
 
+def _validate_multiple_inputs(  # noqa: PLR0913
+    *,
+    addresses: object,
+    endpoint: str,
+    source_id: str,
+    observer_id: str,
+    boot_id: UUID | None,
+    receive_sequence_start: int,
+    as_of_slot: int | None,
+) -> AbstainResult | None:
+    if type(addresses) is not tuple or not addresses:
+        return _abstain(
+            AbstainReason.MISSING_FEATURE,
+            "account address tuple is required",
+            as_of_slot if type(as_of_slot) is int else -1,
+        )
+    if len(addresses) > MAX_MULTIPLE_ACCOUNT_ADDRESSES or any(
+        not _valid_address(address) for address in addresses
+    ):
+        return _abstain(
+            AbstainReason.UNKNOWN_PROTOCOL_STATE,
+            "account address tuple is malformed or exceeds the batch bound",
+            as_of_slot if type(as_of_slot) is int else -1,
+        )
+    return _validate_inputs(
+        address=addresses[0],
+        endpoint=endpoint,
+        source_id=source_id,
+        observer_id=observer_id,
+        boot_id=boot_id,
+        receive_sequence_start=receive_sequence_start,
+        as_of_slot=as_of_slot,
+    )
+
+
 def _valid_address(value: object) -> bool:
     if type(value) is not str:
         return False
@@ -449,4 +693,9 @@ def _non_blank_str(value: object) -> bool:
     return type(value) is str and bool(value.strip())
 
 
-__all__ = ["AccountObservationResult", "observe_account_info"]
+__all__ = [
+    "AccountObservationResult",
+    "AccountObservationsResult",
+    "observe_account_info",
+    "observe_multiple_account_info",
+]

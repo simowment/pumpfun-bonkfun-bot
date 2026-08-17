@@ -53,11 +53,12 @@ from rugbot.runtime.config import (
     parse_sniper_config,
 )
 from rugbot.runtime.watch import (
-    WatchSnipeHandler as RuntimeWatchSnipeHandler,
-)
-from rugbot.runtime.watch import (
+    WatchSnipeCandidate,
     _default_entry_evidence,
     build_watch_snipe_candidate,
+)
+from rugbot.runtime.watch import (
+    WatchSnipeHandler as RuntimeWatchSnipeHandler,
 )
 
 
@@ -129,7 +130,7 @@ class WatchSnipeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsInstance(result, AbstainResult)
 
-    def test_matching_wallet_without_qualification_abstains(self) -> None:
+    def test_explicit_wallet_can_snipe_without_precomputed_qualification(self) -> None:
         launch = _launch(position=0)
         result = build_watch_snipe_candidate(
             config=_config(launch),
@@ -137,8 +138,7 @@ class WatchSnipeTests(unittest.IsolatedAsyncioTestCase):
             observation=_observation(launch),
         )
 
-        self.assertIsInstance(result, AbstainResult)
-        self.assertEqual(result.reason, AbstainReason.MISSING_FEATURE)
+        self.assertIsInstance(result, WatchSnipeCandidate)
 
     def test_track_buys_abstains_without_finalized_buy_evidence(self) -> None:
         launch = _launch(position=0)

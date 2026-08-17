@@ -56,6 +56,19 @@ FORBIDDEN_IMPORT_PREFIXES = (
 class PumpCreateV2DecoderTests(unittest.TestCase):
     """Tests for pinned Pump create_v2 launch evidence decoding."""
 
+    def test_decodes_omitted_option_bool_as_disabled(self) -> None:
+        """The optional trailing OptionBool may be omitted on the wire."""
+
+        result = decode_pump_create_v2_instruction(
+            _instruction(data=_create_data(is_cashback_enabled=b"")),
+            idl_hash=PINNED_PUMP_IDL_SHA256,
+        )
+
+        self.assertIsInstance(result, LaunchCreatedV2)
+        if isinstance(result, AbstainResult):
+            self.fail(result.message)
+        self.assertFalse(result.is_cashback_enabled)
+
     def test_decodes_create_v2_args_accounts_and_distinct_actors(self) -> None:
         """The decoder preserves IDL roles and supplied actor evidence."""
 

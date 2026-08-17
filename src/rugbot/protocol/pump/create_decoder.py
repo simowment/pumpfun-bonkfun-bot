@@ -21,7 +21,7 @@ ASSOCIATED_SPL_PROGRAM_ID = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 MAYHEM_PROGRAM_ID = "MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e"
 WSOL_MINT_ID = "So11111111111111111111111111111111111111112"
 PINNED_PUMP_IDL_SHA256 = (
-    "662f9afea2feb1a4318852b65d4c1f642f1fdae8d3c9228478efd01d42dfa41d"
+    "b90bc471327f671449271d5d1d42354d1fae6f5a06502f5834459a3108138e49"
 )
 PUMP_CREATE_V2_DECODER_VERSION = "pump-create-v2-instruction-v1"
 CREATE_V2_DISCRIMINATOR = bytes([214, 144, 76, 236, 95, 139, 49, 180])
@@ -487,7 +487,7 @@ def _decode_create_v2_tail(
     instruction: CompiledPumpCreateV2Instruction,
     offset: int,
 ) -> tuple[str, bool, bool] | AbstainResult:
-    if offset + PUBKEY_SIZE + BOOL_SIZE + BOOL_SIZE != len(instruction.data):
+    if offset + PUBKEY_SIZE + BOOL_SIZE > len(instruction.data):
         return _unsupported_arg(
             instruction,
             "create_v2 argument length does not match pinned IDL",
@@ -501,13 +501,23 @@ def _decode_create_v2_tail(
         return _unsupported_arg(instruction, "is_mayhem_mode bool is unsupported")
     offset += BOOL_SIZE
 
+    remaining = len(instruction.data) - offset
+    if remaining == 0:
+        # Pump has emitted create_v2 transactions with the optional trailing
+        # OptionBool omitted. The IDL type itself is a one-byte bool struct.
+        return creator_pubkey, is_mayhem_mode, False
+    if remaining != BOOL_SIZE:
+        return _unsupported_arg(
+            instruction,
+            "create_v2 OptionBool has an unsupported layout",
+        )
+
     is_cashback_enabled = _decode_bool(instruction.data[offset])
     if is_cashback_enabled is None:
         return _unsupported_arg(
             instruction,
             "is_cashback_enabled bool is unsupported",
         )
-
     return creator_pubkey, is_mayhem_mode, is_cashback_enabled
 
 

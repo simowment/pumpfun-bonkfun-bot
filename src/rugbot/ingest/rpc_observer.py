@@ -60,6 +60,7 @@ RpcHttpTransport: TypeAlias = Callable[
     [str, bytes], Awaitable[RpcHttpResponse] | RpcHttpResponse
 ]
 RpcObservationResult: TypeAlias = tuple[RawChainObservation, ...] | AbstainResult
+FinalizedTransactionResult: TypeAlias = RawChainObservation | None | AbstainResult
 
 
 class _InvalidHistoryCursorError(ValueError):
@@ -392,6 +393,160 @@ async def observe_address(  # noqa: C901, PLR0911, PLR0912, PLR0913
             )
         )
     return tuple(observations)
+
+
+async def observe_finalized_transaction(  # noqa: C901, PLR0911, PLR0913
+    signature: str,
+    *,
+    expected_slot: int,
+    endpoint: str,
+    source_id: str,
+    observer_id: str = "rpc-observer",
+    boot_id: UUID | None = None,
+    receive_sequence: int = 1,
+    transport: RpcHttpTransport | None = None,
+) -> FinalizedTransactionResult:
+    """Hydrate one streamed signature through finalized JSON-RPC evidence.
+
+    A processed stream notification is only a trigger. The returned
+    observation is emitted only after finalized ``getTransaction`` and
+    finalized block ordering agree on the slot and transaction index.
+
+    Returns ``None`` while finalization has not reached ``expected_slot`` or
+    when the transaction failed, allowing a stream source to retry or skip.
+    """
+
+    if not _valid_signature(signature):
+        return _abstain(
+            AbstainReason.UNKNOWN_PROTOCOL_STATE,
+            "stream notification contained an invalid signature",
+            as_of_slot=expected_slot,
+        )
+    if not _non_negative_int(expected_slot):
+        return _abstain(
+            AbstainReason.UNKNOWN_PROTOCOL_STATE,
+            "stream notification contained an invalid slot",
+            as_of_slot=-1,
+        )
+    rpc_transport = transport or AiohttpRpcTransport()
+    finalized_result = await _read_result(
+        rpc_transport,
+        endpoint=endpoint,
+        method="getSlot",
+        params=({"commitment": FINALIZED},),
+        as_of_slot=expected_slot,
+    )
+    if isinstance(finalized_result, AbstainResult):
+        return finalized_result
+    finalized_slot, _ = finalized_result
+    if not _non_negative_int(finalized_slot):
+        return _abstain(
+            AbstainReason.UNKNOWN_PROTOCOL_STATE,
+            "getSlot returned an invalid finalized slot",
+            as_of_slot=expected_slot,
+        )
+    if finalized_slot < expected_slot:
+        return _abstain(
+            AbstainReason.STALE_STATE,
+            "finalized slot has not reached streamed transaction",
+            as_of_slot=finalized_slot,
+        )
+
+    transaction_result = await _read_result(
+        rpc_transport,
+        endpoint=endpoint,
+        method="getTransaction",
+        params=(
+            signature,
+            {
+                "commitment": FINALIZED,
+                "maxSupportedTransactionVersion": 0,
+            },
+        ),
+        as_of_slot=finalized_slot,
+    )
+    if isinstance(transaction_result, AbstainResult):
+        return transaction_result
+    transaction_payload, response_body = transaction_result
+    validated_transaction = _validated_transaction(
+        transaction_payload,
+        requested_signature=signature,
+        expected_slot=expected_slot,
+        finalized_slot=finalized_slot,
+        response_body=response_body,
+    )
+    if isinstance(validated_transaction, AbstainResult):
+        return validated_transaction
+    if isinstance(validated_transaction, _FailedFinalizedTransaction):
+        return None
+
+    block_result = await _read_result(
+        rpc_transport,
+        endpoint=endpoint,
+        method="getBlock",
+        params=(
+            expected_slot,
+            {
+                "commitment": FINALIZED,
+                "transactionDetails": "full",
+                "rewards": False,
+                "maxSupportedTransactionVersion": 0,
+            },
+        ),
+        as_of_slot=finalized_slot,
+    )
+    if isinstance(block_result, AbstainResult):
+        return block_result
+    block_payload, _ = block_result
+    transaction_indices = _validated_block_transaction_indices(
+        block_payload,
+        as_of_slot=finalized_slot,
+    )
+    if isinstance(transaction_indices, AbstainResult):
+        return transaction_indices
+    transaction_index = transaction_indices.get(signature)
+    if transaction_index is None:
+        return _abstain(
+            AbstainReason.UNKNOWN_PROTOCOL_STATE,
+            "finalized block did not contain streamed transaction",
+            as_of_slot=finalized_slot,
+        )
+
+    resolved_boot_id = boot_id or uuid4()
+    return RawChainObservation(
+        raw_id=uuid4(),
+        source_id=source_id,
+        observer_id=observer_id,
+        boot_id=resolved_boot_id,
+        receive_sequence=receive_sequence,
+        slot=expected_slot,
+        parent_slot=None,
+        blockhash=None,
+        signature=_decode_signature(signature),
+        transaction_index=transaction_index,
+        outer_instruction_index=None,
+        inner_instruction_group_index=None,
+        inner_instruction_index=None,
+        stack_height=None,
+        event_ordinal=None,
+        commitment=FINALIZED,
+        canonical_status="canonical",
+        received_wall_ns=time_ns(),
+        received_monotonic_ns=monotonic_ns(),
+        program_id=None,
+        account_pubkey=None,
+        account_owner_program_id=None,
+        raw_transaction=response_body,
+        raw_transaction_format=JSON_TRANSACTION_FORMAT,
+        raw_account_data=None,
+        account_write_version=None,
+        source_update_kind="transaction",
+        raw_source_status=None,
+        raw_source_payload=response_body,
+        decoder_name=None,
+        decoder_version=None,
+        idl_hash=None,
+    )
 
 
 async def _read_signature_history(  # noqa: C901, PLR0911, PLR0912, PLR0913

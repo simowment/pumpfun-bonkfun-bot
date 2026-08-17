@@ -27,10 +27,11 @@ JoinDerivationResult = (
 TradeMintDiscoveryResult = tuple[str, ...] | AbstainResult
 
 
-def derive_finalized_trade_joins(  # noqa: C901, PLR0911, PLR0912
+def derive_finalized_trade_joins(  # noqa: C901, PLR0911, PLR0912, PLR0915
     *,
     observations: tuple[RawChainObservation, ...],
     as_of_slot: Slot,
+    eligible_mints: frozenset[str] | None = None,
 ) -> JoinDerivationResult:
     """Decode launches and derive unambiguous Pump trade joins.
 
@@ -101,11 +102,19 @@ def derive_finalized_trade_joins(  # noqa: C901, PLR0911, PLR0912
                 account_pubkeys,
                 instruction.mint_account_index,
             )
+            if mint is None:
+                return _abstain(
+                    AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+                    "trade mint or wallet account proof is incomplete",
+                    cutoff,
+                )
+            if eligible_mints is not None and mint not in eligible_mints:
+                continue
             wallet = _account_at(
                 account_pubkeys,
                 instruction.user_account_index,
             )
-            if mint is None or wallet is None:
+            if wallet is None:
                 return _abstain(
                     AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
                     "trade mint or wallet account proof is incomplete",
@@ -160,11 +169,19 @@ def derive_finalized_trade_joins(  # noqa: C901, PLR0911, PLR0912
                     account_pubkeys,
                     instruction.base_mint_account_index,
                 )
+                if mint is None:
+                    return _abstain(
+                        AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+                        "Pump AMM trade mint or wallet proof is incomplete",
+                        cutoff,
+                    )
+                if eligible_mints is not None and mint not in eligible_mints:
+                    continue
                 wallet = _account_at(
                     account_pubkeys,
                     instruction.user_account_index,
                 )
-                if mint is None or wallet is None:
+                if wallet is None:
                     return _abstain(
                         AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
                         "Pump AMM trade mint or wallet proof is incomplete",

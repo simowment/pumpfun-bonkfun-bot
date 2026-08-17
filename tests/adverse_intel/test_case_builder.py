@@ -95,6 +95,22 @@ class CaseBuilderTests(unittest.TestCase):
         if isinstance(result, AbstainResult):
             self.assertIs(result.reason, AbstainReason.UNSUPPORTED_PROTOCOL_STATE)
 
+    def test_same_launch_transaction_is_eligible_despite_absolute_index(self) -> None:
+        inputs = _inputs()
+        inputs["launches"] = tuple(
+            replace(launch, transaction_index=100) for launch in inputs["launches"]
+        )
+        inputs["fills"] = tuple(
+            replace(fill, transaction_index=100) for fill in inputs["fills"]
+        )
+
+        result = assemble_copy_trade_cases(**inputs)
+
+        self.assertIsInstance(result, tuple)
+        if isinstance(result, tuple):
+            self.assertEqual(result[0].wallet, "wallet-b")
+            self.assertEqual(result[0].wallet_buy_transaction_index, 0)
+
 
 def _inputs() -> dict[str, object]:
     launches = (_launch("launch-a", "mint-a", 10), _launch("launch-b", "mint-b", 20))

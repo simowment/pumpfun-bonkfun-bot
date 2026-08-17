@@ -10,14 +10,19 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from time import sleep
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit, urlunsplit
+
+from dotenv import load_dotenv
 
 from rugbot.domain.decisions import AbstainReason, AbstainResult
+from rugbot.execution.live import LivePumpExecutionPort
 from rugbot.execution.observe import ObserveExecutionPort
 from rugbot.execution.paper import PaperExecutionPort
 from rugbot.ingest.observation_pipeline import DurableObservationIngestor
 from rugbot.ingest.pump_create_observation import (
     decode_pump_create_v2_observation,
 )
+from rugbot.ingest.pump_stream import PumpCreateStreamSource
 from rugbot.runtime.config import (
     CoreSniperConfig,
     ExecutionMode,
@@ -29,6 +34,7 @@ from rugbot.runtime.config import (
 )
 from rugbot.runtime.observation_loop import (
     ObservationCycleReport,
+    ObservationSource,
     RpcAddressObservationSource,
     SharedObservationLoop,
 )
@@ -86,6 +92,7 @@ async def run_watch_cycle(  # noqa: PLR0913
     qualification: OperatorQualification | None = None,
     entity_evidence: tuple[WalletEntityEvidence, ...] | None = None,
     market: PumpOnlineMarket | None = None,
+    source: ObservationSource | None = None,
 ) -> WatchCycleResult | AbstainResult:
     """Run one finalized wallet poll through the shared observation path.
 
@@ -130,7 +137,7 @@ async def run_watch_cycle(  # noqa: PLR0913
             as_of_slot=-1,
         )
     try:
-        source = RpcAddressObservationSource(
+        observation_source = source or RpcAddressObservationSource(
             address=config.target.id,
             endpoint=endpoint,
             raw_observation_path=raw_path,
@@ -138,6 +145,11 @@ async def run_watch_cycle(  # noqa: PLR0913
             max_signatures=MAX_WATCH_TRANSACTIONS,
             max_transactions=max_transactions,
             transport=transport,
+        )
+        resolved_execution_port = execution_port_resolver or (
+            market.execution_port
+            if market is not None and config.execution.mode is ExecutionMode.PAPER
+            else None
         )
         handler = WatchSnipeHandler(
             config=config,
@@ -149,7 +161,7 @@ async def run_watch_cycle(  # noqa: PLR0913
             ),
             qualification=qualification,
             entity_evidence=entity_evidence,
-            execution_port_resolver=execution_port_resolver,
+            execution_port_resolver=resolved_execution_port,
             entry_evidence_resolver=(market.entry_evidence if market else None),
             position_evidence_resolver=(
                 position_evidence_resolver
@@ -178,7 +190,7 @@ async def run_watch_cycle(  # noqa: PLR0913
             ),
             state_store,
         )
-        report = await loop.run_once(source=source, handler=handler)
+        report = await loop.run_once(source=observation_source, handler=handler)
         if (
             report.abstention is None
             and market is not None
@@ -243,7 +255,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Watch Pump.fun creator wallets using finalized HTTP RPC evidence."
+            "Watch Pump.fun creator wallets using finalized HTTP evidence, "
+            "optionally triggered by WebSocket logs."
         )
     )
     parser.add_argument(
@@ -272,10 +285,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=(ExecutionMode.OBSERVE.value, ExecutionMode.PAPER.value),
+        choices=(
+            ExecutionMode.OBSERVE.value,
+            ExecutionMode.PAPER.value,
+            ExecutionMode.LIVE.value,
+        ),
         help="override execution.mode for this run",
     )
+    parser.add_argument(
+        "--enable-live",
+        action="store_true",
+        help="explicitly enable live transaction submission for this run",
+    )
     parser.add_argument("--once", action="store_true")
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="use the persistent Pump.fun WebSocket trigger with finalized hydration",
+    )
     parser.add_argument("--interval-seconds", type=int, default=2)
     parser.add_argument("--max-transactions", type=int, default=5)
     parser.add_argument("--max-history-pages", type=int, default=10)
@@ -290,6 +317,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0
     """Run the finalized wallet watcher."""
 
     args = build_arg_parser().parse_args(argv)
+    if args.enable_live:
+        load_dotenv()
     endpoint = os.environ.get("SOLANA_RPC_HTTP") or os.environ.get(
         "SOLANA_NODE_RPC_ENDPOINT"
     )
@@ -419,6 +448,17 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0
             config,
             execution=replace(config.execution, mode=ExecutionMode(args.mode)),
         )
+    if config.execution.mode is ExecutionMode.LIVE and not args.enable_live:
+        _print_json(
+            {
+                "status": "abstain",
+                "reason": AbstainReason.MISSING_FEATURE.value,
+                "message": "live mode requires the explicit --enable-live switch",
+                "as_of_slot": -1,
+            },
+            pretty=args.pretty,
+        )
+        return 1
     if (
         args.interval_seconds <= 0
         or not 1 <= args.max_transactions <= MAX_WATCH_TRANSACTIONS
@@ -452,7 +492,12 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0
         wallet_configs = {watch_wallets[0]: config}
 
     try:
-        execution_port = _execution_port(config.execution.mode, endpoint)
+        execution_port = _execution_port(
+            config.execution.mode,
+            endpoint,
+            allow_live=args.enable_live,
+            expected_signer_pubkey=config.execution.signer_pubkey,
+        )
     except (OSError, ValueError) as error:
         _print_json(
             {
@@ -464,6 +509,49 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0
             pretty=args.pretty,
         )
         return 1
+    if args.stream:
+        if portfolio is not None:
+            _print_json(
+                {
+                    "status": "abstain",
+                    "reason": AbstainReason.MISSING_FEATURE.value,
+                    "message": "--stream currently requires one wallet target",
+                    "as_of_slot": -1,
+                },
+                pretty=args.pretty,
+            )
+            return 1
+        websocket_endpoint = (
+            os.environ.get("SOLANA_RPC_WEBSOCKET")
+            or os.environ.get("SOLANA_NODE_WSS_ENDPOINT")
+            or _websocket_endpoint_from_http(endpoint)
+        )
+        if not websocket_endpoint:
+            _print_json(
+                {
+                    "status": "abstain",
+                    "reason": AbstainReason.MISSING_FEATURE.value,
+                    "message": (
+                        "a WebSocket endpoint could not be derived; set "
+                        "SOLANA_RPC_WEBSOCKET with --stream"
+                    ),
+                    "as_of_slot": -1,
+                },
+                pretty=args.pretty,
+            )
+            return 1
+        return asyncio.run(
+            _run_stream_watch(
+                config=config,
+                endpoint=endpoint,
+                websocket_endpoint=websocket_endpoint,
+                state_dir=args.state_dir,
+                max_transactions=args.max_transactions,
+                execution_port=execution_port,
+                once=args.once,
+                pretty=args.pretty,
+            )
+        )
     while True:
         results: dict[str, dict[str, object]] = {}
         for wallet, wallet_config in wallet_configs.items():
@@ -513,15 +601,37 @@ def _portfolio_json(results: dict[str, dict[str, object]]) -> dict[str, object]:
     }
 
 
-def _execution_port(mode: ExecutionMode, _endpoint: str) -> ExecutionPort:
+def _execution_port(
+    mode: ExecutionMode,
+    endpoint: str,
+    *,
+    allow_live: bool = False,
+    expected_signer_pubkey: str | None = None,
+) -> ExecutionPort:
     if mode is ExecutionMode.OBSERVE:
         return ObserveExecutionPort()
     if mode is ExecutionMode.PAPER:
         return PaperExecutionPort()
     if mode is ExecutionMode.LIVE:
-        raise ValueError(  # noqa: TRY003
-            "live mode is permanently disabled in the runtime CLI"
-        )
+        if not allow_live:
+            raise ValueError(  # noqa: TRY003
+                "live mode requires the explicit --enable-live switch"
+            )
+        private_key = os.environ.get("SOLANA_PRIVATE_KEY")
+        if not private_key:
+            raise ValueError(  # noqa: TRY003
+                "live mode requires SOLANA_PRIVATE_KEY in the process environment"
+            )
+        if not expected_signer_pubkey:
+            raise ValueError(  # noqa: TRY003
+                "live mode requires execution.signer_pubkey in watch.yaml"
+            )
+        port = LivePumpExecutionPort(endpoint, private_key)
+        if port.signer_pubkey != expected_signer_pubkey:
+            raise ValueError(  # noqa: TRY003
+                "SOLANA_PRIVATE_KEY does not match execution.signer_pubkey"
+            )
+        return port
     raise ValueError(f"unsupported execution mode: {mode}")  # noqa: TRY003
 
 
@@ -549,8 +659,76 @@ async def _run_watch_once(
         await market.close()
 
 
+async def _run_stream_watch(  # noqa: PLR0913
+    *,
+    config: CoreSniperConfig,
+    endpoint: str,
+    websocket_endpoint: str,
+    state_dir: Path,
+    max_transactions: int,
+    execution_port: ExecutionPort,
+    once: bool,
+    pretty: bool,
+) -> int:
+    """Run one-wallet stream-triggered watching on the shared handler path."""
+
+    try:
+        stream_state = SqliteStateStore(state_dir / "state.sqlite3")
+    except SqliteStateStoreError:
+        _print_json(
+            {
+                "status": "abstain",
+                "reason": AbstainReason.UNKNOWN_PROTOCOL_STATE.value,
+                "message": "SQLite stream state could not be opened",
+                "as_of_slot": -1,
+            },
+            pretty=pretty,
+        )
+        return 1
+    source = PumpCreateStreamSource(
+        wallet=config.target.id,
+        websocket_endpoint=websocket_endpoint,
+        endpoint=endpoint,
+        raw_observation_path=state_dir / "observations.jsonl",
+        handled_ledger=stream_state,
+        max_catchup_transactions=max_transactions,
+    )
+    market = PumpOnlineMarket(endpoint)
+    try:
+        while True:
+            result = await run_watch_cycle(
+                config,
+                endpoint=endpoint,
+                state_dir=state_dir,
+                max_transactions=max_transactions,
+                execution_port=execution_port,
+                market=market,
+                source=source,
+            )
+            payload = _json_result(result)
+            _print_json(payload, pretty=pretty)
+            if isinstance(result, AbstainResult):
+                return 1
+            if once:
+                return 0
+    finally:
+        await source.close()
+        await market.close()
+        stream_state.close()
+
+
 def _print_json(payload: dict[str, object], *, pretty: bool) -> None:
     print(json.dumps(payload, indent=2 if pretty else None, sort_keys=True))
+
+
+def _websocket_endpoint_from_http(endpoint: str) -> str | None:
+    """Derive a standard Solana WebSocket URL while preserving its query key."""
+
+    parsed = urlsplit(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    scheme = "ws" if parsed.scheme == "http" else "wss"
+    return urlunsplit((scheme, parsed.netloc, parsed.path, parsed.query, ""))
 
 
 def _json_result(result: WatchCycleResult | AbstainResult) -> dict[str, object]:

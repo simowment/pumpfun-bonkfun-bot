@@ -21,6 +21,9 @@ from rugbot.ingest.pump_create_observation import (
     decode_pump_create_mint_metadata_observation,
     decode_pump_create_v2_observation,
 )
+from rugbot.ingest.pump_migration_observation import (
+    decode_pump_migration_observation,
+)
 from rugbot.ingest.pump_swap_event_observation import (
     decode_pump_swap_events_observation,
 )
@@ -34,8 +37,10 @@ from rugbot.ingest.rpc_observer import (
 from rugbot.storage.jsonl_observation_store import observation_identity
 
 if TYPE_CHECKING:
+    from rugbot.backtest.dataset import FinalizedTrade
     from rugbot.domain.amounts import Slot
     from rugbot.domain.launches import LaunchCreatedV2
+    from rugbot.domain.migrations import PumpMigrationInstructionEvidence
     from rugbot.domain.trades import PumpSwapTradeEventEvidence
     from rugbot.protocol.pump.metadata_resolver import (
         PumpFinalizedMintMetadataEvidence,
@@ -59,7 +64,9 @@ class FinalizedRpcCaseAcquisition:
 
     ``launches`` contains only decoded, finalized ``LaunchCreatedV2`` values
     from the target wallet history.  No account state, protocol snapshot,
-    executed fill, or outcome is synthesized here.
+    executed fill, or outcome is synthesized here. ``migration_events``
+    contains only migrations proven by the pinned finalized transaction
+    decoder; it is not treated as a canonical pool-state proof by itself.
     """
 
     operator_wallet: str
@@ -69,12 +76,40 @@ class FinalizedRpcCaseAcquisition:
     mint_metadata: tuple[PumpFinalizedMintMetadataEvidence, ...]
     observations: tuple[RawChainObservation, ...]
     pump_swap_events: tuple[PumpSwapTradeEventEvidence, ...] = ()
+    migration_events: tuple[PumpMigrationInstructionEvidence, ...] = ()
 
 
 RpcCaseAcquisitionResult = FinalizedRpcCaseAcquisition | AbstainResult
 
 
-async def acquire_finalized_rpc_case_observations(  # noqa: C901, PLR0911, PLR0912, PLR0913
+def build_rpc_case_proofs(  # noqa: PLR0913
+    *,
+    acquisition: FinalizedRpcCaseAcquisition,
+    trades: tuple[FinalizedTrade, ...],
+    as_of_slot: Slot,
+    fixed_entry_quote_base_units: int = 1_000_000,
+    horizon_ms: int = 0,
+    labeler_version: str = "pump-trade-event-outcome",
+    detector_version: str = "pump-trade-event-collapse",
+) -> object:
+    """Build typed case proofs from finalized acquisition evidence."""
+
+    from rugbot.backtest.rpc_case_builder import (  # noqa: PLC0415
+        build_rpc_case_proofs as build,
+    )
+
+    return build(
+        acquisition=acquisition,
+        trades=trades,
+        as_of_slot=as_of_slot,
+        fixed_entry_quote_base_units=fixed_entry_quote_base_units,
+        horizon_ms=horizon_ms,
+        labeler_version=labeler_version,
+        detector_version=detector_version,
+    )
+
+
+async def acquire_finalized_rpc_case_observations(  # noqa: C901, PLR0911, PLR0912, PLR0913, PLR0915
     *,
     operator_wallet: str,
     endpoint: str,
@@ -238,6 +273,7 @@ async def acquire_finalized_rpc_case_observations(  # noqa: C901, PLR0911, PLR09
         sorted(observations_by_identity.values(), key=_observation_key)
     )
     pump_swap_events: list[PumpSwapTradeEventEvidence] = []
+    migration_events: list[PumpMigrationInstructionEvidence] = []
     for observation in observations:
         decoded_events = decode_pump_swap_events_observation(observation)
         if isinstance(decoded_events, AbstainResult):
@@ -245,6 +281,13 @@ async def acquire_finalized_rpc_case_observations(  # noqa: C901, PLR0911, PLR09
                 continue
             return _at_cutoff(decoded_events, cutoff)
         pump_swap_events.extend(decoded_events)
+        migration = decode_pump_migration_observation(observation)
+        if isinstance(migration, AbstainResult):
+            if migration.reason is AbstainReason.MISSING_FEATURE:
+                continue
+            return _at_cutoff(migration, cutoff)
+        if migration is not None:
+            migration_events.append(migration)
     return FinalizedRpcCaseAcquisition(
         operator_wallet=operator_wallet,
         as_of_slot=cutoff,
@@ -255,6 +298,18 @@ async def acquire_finalized_rpc_case_observations(  # noqa: C901, PLR0911, PLR09
         ),
         observations=observations,
         pump_swap_events=tuple(sorted(pump_swap_events, key=_pump_swap_event_key)),
+        migration_events=tuple(
+            sorted(
+                migration_events,
+                key=lambda item: (
+                    int(item.as_of_slot),
+                    item.transaction_index
+                    if item.transaction_index is not None
+                    else -1,
+                    item.outer_instruction_index,
+                ),
+            )
+        ),
     )
 
 
@@ -546,4 +601,5 @@ __all__ = [
     "FinalizedRpcCaseAcquisition",
     "RpcCaseAcquisitionResult",
     "acquire_finalized_rpc_case_observations",
+    "build_rpc_case_proofs",
 ]

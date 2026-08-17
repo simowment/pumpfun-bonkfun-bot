@@ -1,15 +1,17 @@
 """Tests for the runnable offline backtest command."""
 
+import asyncio
 import io
 import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from rugbot.backtest.cli import main, run_backtest_file
+from rugbot.backtest.cli import main, run_backtest_file, run_rpc_dataset
 from rugbot.backtest.qualified_run import QualifiedRunResult
+from rugbot.backtest.rpc_case_acquisition import FinalizedRpcCaseAcquisition
 from rugbot.decision.operator_qualification import (
     OperatorQualification,
     QualificationStatus,
@@ -133,6 +135,48 @@ class BacktestCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertEqual(run_rpc.call_args.kwargs["max_transactions"], 1000)
+
+    def test_rpc_dataset_passes_acquired_launch_mints_to_joiner(self) -> None:
+        acquired = FinalizedRpcCaseAcquisition(
+            operator_wallet="wallet",
+            as_of_slot=Slot(10),
+            launch_mints=("eligible-mint",),
+            launches=(),
+            mint_metadata=(),
+            observations=(),
+        )
+        join_abstention = AbstainResult(
+            reason=AbstainReason.MISSING_FEATURE,
+            message="focused test stop",
+            as_of_slot=10,
+        )
+
+        async def run() -> object:
+            with (
+                patch(
+                    "rugbot.backtest.cli.acquire_finalized_rpc_case_observations",
+                    new=AsyncMock(return_value=acquired),
+                ),
+                patch(
+                    "rugbot.backtest.cli.derive_finalized_trade_joins",
+                    return_value=join_abstention,
+                ) as derive,
+            ):
+                result = await run_rpc_dataset(
+                    operator_wallet="wallet",
+                    endpoint="https://rpc.example",
+                    start_slot=Slot(0),
+                    end_slot=Slot(10),
+                    max_transactions=1,
+                )
+            self.assertEqual(
+                derive.call_args.kwargs["eligible_mints"],
+                frozenset({"eligible-mint"}),
+            )
+            return result
+
+        result = asyncio.run(run())
+        self.assertIs(result, join_abstention)
 
 
 if __name__ == "__main__":

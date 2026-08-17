@@ -76,6 +76,7 @@ class SniperExecution:
     mode: ExecutionMode
     quote_size_lamports: int
     max_slippage_bps: int = 500
+    signer_pubkey: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +103,7 @@ class StrategyFilterSettings:
     require_bundle_match: bool = False
     require_double_signature: bool = False
     require_prior_zero_balance: bool = False
+    require_historical_qualification: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,16 +298,14 @@ def _parse_target(raw: object) -> SniperTarget:
 def _parse_execution(raw: object) -> SniperExecution:
     mapping = _mapping(raw, "execution")
     _require_known_keys(
-        mapping, {"mode", "quote_size_lamports", "max_slippage_bps"}, "execution"
+        mapping,
+        {"mode", "quote_size_lamports", "max_slippage_bps", "signer_pubkey"},
+        "execution",
     )
     mode = mapping["mode"]
     quote_size = mapping["quote_size_lamports"]
     if not isinstance(mode, str) or mode not in {item.value for item in ExecutionMode}:
         raise SniperConfigError("execution.mode must be observe, paper, or live")
-    if mode == ExecutionMode.LIVE.value:
-        raise SniperConfigError(
-            "execution.mode live is disabled until paper and out-of-sample evidence"
-        )
     if type(quote_size) is not int or quote_size <= 0:
         raise SniperConfigError(
             "execution.quote_size_lamports must be a positive integer"
@@ -318,10 +318,14 @@ def _parse_execution(raw: object) -> SniperExecution:
         raise SniperConfigError(
             "execution.max_slippage_bps must be between 0 and 10000"
         )
+    signer_pubkey = mapping.get("signer_pubkey")
+    if signer_pubkey is not None:
+        _validate_pubkey(signer_pubkey, "execution.signer_pubkey")
     return SniperExecution(
         mode=ExecutionMode(mode),
         quote_size_lamports=quote_size,
         max_slippage_bps=max_slippage_bps,
+        signer_pubkey=signer_pubkey,
     )
 
 
@@ -372,6 +376,7 @@ def _parse_strategy(raw: object) -> StrategyFilterSettings:
             "require_bundle_match",
             "require_double_signature",
             "require_prior_zero_balance",
+            "require_historical_qualification",
         },
         "strategy",
     )
@@ -379,6 +384,7 @@ def _parse_strategy(raw: object) -> StrategyFilterSettings:
         "require_bundle_match",
         "require_double_signature",
         "require_prior_zero_balance",
+        "require_historical_qualification",
     )
     for field_name in booleans:
         value = mapping.get(field_name, False)
@@ -436,6 +442,9 @@ def _parse_strategy(raw: object) -> StrategyFilterSettings:
         require_bundle_match=mapping.get("require_bundle_match", False),
         require_double_signature=mapping.get("require_double_signature", False),
         require_prior_zero_balance=mapping.get("require_prior_zero_balance", False),
+        require_historical_qualification=mapping.get(
+            "require_historical_qualification", False
+        ),
     )
 
 

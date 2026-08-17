@@ -10,7 +10,7 @@ import base64
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from struct import unpack_from
 
 import base58
@@ -171,7 +171,7 @@ def build_finalized_trades_from_observations(
             )
             if isinstance(fill, AbstainResult):
                 return fill
-            built.append(fill)
+            built.append(replace(fill, as_of_slot=Slot(observation.slot)))
             seen_join_keys.add(key)
 
         decoded_swap = decode_pump_swap_trade_observation(observation)
@@ -199,7 +199,7 @@ def build_finalized_trades_from_observations(
             )
             if isinstance(fill, AbstainResult):
                 return fill
-            built.append(fill)
+            built.append(replace(fill, as_of_slot=Slot(observation.slot)))
             seen_join_keys.add(key)
 
     missing = set(join_by_key).difference(seen_join_keys)
@@ -654,6 +654,7 @@ def _select_event(
     as_of_slot: int,
 ) -> PumpTradeEventProof | AbstainResult:
     events: list[PumpTradeEventProof] = []
+    expected_event_name = _trade_event_instruction_name(instruction.instruction_name)
     for payload in payloads:
         event = _decode_trade_event(payload, as_of_slot)
         if isinstance(event, AbstainResult):
@@ -662,7 +663,7 @@ def _select_event(
             event.mint == token_mint
             and event.user == wallet
             and event.is_buy == (instruction.side is TradeSide.BUY)
-            and event.instruction_name == instruction.instruction_name
+            and event.instruction_name == expected_event_name
         ):
             events.append(event)
     if not events:
@@ -678,6 +679,15 @@ def _select_event(
             as_of_slot,
         )
     return events[0]
+
+
+def _trade_event_instruction_name(instruction_name: str) -> str:
+    """Map unified Pump instruction names to their emitted event names."""
+
+    return {
+        "buy_v2": "buy",
+        "sell_v2": "sell",
+    }.get(instruction_name, instruction_name)
 
 
 def _decode_trade_event(

@@ -251,13 +251,15 @@ execution:
         self.assertEqual(args.wallet, "target-wallet")
         self.assertTrue(args.pretty)
 
-    def test_cli_rejects_live_mode_override(self) -> None:
-        with self.assertRaises(SystemExit) as raised:
-            build_arg_parser().parse_args(["--mode", "live"])
+    def test_cli_accepts_live_mode_override_without_enabling_it(self) -> None:
+        args = build_arg_parser().parse_args(["--mode", "live"])
 
-        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(args.mode, "live")
+        self.assertFalse(args.enable_live)
 
-    def test_live_configuration_is_rejected_before_port_creation(self) -> None:
+    def test_live_configuration_requires_explicit_enable_before_port_creation(
+        self,
+    ) -> None:
         config = """target:
   kind: wallet
   id: "11111111111111111111111111111111"
@@ -276,8 +278,33 @@ execution:
         port.assert_not_called()
 
     def test_live_execution_dispatch_is_fail_closed(self) -> None:
-        with self.assertRaisesRegex(ValueError, "permanently disabled"):
+        with self.assertRaisesRegex(ValueError, "requires the explicit --enable-live"):
             _execution_port(ConfigExecutionMode.LIVE, "https://rpc.example")
+
+    def test_live_execution_requires_signing_key(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "SOLANA_PRIVATE_KEY"):
+                _execution_port(
+                    ConfigExecutionMode.LIVE,
+                    "https://rpc.example",
+                    allow_live=True,
+                )
+
+    def test_live_execution_builds_port_only_with_explicit_gate(self) -> None:
+        with (
+            patch.dict("os.environ", {"SOLANA_PRIVATE_KEY": "test-key"}),
+            patch("rugbot.runtime.cli.LivePumpExecutionPort") as live_port,
+        ):
+            live_port.return_value.signer_pubkey = "signer-pubkey"
+            result = _execution_port(
+                ConfigExecutionMode.LIVE,
+                "https://rpc.example",
+                allow_live=True,
+                expected_signer_pubkey="signer-pubkey",
+            )
+
+        self.assertIs(result, live_port.return_value)
+        live_port.assert_called_once_with("https://rpc.example", "test-key")
 
     def test_intelligence_cycle_reports_finalized_launch_position(self) -> None:
         artifact = json.loads(FIXTURE.read_text(encoding="utf-8"))

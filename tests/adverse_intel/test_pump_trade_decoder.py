@@ -11,13 +11,18 @@ from rugbot.domain.amounts import QuoteBaseUnits, Slot, TokenBaseUnits
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.trades import PumpTradeInstructionEvidence, TradeSide
 from rugbot.protocol.pump.trade_decoder import (
+    ASSOCIATED_TOKEN_PROGRAM_ID,
     BUY_ACCOUNT_NAMES,
     BUY_DISCRIMINATOR,
+    BUY_V2_ACCOUNT_NAMES,
+    BUY_V2_DISCRIMINATOR,
     PINNED_PUMP_IDL_SHA256,
     PUMP_FEE_PROGRAM_ID,
     PUMP_PROGRAM_ID,
     SELL_ACCOUNT_NAMES,
     SELL_DISCRIMINATOR,
+    SELL_V2_ACCOUNT_NAMES,
+    SELL_V2_DISCRIMINATOR,
     SYSTEM_PROGRAM_ID,
     AccountRoleProof,
     CompiledPumpInstruction,
@@ -85,6 +90,32 @@ class PumpTradeDecoderTests(unittest.TestCase):
         self.assertEqual(result.signature, b"sig")
         self.assertEqual(result.missing_evidence, ("transaction_slot_account_state",))
 
+    def test_decodes_legacy_buy_without_track_volume(self) -> None:
+        result = decode_pump_trade_instruction(
+            _instruction(
+                account_count=16,
+                data=BUY_DISCRIMINATOR + _u64(123) + _u64(456),
+            ),
+            idl_hash=PINNED_PUMP_IDL_SHA256,
+        )
+
+        self.assertIsInstance(result, PumpTradeInstructionEvidence)
+        if isinstance(result, PumpTradeInstructionEvidence):
+            self.assertIsNone(result.track_volume)
+
+    def test_decodes_legacy_buy_option_bool_track_volume(self) -> None:
+        result = decode_pump_trade_instruction(
+            _instruction(
+                account_count=16,
+                data=BUY_DISCRIMINATOR + _u64(123) + _u64(456) + b"\x01\x01",
+            ),
+            idl_hash=PINNED_PUMP_IDL_SHA256,
+        )
+
+        self.assertIsInstance(result, PumpTradeInstructionEvidence)
+        if isinstance(result, PumpTradeInstructionEvidence):
+            self.assertTrue(result.track_volume)
+
     def test_decodes_sell_instruction_args_and_indices(self) -> None:
         """The sell layout preserves account indices and integer args."""
 
@@ -105,6 +136,111 @@ class PumpTradeDecoderTests(unittest.TestCase):
         self.assertEqual(result.min_quote_output_base_units, QuoteBaseUnits(654))
         self.assertEqual(result.token_program_account_index, 9)
         self.assertEqual(result.fee_config_account_index, 12)
+
+    def test_decodes_legacy_sell_option_bool_track_volume(self) -> None:
+        result = decode_pump_trade_instruction(
+            _instruction(
+                account_count=14,
+                data=SELL_DISCRIMINATOR + _u64(321) + _u64(654) + b"\x01\x01",
+            ),
+            idl_hash=PINNED_PUMP_IDL_SHA256,
+        )
+
+        self.assertIsInstance(result, PumpTradeInstructionEvidence)
+        if isinstance(result, PumpTradeInstructionEvidence):
+            self.assertTrue(result.track_volume)
+
+    def test_decodes_buy_v2_layout_and_maps_base_roles(self) -> None:
+        """The deployed buy_v2 layout maps base-token roles explicitly."""
+
+        result = decode_pump_trade_instruction(
+            _instruction(
+                account_count=27,
+                data=BUY_V2_DISCRIMINATOR + _u64(123) + _u64(456),
+            ),
+            idl_hash=PINNED_PUMP_IDL_SHA256,
+        )
+
+        self.assertIsInstance(result, PumpTradeInstructionEvidence)
+        if isinstance(result, AbstainResult):
+            self.fail(result.message)
+        self.assertEqual(result.instruction_name, "buy_v2")
+        self.assertEqual(result.side, TradeSide.BUY)
+        self.assertEqual(result.required_account_names, BUY_V2_ACCOUNT_NAMES)
+        self.assertEqual(result.base_amount_base_units, TokenBaseUnits(123))
+        self.assertEqual(result.max_quote_cost_base_units, QuoteBaseUnits(456))
+        self.assertIsNone(result.track_volume)
+        self.assertEqual(result.mint_account_index, 1)
+        self.assertEqual(result.bonding_curve_account_index, 10)
+        self.assertEqual(result.associated_bonding_curve_account_index, 11)
+        self.assertEqual(result.associated_user_account_index, 14)
+        self.assertEqual(result.user_account_index, 13)
+        self.assertEqual(result.token_program_account_index, 3)
+        self.assertEqual(result.fee_config_account_index, 22)
+        self.assertEqual(result.fee_program_account_index, 23)
+
+    def test_decodes_sell_v2_layout_and_maps_base_roles(self) -> None:
+        """The deployed sell_v2 layout maps base-token roles explicitly."""
+
+        result = decode_pump_trade_instruction(
+            _instruction(
+                account_count=26,
+                data=SELL_V2_DISCRIMINATOR + _u64(321) + _u64(654),
+            ),
+            idl_hash=PINNED_PUMP_IDL_SHA256,
+        )
+
+        self.assertIsInstance(result, PumpTradeInstructionEvidence)
+        if isinstance(result, AbstainResult):
+            self.fail(result.message)
+        self.assertEqual(result.instruction_name, "sell_v2")
+        self.assertEqual(result.side, TradeSide.SELL)
+        self.assertEqual(result.required_account_names, SELL_V2_ACCOUNT_NAMES)
+        self.assertEqual(result.base_amount_base_units, TokenBaseUnits(321))
+        self.assertEqual(result.min_quote_output_base_units, QuoteBaseUnits(654))
+        self.assertIsNone(result.track_volume)
+        self.assertEqual(result.mint_account_index, 1)
+        self.assertEqual(result.bonding_curve_account_index, 10)
+        self.assertEqual(result.associated_bonding_curve_account_index, 11)
+        self.assertEqual(result.associated_user_account_index, 14)
+        self.assertEqual(result.user_account_index, 13)
+        self.assertEqual(result.token_program_account_index, 3)
+        self.assertEqual(result.fee_config_account_index, 21)
+        self.assertEqual(result.fee_program_account_index, 22)
+
+    def test_v2_fixed_account_mismatch_abstains(self) -> None:
+        """The v2 associated token program remains a fixed validated role."""
+
+        account_pubkeys = list(_account_pubkeys(27, BUY_V2_ACCOUNT_NAMES))
+        account_pubkeys[5] = "not-associated-token-program"
+        result = decode_pump_trade_instruction(
+            _instruction(
+                account_count=27,
+                data=BUY_V2_DISCRIMINATOR + _u64(1) + _u64(2),
+                overrides=_InstructionOverrides(account_pubkeys=tuple(account_pubkeys)),
+            ),
+            idl_hash=PINNED_PUMP_IDL_SHA256,
+        )
+
+        self.assert_abstains(result, AbstainReason.UNSUPPORTED_PROTOCOL_STATE)
+
+    def test_v2_role_proof_mismatch_abstains(self) -> None:
+        """The v2 role proof must use the exact base-token account names."""
+
+        role_proofs = tuple(
+            AccountRoleProof(name=name, pubkey=f"proof-{index}")
+            for index, name in enumerate(BUY_V2_ACCOUNT_NAMES)
+        )
+        result = decode_pump_trade_instruction(
+            _instruction(
+                account_count=27,
+                data=BUY_V2_DISCRIMINATOR + _u64(1) + _u64(2),
+                overrides=_InstructionOverrides(account_role_proofs=role_proofs),
+            ),
+            idl_hash=PINNED_PUMP_IDL_SHA256,
+        )
+
+        self.assert_abstains(result, AbstainReason.UNSUPPORTED_PROTOCOL_STATE)
 
     def test_preserves_remaining_accounts_without_relabeling_them(self) -> None:
         """Extra account indices are preserved as remaining accounts."""
@@ -383,15 +519,18 @@ def _instruction(
     overrides: _InstructionOverrides | None = None,
 ) -> CompiledPumpInstruction:
     instruction_overrides = overrides or _InstructionOverrides()
+    account_names = _account_names_for_data(data, account_count)
     resolved_program_index = instruction_overrides.program_id_index
     resolved_account_pubkeys = _resolve_account_pubkeys(
         instruction_overrides.account_pubkeys,
         account_count,
         instruction_overrides.program_id,
+        account_names,
     )
     resolved_role_proofs = _resolve_account_role_proofs(
         instruction_overrides.account_role_proofs,
         account_count,
+        account_names,
     )
     if resolved_program_index is None:
         resolved_program_index = account_count
@@ -416,16 +555,31 @@ def _u64(value: int) -> bytes:
     return struct.pack("<Q", value)
 
 
-def _account_pubkeys(account_count: int) -> tuple[str, ...]:
-    account_pubkeys = [f"account-{index}" for index in range(account_count)]
-    if account_count > SYSTEM_PROGRAM_POSITION:
-        account_pubkeys[SYSTEM_PROGRAM_POSITION] = SYSTEM_PROGRAM_ID
-    if account_count > PROGRAM_POSITION:
-        account_pubkeys[PROGRAM_POSITION] = PUMP_PROGRAM_ID
+def _account_names_for_data(data: bytes, account_count: int) -> tuple[str, ...]:
+    if data.startswith(BUY_V2_DISCRIMINATOR):
+        return BUY_V2_ACCOUNT_NAMES
+    if data.startswith(SELL_V2_DISCRIMINATOR):
+        return SELL_V2_ACCOUNT_NAMES
     if account_count == SELL_ACCOUNT_COUNT:
-        account_pubkeys[SELL_FEE_PROGRAM_POSITION] = PUMP_FEE_PROGRAM_ID
-    if account_count >= BUY_ACCOUNT_COUNT:
-        account_pubkeys[BUY_FEE_PROGRAM_POSITION] = PUMP_FEE_PROGRAM_ID
+        return SELL_ACCOUNT_NAMES
+    return BUY_ACCOUNT_NAMES
+
+
+def _account_pubkeys(
+    account_count: int,
+    account_names: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    account_pubkeys = [f"account-{index}" for index in range(account_count)]
+    names = account_names or _account_names_for_data(b"", account_count)
+    fixed_pubkeys = {
+        "system_program": SYSTEM_PROGRAM_ID,
+        "associated_token_program": ASSOCIATED_TOKEN_PROGRAM_ID,
+        "program": PUMP_PROGRAM_ID,
+        "fee_program": PUMP_FEE_PROGRAM_ID,
+    }
+    for index, name in enumerate(names):
+        if index < account_count and name in fixed_pubkeys:
+            account_pubkeys[index] = fixed_pubkeys[name]
     return tuple(account_pubkeys)
 
 
@@ -433,25 +587,24 @@ def _resolve_account_pubkeys(
     account_pubkeys: tuple[str, ...] | None,
     account_count: int,
     program_id: str,
+    account_names: tuple[str, ...],
 ) -> tuple[str, ...] | None:
     if account_pubkeys is None:
         return None
     if account_pubkeys != DEFAULT_ACCOUNT_PUBKEYS:
         return account_pubkeys
-    return (*_account_pubkeys(account_count), program_id)
+    return (*_account_pubkeys(account_count, account_names), program_id)
 
 
 def _resolve_account_role_proofs(
     role_proofs: tuple[AccountRoleProof, ...],
     account_count: int,
+    account_names: tuple[str, ...],
 ) -> tuple[AccountRoleProof, ...]:
     if role_proofs != DEFAULT_ROLE_PROOFS:
         return role_proofs
 
-    account_names = BUY_ACCOUNT_NAMES
-    if account_count == SELL_ACCOUNT_COUNT:
-        account_names = SELL_ACCOUNT_NAMES
-    account_pubkeys = _account_pubkeys(account_count)
+    account_pubkeys = _account_pubkeys(account_count, account_names)
     return tuple(
         AccountRoleProof(name=name, pubkey=account_pubkeys[index])
         for index, name in enumerate(account_names)

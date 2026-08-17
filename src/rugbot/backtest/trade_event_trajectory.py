@@ -23,10 +23,13 @@ from rugbot.protocol.pump.bonding_curve_account import (
 )
 from rugbot.protocol.pump.create_event_decoder import SOL_PUBKEY
 from rugbot.protocol.pump.create_state_adapter import PumpCreateMintMetadataProof
+from rugbot.protocol.pump.migration import PUMP_AMM_PROGRAM_ID
 from rugbot.protocol.pump.quote_engine import (
+    PUMP_SWAP_POOL_DECODER_VERSION,
     PoolReserves,
     executable_sell_quote,
 )
+from rugbot.protocol.pump.swap_trade_decoder import PINNED_PUMP_SWAP_IDL_SHA256
 from rugbot.protocol.pump.version_registry import PumpProtocolVersionSnapshot
 
 PRICE_PPM_DENOMINATOR = 1_000_000
@@ -43,9 +46,10 @@ class TradeEventTrajectoryMetadataProof:
     curve_completed: bool
     migration_observed: bool
     full_exit_base_amount_base_units: TokenBaseUnits | None
-    protocol_snapshot: PumpProtocolVersionSnapshot | None
+    protocol_snapshot: PumpProtocolVersionSnapshot | PumpTradeEventProtocolProof | None
     mint_metadata: PumpCreateMintMetadataProof | None
     evidence_ids: tuple[str, ...]
+    quote_path: QuotePath = QuotePath.PUMP_BONDING_CURVE
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +59,19 @@ class TradeEventTrajectorySource:
     observation: RawChainObservation
     event: PumpTradeEventProof
     metadata: TradeEventTrajectoryMetadataProof
+
+
+@dataclass(frozen=True, slots=True)
+class PumpTradeEventProtocolProof:
+    """Protocol and fee proof carried by one finalized Pump TradeEvent."""
+
+    as_of_slot: Slot
+    program_id: str
+    idl_hash: str
+    program_config_version: str
+    fee_config: FeeConfig
+    source_artifact: str
+    evidence_ids: tuple[str, ...]
 
 
 TradeEventTrajectoryPointResult = FinalizedOutcomePointInput | AbstainResult
@@ -108,12 +125,16 @@ def build_trade_event_trajectory_point(
         as_of_slot=Slot(observation.slot),
         base_decimals=mint_metadata.base_decimals,
         quote_decimals=mint_metadata.quote_decimals,
-        decoder_version=PUMP_BONDING_CURVE_ACCOUNT_DECODER_VERSION,
+        decoder_version=(
+            PUMP_BONDING_CURVE_ACCOUNT_DECODER_VERSION
+            if metadata.quote_path is QuotePath.PUMP_BONDING_CURVE
+            else PUMP_SWAP_POOL_DECODER_VERSION
+        ),
         idl_hash=snapshot.idl_hash,
         program_config_version=snapshot.program_config_version,
     )
     full_exit_quote = executable_sell_quote(
-        path=QuotePath.PUMP_BONDING_CURVE,
+        path=metadata.quote_path,
         reserves=reserves,
         base_input_amount=full_exit_amount,
         fee_config=snapshot.fee_config,
@@ -278,6 +299,7 @@ def _validate_source(  # noqa: C901
     if (
         type(metadata.curve_completed) is not bool
         or type(metadata.migration_observed) is not bool
+        or not isinstance(metadata.quote_path, QuotePath)
     ):
         return _abstain(
             AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
@@ -323,7 +345,7 @@ def _validate_event_reserves(
     return None
 
 
-def _validate_fee_and_metadata(
+def _validate_fee_and_metadata(  # noqa: C901
     source: TradeEventTrajectorySource,
     cutoff: int,
 ) -> AbstainResult | None:
@@ -331,7 +353,9 @@ def _validate_fee_and_metadata(
     event = source.event
     snapshot = metadata.protocol_snapshot
     mint_metadata = metadata.mint_metadata
-    if type(snapshot) is not PumpProtocolVersionSnapshot:
+    if not isinstance(
+        snapshot, (PumpProtocolVersionSnapshot, PumpTradeEventProtocolProof)
+    ):
         return _abstain(
             AbstainReason.UNKNOWN_FEE_CONFIG,
             "point-in-time Pump fee and protocol proof is required",
@@ -339,16 +363,44 @@ def _validate_fee_and_metadata(
         )
     if (
         snapshot.as_of_slot != source.observation.slot
-        or snapshot.program_id != PUMP_PROGRAM_ID
-        or snapshot.idl_hash != PINNED_PUMP_IDL_SHA256
+        or snapshot.program_id
+        != (
+            PUMP_PROGRAM_ID
+            if metadata.quote_path is QuotePath.PUMP_BONDING_CURVE
+            else PUMP_AMM_PROGRAM_ID
+        )
+        or snapshot.idl_hash
+        != (
+            PINNED_PUMP_IDL_SHA256
+            if metadata.quote_path is QuotePath.PUMP_BONDING_CURVE
+            else PINNED_PUMP_SWAP_IDL_SHA256
+        )
         or not snapshot.program_config_version
-        or not snapshot.registry_version
     ):
         return _abstain(
             AbstainReason.UNKNOWN_PROTOCOL_STATE,
             "Pump protocol proof is missing or mismatched",
             cutoff,
         )
+    if (
+        isinstance(snapshot, PumpProtocolVersionSnapshot)
+        and not snapshot.registry_version
+    ):
+        return _abstain(
+            AbstainReason.UNKNOWN_PROTOCOL_STATE,
+            "Pump protocol registry proof is missing",
+            cutoff,
+        )
+    if isinstance(snapshot, PumpTradeEventProtocolProof):
+        if not snapshot.source_artifact:
+            return _abstain(
+                AbstainReason.UNKNOWN_PROTOCOL_STATE,
+                "Pump TradeEvent protocol source proof is missing",
+                cutoff,
+            )
+        evidence_error = _validate_evidence_ids(snapshot.evidence_ids, cutoff)
+        if evidence_error is not None:
+            return evidence_error
     fee = snapshot.fee_config
     if (
         type(fee) is not FeeConfig
@@ -402,7 +454,7 @@ def _validate_fee_and_metadata(
             cutoff,
         )
     if (
-        mint_metadata.as_of_slot != source.observation.slot
+        mint_metadata.as_of_slot > source.observation.slot
         or mint_metadata.base_mint_pubkey != event.mint
         or mint_metadata.quote_mint_pubkey != SOL_PUBKEY
         or not mint_metadata.source_artifact
@@ -448,6 +500,7 @@ def _abstain(reason: AbstainReason, message: str, as_of_slot: int) -> AbstainRes
 
 
 __all__ = [
+    "PumpTradeEventProtocolProof",
     "TradeEventTrajectoryMetadataProof",
     "TradeEventTrajectoryPointResult",
     "TradeEventTrajectoryResult",

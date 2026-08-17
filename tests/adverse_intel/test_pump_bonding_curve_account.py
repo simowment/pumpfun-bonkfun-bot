@@ -354,14 +354,15 @@ class PumpBondingCurveAccountDecoderTests(unittest.TestCase):
             fields,
             [
                 ("virtual_token_reserves", "u64"),
-                ("virtual_sol_reserves", "u64"),
+                ("virtual_quote_reserves", "u64"),
                 ("real_token_reserves", "u64"),
-                ("real_sol_reserves", "u64"),
+                ("real_quote_reserves", "u64"),
                 ("token_total_supply", "u64"),
                 ("complete", "bool"),
                 ("creator", "pubkey"),
                 ("is_mayhem_mode", "bool"),
                 ("is_cashback_coin", "bool"),
+                ("quote_mint", "pubkey"),
             ],
         )
 

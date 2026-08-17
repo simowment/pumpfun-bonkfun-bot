@@ -11,7 +11,10 @@ import base58
 
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.observations import RawChainObservation
-from rugbot.ingest.rpc_account_observer import observe_account_info
+from rugbot.ingest.rpc_account_observer import (
+    observe_account_info,
+    observe_multiple_account_info,
+)
 from rugbot.ingest.rpc_observer import RpcHttpResponse
 
 ADDRESS = base58.b58encode(b"account".ljust(32, b"a")).decode()
@@ -227,6 +230,65 @@ class RpcAccountObserverTests(unittest.TestCase):
 
         self.assertIsInstance(result, AbstainResult)
         self.assertEqual(transport.calls, [])
+
+    def test_multiple_accounts_share_one_finalized_context_slot(self) -> None:
+        """Paper context inputs cannot combine account reads from different slots."""
+
+        second_address = base58.b58encode(b"second".ljust(32, b"s")).decode()
+        body = _rpc_response(
+            {
+                "context": {"slot": 700},
+                "value": [_account_value(), _account_value()],
+            }
+        )
+        transport = _FakeTransport(body)
+
+        result = asyncio.run(
+            observe_multiple_account_info(
+                (ADDRESS, second_address),
+                endpoint="https://rpc.example",
+                source_id="test-batch-rpc",
+                observer_id="test-observer",
+                boot_id=BOOT_ID,
+                receive_sequence_start=10,
+                transport=transport,
+            )
+        )
+
+        self.assertIsInstance(result, tuple)
+        observations = cast("tuple[RawChainObservation, ...]", result)
+        self.assertEqual([item.slot for item in observations], [700, 700])
+        self.assertEqual([item.receive_sequence for item in observations], [11, 12])
+        self.assertEqual(transport.calls[0]["method"], "getMultipleAccounts")
+        self.assertEqual(
+            transport.calls[0]["params"],
+            [
+                [ADDRESS, second_address],
+                {"commitment": "finalized", "encoding": "base64"},
+            ],
+        )
+
+    def test_multiple_accounts_rejects_newer_requested_context(self) -> None:
+        """A minimum slot is not silently treated as an exact historical read."""
+
+        result = asyncio.run(
+            observe_multiple_account_info(
+                (ADDRESS,),
+                endpoint="https://rpc.example",
+                transport=_FakeTransport(
+                    _rpc_response(
+                        {"context": {"slot": 701}, "value": [_account_value()]}
+                    )
+                ),
+                as_of_slot=700,
+            )
+        )
+
+        self.assertIsInstance(result, AbstainResult)
+        self.assertEqual(
+            cast("AbstainResult", result).reason,
+            AbstainReason.STALE_STATE,
+        )
 
 
 class _FakeTransport:

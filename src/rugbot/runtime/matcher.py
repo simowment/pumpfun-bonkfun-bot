@@ -61,6 +61,7 @@ def match_launch_target(
     if config_error is not None:
         return config_error
     return _match_validated_target(
+        config=config,
         target=config.target,
         launch=launch,
         qualification=qualification,
@@ -72,6 +73,7 @@ def match_launch_target(
 
 def _match_validated_target(
     *,
+    config: CoreSniperConfig,
     target: SniperTarget,
     launch: object,
     qualification: OperatorQualification | None,
@@ -86,6 +88,7 @@ def _match_validated_target(
         if launch.creator_pubkey != target.id and operator_churn is None:
             return False
         qualified = _match_qualified_wallet(
+            config=config,
             target=target,
             launch=launch,
             qualification=qualification,
@@ -434,12 +437,18 @@ def _match_rotated_creator_protection(
 
 def _match_qualified_wallet(
     *,
+    config: CoreSniperConfig,
     target: SniperTarget,
     launch: LaunchCreatedV2,
     qualification: OperatorQualification | None,
     entity_evidence: tuple[WalletEntityEvidence, ...] | None,
 ) -> bool | AbstainResult:
     if qualification is None or entity_evidence is None:
+        if (
+            not config.strategy.require_historical_qualification
+            and launch.creator_pubkey == target.id
+        ):
+            return True
         return _abstain(
             launch,
             AbstainReason.MISSING_FEATURE,
@@ -639,7 +648,11 @@ def _validate_config(config: object) -> AbstainResult | None:
             message="sniper execution is malformed",
             as_of_slot=0,
         )
-    if config.execution.mode not in (ExecutionMode.OBSERVE, ExecutionMode.PAPER):
+    if config.execution.mode not in (
+        ExecutionMode.OBSERVE,
+        ExecutionMode.PAPER,
+        ExecutionMode.LIVE,
+    ):
         return AbstainResult(
             reason=AbstainReason.UNKNOWN_PROTOCOL_STATE,
             message="sniper execution mode is unsupported",

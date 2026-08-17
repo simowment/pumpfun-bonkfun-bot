@@ -11,12 +11,17 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rugbot.backtest.copytrade import CopyTradeConfig
 from rugbot.backtest.dataset import (
     FinalizedBacktestDataset,
     FinalizedBacktestResult,
-    build_finalized_dataset,
+    FullExitStressConfig,
 )
-from rugbot.backtest.evaluation import build_backtest_report
+from rugbot.backtest.evaluation import (
+    BacktestConfig,
+    FrozenModelManifest,
+    build_backtest_report,
+)
 from rugbot.backtest.finalized_trade_builder import (
     build_finalized_trades_from_observations,
 )
@@ -24,17 +29,21 @@ from rugbot.backtest.io import load_backtest_document
 from rugbot.backtest.observation_trade_join import derive_finalized_trade_joins
 from rugbot.backtest.online_pipeline import (
     FinalizedBacktestMetadata,
+    FinalizedBacktestRunArtifacts,
     run_finalized_backtest_pipeline,
+    run_production_backtest_pipeline,
 )
 from rugbot.backtest.qualified_run import QualifiedRunResult
 from rugbot.backtest.rpc_case_acquisition import (
     acquire_finalized_rpc_case_observations,
+    build_rpc_case_proofs,
 )
 from rugbot.domain.amounts import Slot
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.storage.jsonl_observation_store import JsonlObservationStore
 
 MAX_RPC_TRANSACTIONS = 1000
+MIN_RPC_LAUNCHES_FOR_SPLIT = 2
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -129,13 +138,16 @@ def run_replayed_dataset_file(
     )
 
 
-async def run_rpc_dataset(
+async def run_rpc_dataset(  # noqa: PLR0913
     *,
     operator_wallet: str,
     endpoint: str,
     start_slot: Slot,
     end_slot: Slot,
     max_transactions: int,
+    fixed_entry_quote_base_units: int = 1_000_000,
+    horizon_ms: int = 0,
+    min_history_launch_count: int = 15,
 ) -> FinalizedBacktestDataset | FinalizedBacktestResult | AbstainResult:
     """Acquire finalized RPC evidence and pass it through the shared pipeline."""
 
@@ -156,6 +168,7 @@ async def run_rpc_dataset(
     joins = derive_finalized_trade_joins(
         observations=bounded_observations,
         as_of_slot=end_slot,
+        eligible_mints=frozenset(acquired.launch_mints),
     )
     if isinstance(joins, AbstainResult):
         return joins
@@ -167,20 +180,75 @@ async def run_rpc_dataset(
     )
     if isinstance(trades, AbstainResult):
         return trades
-    dataset = build_finalized_dataset(
-        observations=bounded_observations,
-        cases=(),
+    bundle = build_rpc_case_proofs(
+        acquisition=acquired,
         trades=trades,
         as_of_slot=end_slot,
+        fixed_entry_quote_base_units=fixed_entry_quote_base_units,
+        horizon_ms=horizon_ms,
     )
-    if isinstance(dataset, AbstainResult):
-        return dataset
-    return run_finalized_backtest_pipeline(
-        observations=dataset.observations,
-        metadata=FinalizedBacktestMetadata(
-            as_of_slot=end_slot,
-            trades=dataset.trades,
-            cases=(),
+    if isinstance(bundle, AbstainResult):
+        return bundle
+    if len(acquired.launches) < MIN_RPC_LAUNCHES_FOR_SPLIT:
+        return AbstainResult(
+            reason=AbstainReason.MISSING_FEATURE,
+            message="at least two finalized launches are required for a split",
+            as_of_slot=int(end_slot),
+        )
+    ordered_launches = tuple(
+        sorted(acquired.launches, key=lambda item: (item.as_of_slot, item.launch_id))
+    )
+    test_start_slot = Slot(ordered_launches[-1].as_of_slot)
+    train_end_slot = Slot(ordered_launches[-2].as_of_slot)
+    manifest = FrozenModelManifest(
+        as_of_slot=end_slot,
+        model_freeze_slot=train_end_slot,
+        decision_version="copy-trade-fixed-entry",
+        model_version="rule-based",
+        outcome_labeler_version="pump-trade-event-outcome",
+        profile_snapshot_version="finalized-rpc",
+        graph_snapshot_version="finalized-rpc",
+        feature_snapshot_version="finalized-rpc",
+        market_snapshot_version="finalized-rpc",
+        latency_model_version="zero-delay-paper",
+        fee_config_version="pump-trade-event-fees",
+    )
+    strategy = CopyTradeConfig(
+        as_of_slot=end_slot,
+        min_history_launch_count=min_history_launch_count,
+        max_history_launch_count=20,
+        max_entry_transaction_index=1,
+        fixed_entry_quote_base_units=fixed_entry_quote_base_units,
+    )
+    backtest_config = BacktestConfig(
+        as_of_slot=end_slot,
+        evaluation_version="finalized-rpc-backtest",
+        manifest=manifest,
+        train_end_slot=train_end_slot,
+        test_start_slot=test_start_slot,
+        test_end_slot=end_slot,
+        train_entity_ids=(operator_wallet,),
+        stress_entity_ids=(),
+        expected_shortfall_tail_ppm=100_000,
+    )
+    return run_production_backtest_pipeline(
+        observations=bounded_observations,
+        launches=acquired.launches,
+        trades=trades,
+        entity_evidence=bundle.entity_evidence,
+        proofs=bundle.proofs,
+        as_of_slot=end_slot,
+        entity_id=operator_wallet,
+        regime_id="pump-curve",
+        run=FinalizedBacktestRunArtifacts(
+            strategy=strategy,
+            manifest=manifest,
+            backtest_config=backtest_config,
+            stress=FullExitStressConfig(
+                as_of_slot=end_slot,
+                output_haircut_ppm=1_000_000,
+                additional_execution_cost_quote_base_units=0,
+            ),
         ),
     )
 
@@ -220,6 +288,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=20,
         help="Maximum finalized transactions acquired in the operator history window.",
+    )
+    parser.add_argument(
+        "--quote-size-lamports",
+        type=int,
+        default=1_000_000,
+        help="Fixed paper entry size in lamports for the historical case builder.",
+    )
+    parser.add_argument(
+        "--horizon-ms",
+        type=int,
+        default=0,
+        help="Required outcome horizon; zero uses the observed launch duration.",
+    )
+    parser.add_argument(
+        "--min-history-launch-count",
+        type=int,
+        default=15,
+        help="Minimum completed launches required before a copy-trade entry.",
     )
     parser.add_argument(
         "--endpoint",
@@ -263,6 +349,12 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0912
             parser.error("--operator-wallet requires a valid --start-slot/--end-slot")
         if not 1 <= args.max_transactions <= MAX_RPC_TRANSACTIONS:
             parser.error("--max-transactions must be between 1 and 1000")
+        if args.quote_size_lamports <= 0:
+            parser.error("--quote-size-lamports must be positive")
+        if args.horizon_ms < 0:
+            parser.error("--horizon-ms must be non-negative")
+        if args.min_history_launch_count < 1:
+            parser.error("--min-history-launch-count must be positive")
         endpoint = args.endpoint or os.environ.get("SOLANA_RPC_HTTP")
         if not endpoint:
             parser.error("--operator-wallet requires --endpoint or SOLANA_RPC_HTTP")
@@ -273,6 +365,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0912
                 start_slot=Slot(args.start_slot),
                 end_slot=Slot(args.end_slot),
                 max_transactions=args.max_transactions,
+                fixed_entry_quote_base_units=args.quote_size_lamports,
+                horizon_ms=args.horizon_ms,
+                min_history_launch_count=args.min_history_launch_count,
             )
         )
     elif args.replay is not None:
@@ -317,16 +412,12 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0912
             exit_code = 0
     elif isinstance(result, FinalizedBacktestResult):
         payload = {
-            "status": "abstain",
-            "reason": AbstainReason.MISSING_FEATURE.value,
-            "message": (
-                "finalized backtest result is missing operator qualification; "
-                "typed completed outcomes and wallet entity evidence are required"
-            ),
+            "status": "ok",
             "as_of_slot": result.dataset.as_of_slot,
             "result": _dataset_summary(result),
+            "report": _jsonable(result.report),
         }
-        exit_code = 1
+        exit_code = 0
     else:
         payload = {"status": "ok", "report": _jsonable(result)}
         exit_code = 0

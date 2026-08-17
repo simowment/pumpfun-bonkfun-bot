@@ -81,11 +81,12 @@ class CoreSniperConfigTests(unittest.TestCase):
         with self.assertRaises(SniperConfigError):
             parse_sniper_config(_yaml() + "\ntracking_mode: track_sells\n")
 
-    def test_config_rejects_missing_fields_live_mode_and_float_money(self) -> None:
+    def test_config_rejects_missing_fields_and_float_money(self) -> None:
         with self.assertRaises(SniperConfigError):
             parse_sniper_config(f'target:\n  kind: token\n  id: "{ZERO_ADDRESS}"\n')
-        with self.assertRaises(SniperConfigError):
-            parse_sniper_config(_yaml(mode="live"))
+        self.assertEqual(
+            parse_sniper_config(_yaml(mode="live")).execution.mode.value, "live"
+        )
         with self.assertRaises(SniperConfigError):
             parse_sniper_config(_yaml(quote_size="1.0"))
 

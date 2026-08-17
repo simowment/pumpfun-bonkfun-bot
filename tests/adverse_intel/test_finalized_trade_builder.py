@@ -4,6 +4,7 @@ import base64
 import json
 import struct
 import unittest
+from dataclasses import replace
 from uuid import UUID
 
 import base58
@@ -103,6 +104,19 @@ class FinalizedTradeBuilderTests(unittest.TestCase):
             wallet=WALLET,
             as_of_slot=Slot(10),
         )
+        self.assertFalse(isinstance(result, AbstainResult))
+
+    def test_v2_instruction_matches_legacy_event_name(self) -> None:
+        observation = _observation(_event(is_buy=True))
+        result = build_finalized_pump_trade(
+            observation=observation,
+            instruction=replace(_instruction(TradeSide.BUY), instruction_name="buy_v2"),
+            launch_id="launch-1",
+            token_mint=MINT,
+            wallet=WALLET,
+            as_of_slot=Slot(10),
+        )
+
         self.assertFalse(isinstance(result, AbstainResult))
 
 

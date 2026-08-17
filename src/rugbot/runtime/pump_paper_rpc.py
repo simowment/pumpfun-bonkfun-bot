@@ -18,7 +18,7 @@ from rugbot.domain.launches import LaunchCreatedV2
 from rugbot.domain.observations import RawChainObservation
 from rugbot.ingest.rpc_account_observer import (
     AccountObservationResult,
-    observe_account_info,
+    observe_multiple_account_info,
 )
 from rugbot.protocol.pump.create_decoder import CREATE_V2_ACCOUNT_NAMES
 from rugbot.protocol.pump.fee_config_account import PUMP_FEE_CONFIG_PDA
@@ -42,6 +42,7 @@ class PumpPaperAccountObservations:
     global_account: RawChainObservation
     fee_config_account: RawChainObservation
     mint_account: RawChainObservation
+    bonding_curve_account: RawChainObservation
 
 
 PumpPaperRpcResult: TypeAlias = PumpPaperAccountObservations | AbstainResult
@@ -50,7 +51,7 @@ AccountObserver: TypeAlias = Callable[
 ]
 
 
-async def resolve_pump_paper_accounts(  # noqa: PLR0913
+async def resolve_pump_paper_accounts(  # noqa: C901, PLR0911, PLR0912, PLR0913
     *,
     launch: LaunchCreatedV2,
     create_observation: RawChainObservation,
@@ -61,6 +62,7 @@ async def resolve_pump_paper_accounts(  # noqa: PLR0913
     receive_sequence_start: int = 0,
     transport: RpcHttpTransport | None = None,
     observer: AccountObserver | None = None,
+    account_as_of_slot: int | None = None,
 ) -> PumpPaperRpcResult:
     """Fetch the exact finalized Pump accounts required for paper resolution.
 
@@ -81,42 +83,85 @@ async def resolve_pump_paper_accounts(  # noqa: PLR0913
     if isinstance(addresses, AbstainResult):
         return addresses
 
-    account_observer = observer or observe_account_info
-    observations: dict[str, RawChainObservation] = {}
-    for sequence_offset, (role, address) in enumerate(addresses):
-        result = account_observer(
-            address,
+    if account_as_of_slot is not None and (
+        type(account_as_of_slot) is not int or account_as_of_slot < 0
+    ):
+        return _abstain(
+            AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+            "account_as_of_slot must be a non-negative integer",
+            launch.as_of_slot,
+        )
+
+    if observer is None:
+        batch = await observe_multiple_account_info(
+            tuple(address for _, address in addresses),
             endpoint=endpoint,
             source_id=source_id,
             observer_id=observer_id,
             boot_id=boot_id,
-            receive_sequence_start=receive_sequence_start + sequence_offset,
+            receive_sequence_start=receive_sequence_start,
             transport=transport,
-            as_of_slot=launch.as_of_slot,
+            as_of_slot=account_as_of_slot,
         )
-        if inspect.isawaitable(result):
-            result = await result
-        if isinstance(result, AbstainResult):
-            return result
-        if type(result) is not RawChainObservation:
+        if isinstance(batch, AbstainResult):
+            return batch
+        if not batch or len(batch) != len(addresses):
             return _abstain(
                 AbstainReason.UNKNOWN_PROTOCOL_STATE,
-                f"account observer returned malformed {role} evidence",
+                "account observer returned an incomplete account batch",
                 launch.as_of_slot,
             )
-        if result.slot != launch.as_of_slot:
+        observations = {
+            role: observation
+            for (role, _), observation in zip(addresses, batch, strict=True)
+        }
+        target_slot = batch[0].slot
+        if any(observation.slot != target_slot for observation in batch):
             return _abstain(
                 AbstainReason.STALE_STATE,
-                f"{role} account context slot does not match the create slot",
-                result.slot,
+                "account batch contains different context slots",
+                target_slot,
             )
-        observations[role] = result
+    else:
+        observations = {}
+        target_slot = (
+            launch.as_of_slot if account_as_of_slot is None else account_as_of_slot
+        )
+        for sequence_offset, (role, address) in enumerate(addresses):
+            result = observer(
+                address,
+                endpoint=endpoint,
+                source_id=source_id,
+                observer_id=observer_id,
+                boot_id=boot_id,
+                receive_sequence_start=receive_sequence_start + sequence_offset,
+                transport=transport,
+                as_of_slot=target_slot,
+            )
+            if inspect.isawaitable(result):
+                result = await result
+            if isinstance(result, AbstainResult):
+                return result
+            if type(result) is not RawChainObservation:
+                return _abstain(
+                    AbstainReason.UNKNOWN_PROTOCOL_STATE,
+                    f"account observer returned malformed {role} evidence",
+                    target_slot,
+                )
+            if result.slot != target_slot:
+                return _abstain(
+                    AbstainReason.STALE_STATE,
+                    f"{role} account context slot does not match the requested slot",
+                    result.slot,
+                )
+            observations[role] = result
 
     return PumpPaperAccountObservations(
-        as_of_slot=launch.as_of_slot,
+        as_of_slot=target_slot,
         global_account=observations["global"],
         fee_config_account=observations["fee_config"],
         mint_account=observations["mint"],
+        bonding_curve_account=observations["bonding_curve"],
     )
 
 
@@ -225,6 +270,7 @@ def _required_addresses(
         ("global", global_address),
         ("fee_config", PUMP_FEE_CONFIG_PDA),
         ("mint", mint_address),
+        ("bonding_curve", launch.bonding_curve_pubkey),
     )
 
 

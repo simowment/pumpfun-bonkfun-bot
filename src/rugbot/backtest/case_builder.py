@@ -220,6 +220,16 @@ def assemble_copy_trade_cases(
                 "target evidence IDs are malformed or duplicated",
                 cutoff,
             )
+        entry_transaction_offset = _entry_transaction_offset(
+            fill=target_fill,
+            launch=target,
+        )
+        if entry_transaction_offset is None:
+            return _abstain(
+                AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+                "target entry transaction is not relative to its launch",
+                cutoff,
+            )
         cases.append(
             CopyTradeLaunchCase(
                 as_of_slot=Slot(cutoff),
@@ -232,7 +242,7 @@ def assemble_copy_trade_cases(
                 decision_index=target_fill.transaction_index,
                 wallet=target_entity[0],
                 launch_time_ms=target_trajectory.launch_time_ms,
-                wallet_buy_transaction_index=target_fill.transaction_index,
+                wallet_buy_transaction_index=entry_transaction_offset,
                 wallet_buy_elapsed_ms=target_trajectory.wallet_buy_elapsed_ms,
                 entry_market_cap_quote_base_units=(
                     target_trajectory.entry_market_cap_quote_base_units
@@ -317,6 +327,8 @@ def _validate_launches(
             type(launch.as_of_slot) is not int
             or launch.as_of_slot < 0
             or launch.as_of_slot > cutoff
+            or type(launch.transaction_index) is not int
+            or launch.transaction_index < 0
             or not isinstance(launch.launch_id, str)
             or not launch.launch_id
             or not isinstance(launch.account_pubkeys, tuple)
@@ -592,6 +604,16 @@ def _build_history(
                 "historical evidence IDs are malformed or duplicated",
                 target.as_of_slot,
             )
+        entry_transaction_offset = _entry_transaction_offset(
+            fill=fill,
+            launch=launch,
+        )
+        if entry_transaction_offset is None:
+            return _abstain(
+                AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+                "historical entry transaction is not relative to its launch",
+                target.as_of_slot,
+            )
         history.append(
             CopyTradeHistorySample(
                 as_of_slot=Slot(sample_as_of),
@@ -600,7 +622,7 @@ def _build_history(
                 wallet=entity[0],
                 launch_slot=Slot(launch.as_of_slot),
                 launch_time_ms=artifact.launch_time_ms,
-                first_buy_transaction_index=fill.transaction_index,
+                first_buy_transaction_index=entry_transaction_offset,
                 entry_market_cap_quote_base_units=(
                     artifact.entry_market_cap_quote_base_units
                 ),
@@ -688,7 +710,11 @@ def _first_buy(
         and fill.side is TradeSide.BUY
         and fill.slot <= boundary
         and fill.as_of_slot <= boundary
-        and fill.transaction_index <= max_transaction_index
+        and _within_entry_transaction_window(
+            fill=fill,
+            launch=launch,
+            max_transaction_index=max_transaction_index,
+        )
     )
     if not candidates:
         return _abstain(
@@ -728,6 +754,42 @@ def _first_buy(
             boundary,
         )
     return first
+
+
+def _within_entry_transaction_window(
+    *,
+    fill: FinalizedTrade,
+    launch: LaunchCreatedV2,
+    max_transaction_index: int,
+) -> bool:
+    """Accept buys in the launch transaction or its bounded same-slot tail.
+
+    Transaction indexes are block-local Solana positions, not positions
+    relative to a launch. The creator's seed buy commonly shares the create
+    transaction, so comparing it to absolute 0/1 rejects valid launches.
+    """
+
+    distance = _entry_transaction_offset(fill=fill, launch=launch)
+    return distance is not None and distance <= max_transaction_index
+
+
+def _entry_transaction_offset(
+    *,
+    fill: FinalizedTrade,
+    launch: LaunchCreatedV2,
+) -> int | None:
+    """Return the block-local transaction offset from launch to entry."""
+
+    if (
+        type(launch.transaction_index) is not int
+        or launch.transaction_index < 0
+        or type(fill.transaction_index) is not int
+        or fill.transaction_index < 0
+        or fill.slot != launch.as_of_slot
+    ):
+        return None
+    distance = fill.transaction_index - launch.transaction_index
+    return distance if distance >= 0 else None
 
 
 def _validate_target_artifacts(

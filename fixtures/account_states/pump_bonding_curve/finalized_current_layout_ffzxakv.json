@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "artifact_version": "pump-bonding-curve-account-fixture-v1",
-  "description": "Finalized read-only getAccountInfo fixture for a Pump bonding-curve account with the pinned current IDL prefix layout and zero trailing padding.",
+  "description": "Finalized read-only getAccountInfo fixture for a Pump bonding-curve account with the pinned current IDL layout and zero trailing padding.",
   "rpc": {
     "method": "getAccountInfo",
     "commitment": "finalized",
@@ -30,7 +30,7 @@
     "creator_hex": "dd10b0576e99e8bbd541344fdc3f21ab50f39a64e09108d5d124a88d60992e7e",
     "is_mayhem_mode": false,
     "is_cashback_coin": false,
-    "current_layout_size": 83,
-    "trailing_zero_padding_length": 68
+    "current_layout_size": 115,
+    "trailing_zero_padding_length": 36
   }
 }

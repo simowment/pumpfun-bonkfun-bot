@@ -12,7 +12,7 @@ from rugbot.protocol.pump.version_registry import PumpProtocolVersionSnapshot
 
 PUMP_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 PINNED_PUMP_IDL_SHA256 = (
-    "662f9afea2feb1a4318852b65d4c1f642f1fdae8d3c9228478efd01d42dfa41d"
+    "b90bc471327f671449271d5d1d42354d1fae6f5a06502f5834459a3108138e49"
 )
 PUMP_BONDING_CURVE_ACCOUNT_DECODER_VERSION = "pump-bonding-curve-account-v1"
 PUMP_BONDING_CURVE_LAYOUT_ARTIFACT_VERSION = "pump-bonding-curve-current-idl-layout-v1"
@@ -23,7 +23,9 @@ PUBKEY_SIZE = 32
 BOOL_FALSE = 0
 BOOL_TRUE = 1
 MAX_SUPPORTED_DECIMALS = 18
-CURRENT_LAYOUT_SIZE = DISCRIMINATOR_SIZE + (U64_SIZE * 5) + 1 + PUBKEY_SIZE + 1 + 1
+CURRENT_LAYOUT_SIZE = (
+    DISCRIMINATOR_SIZE + (U64_SIZE * 5) + 1 + PUBKEY_SIZE + 1 + 1 + PUBKEY_SIZE
+)
 
 
 @dataclass(frozen=True, slots=True)

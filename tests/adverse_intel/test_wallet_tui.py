@@ -2,9 +2,12 @@
 
 import unittest
 from dataclasses import replace
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from textual.widgets import Checkbox, DataTable, Input, Static, TabbedContent
 
+from rugbot.runtime.config import load_sniper_config
 from rugbot.runtime.wallet_intelligence import (
     WalletIntelligenceReport,
     WalletLaunch,
@@ -13,8 +16,10 @@ from rugbot.runtime.wallet_intelligence import (
 )
 from rugbot.runtime.wallet_tui import (
     WalletIntelApp,
+    format_assessment,
     format_flow,
     format_graph_map,
+    format_network_endpoint,
     format_sol,
     launch_matches,
     report_delta,
@@ -80,7 +85,12 @@ class WalletTuiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(launch_matches(launch, "missing"))
         self.assertEqual(report_delta(report, newer), (1, 1))
         self.assertIn("IN  2 SOL", format_flow(report))
-        self.assertIn("<- source...fghijk", format_graph_map(report))
+        self.assertIn("<-- DIRECT  source...fghijk", format_graph_map(report))
+        self.assertIn("NOT QUALIFIED", format_assessment(report))
+        self.assertEqual(
+            format_network_endpoint("https://rpc.example/?api-key=secret"),
+            "rpc.example",
+        )
 
     async def test_invalid_wallet_is_visible_as_abstention(self) -> None:
         app = WalletIntelApp(
@@ -193,6 +203,46 @@ class WalletTuiTests(unittest.IsolatedAsyncioTestCase):
             ):
                 self.assertIsInstance(app.query_one(f"#{input_id}", Input), Input)
             self.assertIsInstance(app.query_one("#buy-once", Checkbox), Checkbox)
+            self.assertIsInstance(
+                app.query_one("#require-historical-qualification", Checkbox),
+                Checkbox,
+            )
+
+    async def test_settings_save_persists_public_setup(self) -> None:
+        """The TUI saves the public target and paper execution settings."""
+
+        with TemporaryDirectory() as directory:
+            config_path = Path(directory) / "watch.yaml"
+            config_path.write_text(
+                "target:\n"
+                "  kind: wallet\n"
+                '  id: "11111111111111111111111111111111"\n'
+                "execution:\n"
+                "  mode: observe\n"
+                "  quote_size_lamports: 1000000\n",
+                encoding="utf-8",
+            )
+            app = WalletIntelApp(
+                "11111111111111111111111111111111",
+                endpoint="https://rpc.example",
+                config_path=config_path,
+            )
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app.query_one("#quote-size", Input).value = "2000000"
+                app.query_one("#max-slippage", Input).value = "750"
+                app.query_one("#max-entry-mc", Input).value = "42000000"
+                app._save_settings()  # noqa: SLF001
+
+            saved = load_sniper_config(config_path)
+            self.assertEqual(saved.target.id, "11111111111111111111111111111111")
+            self.assertEqual(saved.execution.mode.value, "observe")
+            self.assertEqual(saved.execution.quote_size_lamports, 2_000_000)
+            self.assertEqual(saved.execution.max_slippage_bps, 750)
+            self.assertEqual(
+                saved.strategy.max_entry_market_cap_quote_base_units,
+                42_000_000,
+            )
 
 
 if __name__ == "__main__":

@@ -157,7 +157,7 @@ def run_production_backtest_pipeline(  # noqa: PLR0913
         metadata=FinalizedBacktestMetadata(
             as_of_slot=as_of_slot,
             trades=trades,
-            cases=cases.cases,
+            cases=cases,
             run=run,
         ),
     )
