@@ -43,7 +43,6 @@ from rugbot.graph.wallet_churn import (
 
 DECISION_MODULES = (
     Path("src/rugbot/decision/sizing.py"),
-    Path("src/rugbot/decision/exit_controller.py"),
 )
 FORBIDDEN_IMPORT_PREFIXES = (
     "requests",

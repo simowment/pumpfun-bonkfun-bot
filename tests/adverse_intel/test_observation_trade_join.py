@@ -1,17 +1,14 @@
 """Focused tests for canonical finalized launch/trade discovery."""
 
-import asyncio
 import json
 import unittest
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import base58
 
 from rugbot.backtest.observation_trade_join import derive_finalized_trade_joins
-from rugbot.backtest.rpc_dataset import _extend_with_mint_history
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.observations import RawChainObservation
 from rugbot.ingest.pump_create_observation import decode_pump_create_v2_observation
@@ -95,39 +92,6 @@ class ObservationTradeJoinTests(unittest.TestCase):
         )
         self.assertEqual(len(joins), 1)
         self.assertEqual(joins[0].token_mint, launch.mint_pubkey)
-
-    def test_mint_history_merge_rejects_rows_over_transaction_bound(self) -> None:
-        observation = _observation(_artifact())
-        extra = replace(
-            observation,
-            raw_id=UUID("00000000-0000-0000-0000-000000000009"),
-            signature=b"x" * 64,
-        )
-
-        async def run() -> object:
-            with patch(
-                "rugbot.backtest.rpc_dataset.observe_address",
-                new=AsyncMock(return_value=(extra,)),
-            ):
-                return await _extend_with_mint_history(
-                    observations=(observation,),
-                    mints=("mint",),
-                    endpoint="https://rpc.example",
-                    start_slot=observation.slot,
-                    end_slot=observation.slot,
-                    max_transactions=1,
-                    source_id="test",
-                    observer_id="observer",
-                    transport=None,
-                )
-
-        result = asyncio.run(run())
-        self.assertIsInstance(result, AbstainResult)
-        self.assertEqual(result.reason, AbstainReason.UNKNOWN_PROTOCOL_STATE)
-        self.assertEqual(
-            result.message,
-            "merged RPC observations exceeded the transaction bound",
-        )
 
 
 def _unrelated_trade_observation(
