@@ -1,0 +1,4 @@
+interface:
+  display_name: "Trading TUI Operator Testing"
+  short_description: "Test crypto TUIs like an operator"
+  default_prompt: "Use $trading-tui-operator-testing to validate this trading TUI with keyboard workflows and readable screenshots."
