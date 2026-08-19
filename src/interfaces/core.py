@@ -15,10 +15,9 @@ from solders.pubkey import Pubkey
 
 
 class Platform(Enum):
-    """Supported trading platforms."""
+    """Supported Solana protocol."""
 
     PUMP_FUN = "pump_fun"
-    LETS_BONK = "lets_bonk"
 
 
 @dataclass
@@ -341,20 +340,6 @@ class EventParser(ABC):
             instruction_data: Raw instruction data
             accounts: List of account indices
             account_keys: List of account public keys
-
-        Returns:
-            TokenInfo if token creation found, None otherwise
-        """
-        pass
-
-    @abstractmethod
-    def parse_token_creation_from_geyser(
-        self, transaction_info: Any
-    ) -> TokenInfo | None:
-        """Parse token creation from Geyser transaction data.
-
-        Args:
-            transaction_info: Geyser transaction information
 
         Returns:
             TokenInfo if token creation found, None otherwise

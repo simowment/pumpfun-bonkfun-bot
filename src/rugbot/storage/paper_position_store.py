@@ -18,8 +18,15 @@ _POSITION_FIELDS = frozenset(
     {
         "as_of_slot",
         "market_id",
+        "target_id",
+        "execution_mode",
         "original_position_base_units",
         "current_position_base_units",
+        "entry_quote_lamports",
+        "entry_cost_lamports",
+        "take_profit_pnl_ppm",
+        "stop_loss_pnl_ppm",
+        "max_slippage_bps",
         "peak_pnl_ppm",
         "exit_rule_state",
         "emitted_sell_intent_count",
@@ -34,6 +41,7 @@ _EXIT_RULE_FIELDS = frozenset(
     }
 )
 _PPM_DENOMINATOR = 1_000_000
+_MAX_SLIPPAGE_BPS = 10_000
 
 
 class PaperPositionStoreError(ValueError):
@@ -180,12 +188,19 @@ def _position_from_json(payload: object) -> PaperPositionState:
         PaperPositionState(
             as_of_slot=Slot(_nonnegative_int(data, "as_of_slot")),
             market_id=_market_id(data),
+            target_id=_nonempty_text(data, "target_id"),
+            execution_mode=_execution_mode(data),
             original_position_base_units=TokenBaseUnits(
                 _positive_int(data, "original_position_base_units")
             ),
             current_position_base_units=TokenBaseUnits(
                 _nonnegative_int(data, "current_position_base_units")
             ),
+            entry_quote_lamports=_positive_int(data, "entry_quote_lamports"),
+            entry_cost_lamports=_nonnegative_int(data, "entry_cost_lamports"),
+            take_profit_pnl_ppm=_optional_integer(data, "take_profit_pnl_ppm"),
+            stop_loss_pnl_ppm=_optional_integer(data, "stop_loss_pnl_ppm"),
+            max_slippage_bps=_bounded_slippage(data, "max_slippage_bps"),
             peak_pnl_ppm=_integer(data, "peak_pnl_ppm"),
             exit_rule_state=_exit_rule_state_from_json(data["exit_rule_state"]),
             emitted_sell_intent_count=_nonnegative_int(
@@ -214,8 +229,15 @@ def _position_to_json(state: PaperPositionState) -> dict[str, object]:
     return {
         "as_of_slot": state.as_of_slot,
         "market_id": state.market_id,
+        "target_id": state.target_id,
+        "execution_mode": state.execution_mode,
         "original_position_base_units": state.original_position_base_units,
         "current_position_base_units": state.current_position_base_units,
+        "entry_quote_lamports": state.entry_quote_lamports,
+        "entry_cost_lamports": state.entry_cost_lamports,
+        "take_profit_pnl_ppm": state.take_profit_pnl_ppm,
+        "stop_loss_pnl_ppm": state.stop_loss_pnl_ppm,
+        "max_slippage_bps": state.max_slippage_bps,
         "peak_pnl_ppm": state.peak_pnl_ppm,
         "exit_rule_state": {
             "filled_take_profit_level_indices": (
@@ -241,11 +263,15 @@ def _validate_positions(
     return tuple(sorted(validated, key=lambda state: state.market_id))
 
 
-def _validate_state(state: object) -> PaperPositionState:
+def _validate_state(state: object) -> PaperPositionState:  # noqa: C901
     if type(state) is not PaperPositionState:
         raise PaperPositionStoreError.invalid_field("record")
     _validate_nonnegative_integer(state.as_of_slot, "as_of_slot")
     _validate_market_id(state.market_id)
+    if type(state.target_id) is not str or not state.target_id:
+        raise PaperPositionStoreError.invalid_field("target_id")
+    if state.execution_mode not in {"paper", "simulation", "simulated", "live"}:
+        raise PaperPositionStoreError.invalid_field("execution_mode")
     _validate_positive_integer(
         state.original_position_base_units, "original_position_base_units"
     )
@@ -254,7 +280,19 @@ def _validate_state(state: object) -> PaperPositionState:
     )
     if state.current_position_base_units > state.original_position_base_units:
         raise PaperPositionStoreError.invalid_field("current_position_base_units")
+    _validate_positive_integer(state.entry_quote_lamports, "entry_quote_lamports")
+    _validate_nonnegative_integer(state.entry_cost_lamports, "entry_cost_lamports")
     _validate_integer(state.peak_pnl_ppm, "peak_pnl_ppm")
+    for field_name, threshold in (
+        ("take_profit_pnl_ppm", state.take_profit_pnl_ppm),
+        ("stop_loss_pnl_ppm", state.stop_loss_pnl_ppm),
+    ):
+        if threshold is not None:
+            _validate_integer(threshold, field_name)
+    if type(state.max_slippage_bps) is not int or not (
+        0 <= state.max_slippage_bps <= _MAX_SLIPPAGE_BPS
+    ):
+        raise PaperPositionStoreError.invalid_field("max_slippage_bps")
     if type(state.exit_rule_state) is not ExitRuleState:
         raise PaperPositionStoreError.invalid_field("exit_rule_state")
     for field_name, indices in (
@@ -301,6 +339,13 @@ def _market_id(data: Mapping[str, object]) -> str:
     return cast("str", value)
 
 
+def _execution_mode(data: Mapping[str, object]) -> str:
+    value = data["execution_mode"]
+    if value not in {"paper", "simulation", "simulated", "live"}:
+        raise PaperPositionStoreError.invalid_field("execution_mode")
+    return cast("str", value)
+
+
 def _integer(data: Mapping[str, object], field_name: str) -> int:
     value = data[field_name]
     _validate_integer(value, field_name)
@@ -317,6 +362,31 @@ def _positive_int(data: Mapping[str, object], field_name: str) -> int:
     value = data[field_name]
     _validate_positive_integer(value, field_name)
     return cast("int", value)
+
+
+def _nonempty_text(data: Mapping[str, object], field_name: str) -> str:
+    value = data[field_name]
+    if type(value) is not str or not value:
+        raise PaperPositionStoreError.invalid_field(field_name)
+    return value
+
+
+def _optional_integer(
+    data: Mapping[str, object],
+    field_name: str,
+) -> int | None:
+    value = data[field_name]
+    if value is None:
+        return None
+    _validate_integer(value, field_name)
+    return cast("int", value)
+
+
+def _bounded_slippage(data: Mapping[str, object], field_name: str) -> int:
+    value = _nonnegative_int(data, field_name)
+    if value > _MAX_SLIPPAGE_BPS:
+        raise PaperPositionStoreError.invalid_field(field_name)
+    return value
 
 
 def _bounded_ppm(data: Mapping[str, object], field_name: str) -> int:

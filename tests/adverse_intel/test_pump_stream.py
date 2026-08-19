@@ -2,11 +2,15 @@
 
 import json
 import unittest
+from pathlib import Path
 
 import base58
 
 from rugbot.domain.observations import RawChainObservation
-from rugbot.ingest.pump_stream import PUMP_PROGRAM_ID, _parse_notification
+from rugbot.ingest.pump_stream import (
+    ProcessedPumpCreateNotification,
+    _parse_pumpportal_notification,
+)
 from rugbot.ingest.rpc_observer import (
     RpcHttpResponse,
     observe_finalized_transaction,
@@ -17,30 +21,40 @@ class PumpStreamTests(unittest.IsolatedAsyncioTestCase):
     """Check stream filtering and finalized hydration without a live RPC."""
 
     def test_parse_notification_requires_pump_create(self) -> None:
+        target_wallet = "CvoPbuS2AghzVBYJx7HfQGhALiqif4YwWgHvXmhehuJZ"
         signature = base58.b58encode(bytes(range(64))).decode("ascii")
+        mint = "GGYkiUJGopoH9DZUjGFtLiKpXXW5AQovqZ7eVcjEpump"
         message = json.dumps(
             {
-                "method": "logsNotification",
-                "params": {
-                    "result": {
-                        "context": {"slot": 42},
-                        "value": {
-                            "signature": signature,
-                            "err": None,
-                            "logs": [
-                                f"Program {PUMP_PROGRAM_ID} invoke [1]",
-                                "Program log: Instruction: CreateV2",
-                            ],
-                        },
-                    }
-                },
+                "txType": "create",
+                "signature": signature,
+                "mint": mint,
+                "traderPublicKey": target_wallet,
             }
         )
-        self.assertEqual(_parse_notification(message), (signature, 42))
+        self.assertEqual(
+            _parse_pumpportal_notification(message, target_wallet),
+            {
+                "signature": signature,
+                "mint": mint,
+                "creator": target_wallet,
+            },
+        )
         self.assertIsNone(
-            _parse_notification(
-                message.replace("CreateV2", "Buy"),
+            _parse_pumpportal_notification(
+                json.dumps(
+                    {
+                        "txType": "buy",
+                        "signature": signature,
+                        "mint": mint,
+                        "traderPublicKey": target_wallet,
+                    }
+                ),
+                target_wallet,
             )
+        )
+        self.assertIsNone(
+            _parse_pumpportal_notification(message, "11111111111111111111111111111111")
         )
 
     async def test_streamed_signature_hydrates_finalized_observation(self) -> None:

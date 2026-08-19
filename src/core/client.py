@@ -2,25 +2,29 @@
 Solana client abstraction for blockchain operations.
 """
 
+from __future__ import annotations
+
 import asyncio
 import random
 import struct
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Processed
 from solana.rpc.types import TxOpts
 from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
-from solders.hash import Hash
 from solders.instruction import Instruction
-from solders.keypair import Keypair
 from solders.message import Message
 from solders.pubkey import Pubkey
 from solders.transaction import Transaction
 
 from core.rpc_rate_limiter import TokenBucketRateLimiter
 from utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from solders.hash import Hash
+    from solders.keypair import Keypair
 
 logger = get_logger(__name__)
 
@@ -34,32 +38,19 @@ def set_loaded_accounts_data_size_limit(bytes_limit: int) -> Instruction:
     By default, Solana transactions can load up to 64MB of account data,
     costing 16k CU (8 CU per 32KB). Setting a lower limit reduces CU
     consumption and improves transaction priority.
-
-    NOTE: CU savings are NOT visible in "consumed CU" metrics, which only
-    show execution CU. The 16k CU loaded accounts overhead is counted
-    separately for transaction priority/cost calculation.
-
-    Args:
-        bytes_limit: Max account data size in bytes (e.g., 512_000 = 512KB)
-
-    Returns:
-        Compute Budget instruction with discriminator 4
-
-    Reference:
-        https://www.anza.xyz/blog/cu-optimization-with-setloadedaccountsdatasizelimit
     """
-    COMPUTE_BUDGET_PROGRAM = Pubkey.from_string(
+    compute_budget_program = Pubkey.from_string(
         "ComputeBudget111111111111111111111111111111"
     )
 
     data = struct.pack("<BI", 4, bytes_limit)
-    return Instruction(COMPUTE_BUDGET_PROGRAM, data, [])
+    return Instruction(compute_budget_program, data, [])
 
 
 class SolanaClient:
     """Abstraction for Solana RPC client operations."""
 
-    def __init__(self, rpc_endpoint: str, max_rps: float = 25.0):
+    def __init__(self, rpc_endpoint: str, max_rps: float = 25.0) -> None:
         """Initialize Solana client with RPC endpoint.
 
         Args:
@@ -67,8 +58,9 @@ class SolanaClient:
             max_rps: Maximum RPC requests per second (rate limiter)
         """
         self.rpc_endpoint = rpc_endpoint
-        self._client = None
+        self._client: AsyncClient | None = None
         self._cached_blockhash: Hash | None = None
+        self._cached_last_valid_block_height: int | None = None
         self._blockhash_lock = asyncio.Lock()
         try:
             loop = asyncio.get_running_loop()
@@ -82,24 +74,43 @@ class SolanaClient:
         self._session: aiohttp.ClientSession | None = None
         self._session_lock = asyncio.Lock()
 
-    async def start_blockhash_updater(self, interval: float = 5.0):
+    async def start_blockhash_updater(self, interval: float = 5.0) -> None:
         """Start background task to update recent blockhash."""
         while True:
             try:
-                blockhash = await self.get_latest_blockhash()
+                (
+                    blockhash,
+                    last_valid_block_height,
+                ) = await self.get_latest_blockhash_context()
                 async with self._blockhash_lock:
                     self._cached_blockhash = blockhash
-            except Exception as e:
+                    self._cached_last_valid_block_height = last_valid_block_height
+            except Exception as e:  # noqa: BLE001 - keep the cache task alive.
                 logger.warning(f"Blockhash fetch failed: {e!s}")
             finally:
                 await asyncio.sleep(interval)
 
     async def get_cached_blockhash(self) -> Hash:
         """Return the most recently cached blockhash."""
+
+        blockhash, _last_valid_block_height = await self.get_cached_blockhash_context()
+        return blockhash
+
+    async def get_cached_blockhash_context(self) -> tuple[Hash, int]:
+        """Return a cached blockhash with its exact expiry block height."""
+
         async with self._blockhash_lock:
-            if self._cached_blockhash is None:
-                self._cached_blockhash = await self.get_latest_blockhash()
-            return self._cached_blockhash
+            if (
+                self._cached_blockhash is None
+                or self._cached_last_valid_block_height is None
+            ):
+                (
+                    blockhash,
+                    last_valid_block_height,
+                ) = await self.get_latest_blockhash_context()
+                self._cached_blockhash = blockhash
+                self._cached_last_valid_block_height = last_valid_block_height
+            return self._cached_blockhash, self._cached_last_valid_block_height
 
     async def get_client(self) -> AsyncClient:
         """Get or create the AsyncClient instance.
@@ -124,7 +135,7 @@ class SolanaClient:
                 )
             return self._session
 
-    async def close(self):
+    async def close(self) -> None:
         """Close the client connection and stop the blockhash updater."""
         if self._blockhash_updater_task:
             self._blockhash_updater_task.cancel()
@@ -158,9 +169,9 @@ class SolanaClient:
         """Get account info from the blockchain.
 
         Args:
-            pubkey: Public key of the account
-            commitment: Optional commitment override (e.g., "processed" for
-                fresh state right after a geyser event; default "confirmed")
+            pubkey: Account public key
+            commitment: Optional commitment override for fresh state; default
+                "confirmed"
 
         Returns:
             Account info response
@@ -175,7 +186,7 @@ class SolanaClient:
             kwargs["commitment"] = commitment
         response = await client.get_account_info(pubkey, **kwargs)
         if not response.value:
-            raise ValueError(f"Account {pubkey} not found")
+            raise ValueError(f"Account {pubkey} not found")  # noqa: TRY003
         return response.value
 
     async def get_token_account_balance(self, token_account: Pubkey) -> int:
@@ -198,25 +209,30 @@ class SolanaClient:
         """Get the latest blockhash.
 
         Returns:
-            Recent blockhash as string
+            Recent blockhash as Hash
         """
+        blockhash, _last_valid_block_height = await self.get_latest_blockhash_context()
+        return blockhash
+
+    async def get_latest_blockhash_context(self) -> tuple[Hash, int]:
+        """Get the latest blockhash and its last valid block height."""
+
         await self._rate_limiter.acquire()
         client = await self.get_client()
         response = await client.get_latest_blockhash(commitment="processed")
-        return response.value.blockhash
+        return response.value.blockhash, response.value.last_valid_block_height
 
-    async def build_and_send_transaction(
+    async def build_and_send_transaction(  # noqa: PLR0913
         self,
         instructions: list[Instruction],
         signer_keypair: Keypair,
-        skip_preflight: bool = True,
+        skip_preflight: bool = True,  # noqa: FBT001, FBT002
         max_retries: int = 3,
         priority_fee: int | None = None,
         compute_unit_limit: int | None = None,
         account_data_size_limit: int | None = None,
     ) -> str:
-        """
-        Send a transaction with optional priority fee and compute unit limit.
+        """Send a transaction with optional priority fee or compute unit limit.
 
         Args:
             instructions: List of instructions to include in the transaction.
@@ -225,8 +241,7 @@ class SolanaClient:
             max_retries: Maximum number of retry attempts.
             priority_fee: Optional priority fee in microlamports.
             compute_unit_limit: Optional compute unit limit. Defaults to 85,000 if not provided.
-            account_data_size_limit: Optional account data size limit in bytes (e.g., 512_000).
-                                    Reduces CU cost from 16k to ~128 CU. Must be first instruction.
+            account_data_size_limit: Optional account data size limit in bytes.
 
         Returns:
             Transaction signature.
@@ -272,7 +287,7 @@ class SolanaClient:
                     skip_preflight=skip_preflight, preflight_commitment=Processed
                 )
                 response = await client.send_transaction(transaction, tx_opts)
-                return response.value
+                return response.value  # noqa: TRY300
 
             except Exception as e:
                 if attempt == max_retries - 1:
@@ -293,8 +308,7 @@ class SolanaClient:
         """Wait for transaction confirmation and verify execution success.
 
         Confirms the transaction landed on-chain, then checks meta.err to
-        ensure the inner program instructions actually succeeded. A transaction
-        can be "confirmed" (included in a block) but still fail execution.
+        ensure the inner program instructions actually succeeded.
 
         Args:
             signature: Transaction signature
@@ -334,16 +348,7 @@ class SolanaClient:
     async def get_transaction_token_balance(
         self, signature: str, user_pubkey: Pubkey, mint: Pubkey
     ) -> int | None:
-        """Get the user's token balance after a transaction from postTokenBalances.
-
-        Args:
-            signature: Transaction signature
-            user_pubkey: User's wallet public key
-            mint: Token mint address
-
-        Returns:
-            Token balance (raw amount) after transaction, or None if not found
-        """
+        """Get the user's token balance after a transaction from postTokenBalances."""
         result = await self._get_transaction_result(signature)
         if not result:
             return None
@@ -366,51 +371,29 @@ class SolanaClient:
     async def get_buy_transaction_details(
         self, signature: str, mint: Pubkey, sol_destination: Pubkey
     ) -> tuple[int | None, int | None]:
-        """Get actual tokens received and SOL spent from a buy transaction.
-
-        Uses preBalances/postBalances to find exact SOL transferred to the
-        pool/curve and pre/post token balance diff to find tokens received.
-
-        Args:
-            signature: Transaction signature
-            mint: Token mint address
-            sol_destination: Address where SOL is sent (bonding curve for pump.fun,
-                           quote_vault for letsbonk)
-
-        Returns:
-            Tuple of (tokens_received_raw, sol_spent_lamports), or (None, None)
-        """
+        """Get actual tokens received and SOL spent from a buy transaction."""
         result = await self._get_transaction_result(signature)
         if not result:
             return None, None
 
         meta = result.get("meta", {})
-
-        # Check for transaction execution errors (e.g., MaxLoadedAccountsDataSizeExceeded)
         tx_err = meta.get("err")
         if tx_err:
             logger.error(f"Transaction {signature[:16]}... failed with error: {tx_err}")
             return None, None
 
         mint_str = str(mint)
-
-        # Get tokens received from pre/post token balance diff
-        # This works for Token2022 where owner might be different
         tokens_received = None
         pre_token_balances = meta.get("preTokenBalances", [])
         post_token_balances = meta.get("postTokenBalances", [])
 
-        # Build lookup by account index
         pre_by_idx = {b.get("accountIndex"): b for b in pre_token_balances}
         post_by_idx = {b.get("accountIndex"): b for b in post_token_balances}
 
-        # Find positive token diff for our mint (user receiving tokens)
         all_indices = set(pre_by_idx.keys()) | set(post_by_idx.keys())
         for idx in all_indices:
             pre = pre_by_idx.get(idx)
             post = post_by_idx.get(idx)
-
-            # Check if this is our mint
             balance_mint = (post or pre).get("mint", "")
             if balance_mint != mint_str:
                 continue
@@ -423,13 +406,11 @@ class SolanaClient:
             )
             diff = post_amount - pre_amount
 
-            # Positive diff means tokens received (not the bonding curve's negative)
             if diff > 0:
                 tokens_received = diff
                 logger.info(f"Tokens received from tx: {tokens_received}")
                 break
 
-        # Get SOL spent from preBalances/postBalances at sol_destination
         sol_destination_str = str(sol_destination)
         sol_spent = None
         pre_balances = meta.get("preBalances", [])
@@ -455,14 +436,7 @@ class SolanaClient:
         return tokens_received, sol_spent
 
     async def _get_transaction_result(self, signature: str) -> dict | None:
-        """Fetch transaction result from RPC.
-
-        Args:
-            signature: Transaction signature
-
-        Returns:
-            Transaction result dict or None
-        """
+        """Fetch transaction result from RPC."""
         body = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -487,16 +461,7 @@ class SolanaClient:
     async def post_rpc(
         self, body: dict[str, Any], max_retries: int = 3, max_429_retries: int = 10
     ) -> dict[str, Any] | None:
-        """Send a raw RPC request with rate limiting, retry, and 429 handling.
-
-        Args:
-            body: JSON-RPC request body.
-            max_retries: Maximum number of retry attempts for errors.
-            max_429_retries: Maximum number of retry attempts for 429 rate limits.
-
-        Returns:
-            Parsed JSON response, or None if all attempts fail.
-        """
+        """Send a raw RPC request with rate limiting, retry, and 429 handling."""
         method = body.get("method", "unknown")
         error_attempts = 0
         rate_limit_attempts = 0

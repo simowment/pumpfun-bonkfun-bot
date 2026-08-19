@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
+import base58
+from solders.keypair import Keypair
+
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.ingest.rpc_observer import RpcHttpResponse
 from rugbot.runtime.cli import (
@@ -103,15 +106,13 @@ execution:
         self.assertEqual(args.wallet, "target-wallet")
         self.assertTrue(args.pretty)
 
-    def test_cli_accepts_live_mode_override_without_enabling_it(self) -> None:
+    def test_cli_accepts_live_mode_without_a_second_enable_flag(self) -> None:
         args = build_arg_parser().parse_args(["--mode", "live"])
 
         self.assertEqual(args.mode, "live")
-        self.assertFalse(args.enable_live)
+        self.assertFalse(hasattr(args, "enable_live"))
 
-    def test_live_configuration_requires_explicit_enable_before_port_creation(
-        self,
-    ) -> None:
+    def test_live_configuration_reaches_signer_validation(self) -> None:
         config = """target:
   kind: wallet
   id: "11111111111111111111111111111111"
@@ -122,41 +123,41 @@ execution:
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "watch.yaml"
             path.write_text(config, encoding="utf-8")
-            with patch.dict("os.environ", {"SOLANA_RPC_HTTP": "https://rpc.example"}):
-                with patch("rugbot.runtime.cli._execution_port") as port:
-                    exit_code = main(["--config", str(path), "--once"])
+            with patch.dict(
+                "os.environ",
+                {"SOLANA_RPC_HTTP": "https://rpc.example"},
+                clear=True,
+            ):
+                exit_code = main(["--config", str(path), "--once"])
 
         self.assertEqual(exit_code, 1)
-        port.assert_not_called()
 
-    def test_live_execution_dispatch_is_fail_closed(self) -> None:
-        with self.assertRaisesRegex(ValueError, "requires the explicit --enable-live"):
-            _execution_port(ConfigExecutionMode.LIVE, "https://rpc.example")
+    def test_live_execution_requires_key_before_port_creation(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "SOLANA_PRIVATE_KEY"):
+                _execution_port(ConfigExecutionMode.LIVE, "https://rpc.example")
 
-    def test_live_execution_requires_signing_key(self) -> None:
+    def test_live_execution_requires_key_when_signer_is_configured(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             with self.assertRaisesRegex(ValueError, "SOLANA_PRIVATE_KEY"):
                 _execution_port(
                     ConfigExecutionMode.LIVE,
                     "https://rpc.example",
-                    allow_live=True,
+                    expected_signer_pubkey="signer-pubkey",
                 )
 
-    def test_live_execution_builds_port_only_with_explicit_gate(self) -> None:
-        with (
-            patch.dict("os.environ", {"SOLANA_PRIVATE_KEY": "test-key"}),
-            patch("rugbot.runtime.cli.LivePumpExecutionPort") as live_port,
-        ):
-            live_port.return_value.signer_pubkey = "signer-pubkey"
-            result = _execution_port(
+    def test_live_execution_port_constructs_with_matching_signer(self) -> None:
+        keypair = Keypair()
+        encoded = base58.b58encode(bytes(keypair)).decode("ascii")
+        with patch.dict("os.environ", {"SOLANA_PRIVATE_KEY": encoded}, clear=True):
+            port = _execution_port(
                 ConfigExecutionMode.LIVE,
                 "https://rpc.example",
-                allow_live=True,
-                expected_signer_pubkey="signer-pubkey",
+                expected_signer_pubkey=str(keypair.pubkey()),
             )
 
-        self.assertIs(result, live_port.return_value)
-        live_port.assert_called_once_with("https://rpc.example", "test-key")
+        self.assertEqual(port.signer_pubkey, str(keypair.pubkey()))
+        asyncio.run(port.close())
 
 
 class _FakeTransport:

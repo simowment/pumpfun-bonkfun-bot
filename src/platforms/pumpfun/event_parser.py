@@ -394,48 +394,6 @@ class PumpFunEventParser(EventParser):
             logger.debug(f"Failed to parse create instruction: {e}")
             return None
 
-    def parse_token_creation_from_geyser(
-        self, transaction_info: Any
-    ) -> TokenInfo | None:
-        """Parse token creation from Geyser transaction data.
-
-        Args:
-            transaction_info: Geyser transaction information
-
-        Returns:
-            TokenInfo if token creation found, None otherwise
-        """
-        try:
-            if not hasattr(transaction_info, "transaction"):
-                return None
-
-            tx = transaction_info.transaction.transaction.transaction
-            msg = getattr(tx, "message", None)
-            if msg is None:
-                return None
-
-            for ix in msg.instructions:
-                # Skip non-pump.fun program instructions
-                program_idx = ix.program_id_index
-                if program_idx >= len(msg.account_keys):
-                    continue
-
-                program_id = msg.account_keys[program_idx]
-                if bytes(program_id) != bytes(self.get_program_id()):
-                    continue
-
-                token_info = self.parse_token_creation_from_instruction(
-                    ix.data, ix.accounts, msg.account_keys
-                )
-                if token_info:
-                    return token_info
-
-            return None
-
-        except Exception as e:
-            logger.debug(f"Failed to parse geyser transaction: {e}")
-            return None
-
     def get_program_id(self) -> Pubkey:
         """Get the pump.fun program ID this parser monitors.
 

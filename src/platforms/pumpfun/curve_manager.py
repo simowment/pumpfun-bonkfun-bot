@@ -46,7 +46,7 @@ class PumpFunCurveManager(CurveManager):
         Args:
             pool_address: Address of the bonding curve
             commitment: Optional commitment override. Pass "processed" right
-                after a geyser/logs event so the BC is readable in the same
+                after a finalized launch event so the bonding curve is readable in the same
                 slot it was created (default: confirmed, ~1-2 slot lag).
 
         Returns:
@@ -109,10 +109,11 @@ class PumpFunCurveManager(CurveManager):
         virtual_token_reserves = pool_state["virtual_token_reserves"]
         virtual_sol_reserves = pool_state["virtual_sol_reserves"]
 
-        # Use virtual reserves for bonding curve calculation
-        # Formula: tokens_out = (amount_in * virtual_token_reserves) / (virtual_sol_reserves + amount_in)
-        numerator = amount_in * virtual_token_reserves
-        denominator = virtual_sol_reserves + amount_in
+        # Pump.fun charges 100 BPS (1%) protocol fee on buys
+        # Net SOL entering the curve:
+        net_amount_in = (amount_in * 10_000) // (10_000 + 100)
+        numerator = net_amount_in * virtual_token_reserves
+        denominator = virtual_sol_reserves + net_amount_in
 
         if denominator == 0:
             return 0
@@ -140,15 +141,17 @@ class PumpFunCurveManager(CurveManager):
         virtual_sol_reserves = pool_state["virtual_sol_reserves"]
 
         # Use virtual reserves for bonding curve calculation
-        # Formula: sol_out = (amount_in * virtual_sol_reserves) / (virtual_token_reserves + amount_in)
+        # Formula: gross_sol_out = (amount_in * virtual_sol_reserves) / (virtual_token_reserves + amount_in)
         numerator = amount_in * virtual_sol_reserves
         denominator = virtual_token_reserves + amount_in
 
         if denominator == 0:
             return 0
 
-        sol_out = numerator // denominator
-        return sol_out
+        gross_sol_out = numerator // denominator
+        # Deduct 1% protocol fee from gross SOL
+        net_sol_out = (gross_sol_out * 9900) // 10_000
+        return net_sol_out
 
     async def get_reserves(self, pool_address: Pubkey) -> tuple[int, int]:
         """Get current bonding curve reserves.

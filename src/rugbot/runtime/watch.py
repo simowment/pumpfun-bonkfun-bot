@@ -55,6 +55,7 @@ if TYPE_CHECKING:
 WATCH_MAX_SLIPPAGE_BPS = 500
 WATCH_DEFAULT_MAX_CONSECUTIVE_LOSSES = 3
 WATCH_DEFAULT_BUY_COOLDOWN_SLOTS = 1
+SLOTS_PER_HOUR = 9000
 
 LaunchResolution: TypeAlias = LaunchCreatedV2 | AbstainResult | None
 LaunchResolver: TypeAlias = Callable[
@@ -154,6 +155,7 @@ class WatchSnipeHandler:
     _entry_rule_state: EntryRuleState = field(
         default_factory=EntryRuleState, init=False, repr=False
     )
+    _buy_history_slots: list[int] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate root-level risk controls before any observation is handled."""
@@ -259,7 +261,11 @@ class WatchSnipeHandler:
             return _tracking_mode_abstention(
                 self.config.tracking_mode, as_of_slot=observation.slot
             )
-        if self.config.execution.mode in (SniperMode.PAPER, SniperMode.LIVE) and (
+        if self.config.execution.mode in (
+            SniperMode.PAPER,
+            SniperMode.SIMULATION,
+            SniperMode.LIVE,
+        ) and (
             observation.commitment != "finalized"
             or observation.canonical_status != "canonical"
         ):
@@ -362,18 +368,35 @@ class WatchSnipeHandler:
             return receipt_error
         self._bought_market_ids.add(candidate.intent.market_id)
         self._last_buy_slot = candidate.as_of_slot
+        self._buy_history_slots.append(candidate.as_of_slot)
         self._entry_rule_state = entry_decision.next_state
         self.candidates.append(candidate)
         self.receipts.append(receipt)
         if (
-            self.config.execution.mode in (SniperMode.PAPER, SniperMode.LIVE)
+            self.config.execution.mode
+            in (SniperMode.PAPER, SniperMode.SIMULATION, SniperMode.LIVE)
             and receipt.simulated_output_base_units is not None
         ):
             position = PaperPositionState(
                 as_of_slot=candidate.as_of_slot,
                 market_id=candidate.intent.market_id,
+                target_id=self.config.target.id,
+                execution_mode=self.config.execution.mode.value,
                 original_position_base_units=receipt.simulated_output_base_units,
                 current_position_base_units=receipt.simulated_output_base_units,
+                entry_quote_lamports=int(candidate.intent.quote_amount_base_units),
+                entry_cost_lamports=int(receipt.estimated_fee_lamports or 0),
+                take_profit_pnl_ppm=(
+                    self.config.rules.sell.take_profit_levels[0].trigger_pnl_ppm
+                    if self.config.rules.sell.take_profit_levels
+                    else None
+                ),
+                stop_loss_pnl_ppm=(
+                    self.config.rules.sell.stop_loss_levels[0].trigger_pnl_ppm
+                    if self.config.rules.sell.stop_loss_levels
+                    else None
+                ),
+                max_slippage_bps=self.config.execution.max_slippage_bps,
             )
             try:
                 if self.position_store is not None:
@@ -394,7 +417,8 @@ class WatchSnipeHandler:
         """Advance open positions from this finalized observation."""
 
         if (
-            self.config.execution.mode not in (SniperMode.PAPER, SniperMode.LIVE)
+            self.config.execution.mode
+            not in (SniperMode.PAPER, SniperMode.SIMULATION, SniperMode.LIVE)
             or not self._positions
         ):
             return None
@@ -467,7 +491,11 @@ class WatchSnipeHandler:
     ) -> AbstainResult | None:
         """Evaluate open positions at a newer finalized market slot."""
 
-        if self.config.execution.mode not in (SniperMode.PAPER, SniperMode.LIVE):
+        if self.config.execution.mode not in (
+            SniperMode.PAPER,
+            SniperMode.SIMULATION,
+            SniperMode.LIVE,
+        ):
             return None
         if type(as_of_slot) is not int or as_of_slot < 0:
             return _abstain(
@@ -514,10 +542,14 @@ class WatchSnipeHandler:
         pure exit rules as backtest replay; it never fetches or signs.
         """
 
-        if self.config.execution.mode not in (SniperMode.PAPER, SniperMode.LIVE):
+        if self.config.execution.mode not in (
+            SniperMode.PAPER,
+            SniperMode.SIMULATION,
+            SniperMode.LIVE,
+        ):
             return _abstain(
                 AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
-                "position exits require paper or live execution mode",
+                "position exits require paper, simulation, or live execution mode",
                 as_of_slot=(
                     evidence.as_of_slot
                     if isinstance(evidence, PositionMarketEvidence)
@@ -690,6 +722,18 @@ class WatchSnipeHandler:
                     as_of_slot=candidate.as_of_slot,
                 )
 
+        if self.config.strategy.max_buys_per_hour > 0:
+            recent_buys = [
+                s
+                for s in self._buy_history_slots
+                if candidate.as_of_slot - s < SLOTS_PER_HOUR
+            ]
+            if len(recent_buys) >= self.config.strategy.max_buys_per_hour:
+                return _risk_abstain(
+                    f"max_buys_per_hour_reached:{self.config.strategy.max_buys_per_hour}",
+                    as_of_slot=candidate.as_of_slot,
+                )
+
         self._pending_market_ids.add(market_id)
         return None
 
@@ -819,7 +863,7 @@ def _candidate_with_entry_size(
     )
 
 
-def build_watch_snipe_candidate(  # noqa: PLR0911, PLR0913
+def build_watch_snipe_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0913
     *,
     config: CoreSniperConfig,
     launch: object,
@@ -874,6 +918,34 @@ def build_watch_snipe_candidate(  # noqa: PLR0911, PLR0913
     block_transaction_index = launch.transaction_index
     if block_transaction_index > config.strategy.max_entry_transaction_index:
         return None
+    if config.strategy.require_bundle_match and block_transaction_index != 0:
+        return None
+    if config.strategy.require_historical_qualification and qualification is not None:
+        if (
+            config.strategy.max_creator_pairs is not None
+            and getattr(qualification, "matched_wallet_count", 0)
+            > config.strategy.max_creator_pairs
+        ):
+            return None
+        if (
+            config.strategy.history_sample_count > 0
+            and getattr(qualification, "sample_count", 0)
+            < config.strategy.history_sample_count
+        ):
+            return None
+        if (
+            config.strategy.min_win_rate_ppm > 0
+            and getattr(qualification, "win_rate_ppm", None) is not None
+            and qualification.win_rate_ppm < config.strategy.min_win_rate_ppm
+        ):
+            return None
+        if (
+            config.strategy.min_volume_usd_micro is not None
+            and getattr(qualification, "total_volume_usd_micro", None) is not None
+            and qualification.total_volume_usd_micro
+            < config.strategy.min_volume_usd_micro
+        ):
+            return None
 
     intent = ExecutionIntent(
         intent_id=(
@@ -1025,10 +1097,14 @@ def _validate_receipt(  # noqa: PLR0911
             "non-live execution receipt claimed transaction submission",
             as_of_slot=candidate.as_of_slot,
         )
-    if mode is SniperMode.PAPER and not receipt.accepted:
+    if mode in (SniperMode.PAPER, SniperMode.SIMULATION) and not receipt.accepted:
         return _abstain(
             AbstainReason.MISSING_FEATURE,
-            "paper watch candidate was not simulated",
+            (
+                "paper watch candidate was not simulated"
+                if mode is SniperMode.PAPER
+                else "route simulation did not accept the transaction"
+            ),
             as_of_slot=candidate.as_of_slot,
         )
     return None

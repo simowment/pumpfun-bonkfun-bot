@@ -13,6 +13,7 @@ from typing import Any
 
 import base58
 import yaml
+from dotenv import dotenv_values
 
 from rugbot.decision.playbook_rules import (
     MAX_BIG_BUY_LEVELS,
@@ -33,6 +34,12 @@ MAX_PORTFOLIO_WALLETS = 100
 MAX_STRATEGY_HISTORY_SAMPLES = 100
 MAX_STRATEGY_BUYS_PER_HOUR = 10_000
 MAX_STRATEGY_ENTRY_INDEX = 20
+MAX_PNL_PPM = 10_000_000
+MAX_PRIORITY_FEE_MICROLAMPORTS = 10_000_000
+MAX_JITO_TIP_LAMPORTS = 100_000_000
+MAX_COMPUTE_UNIT_LIMIT = 1_400_000
+MAX_LOADED_ACCOUNTS_DATA_SIZE = 64_000_000
+SUPPORTED_ROUTING_POLICIES = {"rpc", "jito"}
 
 
 class SniperConfigError(ValueError):
@@ -47,10 +54,11 @@ class TargetKind(StrEnum):
 
 
 class ExecutionMode(StrEnum):
-    """Execution modes, with live submission explicitly gated by the CLI."""
+    """Execution modes, with live submission gated by signer configuration."""
 
     OBSERVE = "observe"
     PAPER = "paper"
+    SIMULATION = "simulation"
     LIVE = "live"
 
 
@@ -71,12 +79,29 @@ class SniperTarget:
 
 @dataclass(frozen=True, slots=True)
 class SniperExecution:
-    """Execution mode and requested quote amount."""
+    """Execution mode, amount, and explicit delivery policy."""
 
     mode: ExecutionMode
     quote_size_lamports: int
     max_slippage_bps: int = 500
     signer_pubkey: str | None = None
+    routing_policy: str = "jito"
+    priority_fee_microlamports: int = 200_000
+    jito_tip_lamports: int = 1_000_000
+    compute_unit_limit: int = 400_000
+    loaded_accounts_data_size_limit: int = 128_000
+    jito_block_engine_url: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SniperRiskSettings:
+    """Wallet-wide hard limits enforced immediately before execution."""
+
+    max_buy_lamports: int
+    max_exposure_lamports: int
+    daily_loss_limit_lamports: int
+    max_open_positions: int
+    minimum_wallet_reserve_lamports: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +137,7 @@ class CoreSniperConfig:
 
     target: SniperTarget
     execution: SniperExecution
+    risk: SniperRiskSettings
     tracking_mode: TrackingMode = TrackingMode.NEW_TOKEN_CREATIONS
     rules: PlaybookRules = field(default_factory=PlaybookRules)
     volume_sizing: VolumeSizingPolicy = field(default_factory=VolumeSizingPolicy)
@@ -148,6 +174,73 @@ _StrictLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
     _construct_mapping,
 )
+
+
+def resolve_config_path(path: Path | None = None) -> Path:
+    """Resolve a valid watch.yaml config path across current, repo, and home dirs."""
+    if path is not None and path != Path("watch.yaml"):
+        return path
+    cwd_path = path or Path("watch.yaml")
+    repo_path = Path(__file__).resolve().parents[3] / "watch.yaml"
+    home_path = Path.home() / ".rugbot" / "watch.yaml"
+    for candidate in (cwd_path, repo_path, home_path):
+        if candidate.exists():
+            return candidate
+    return cwd_path
+
+
+def resolve_state_dir(path: Path | None = None) -> Path:
+    """Resolve a writable state directory across cwd, repo root, and user home."""
+    if path is not None and path.is_absolute():
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    sub_path = path or Path(".state/watch")
+
+    # 1. Try cwd / sub_path if cwd is writable
+    try:
+        candidate = Path.cwd() / sub_path
+        candidate.mkdir(parents=True, exist_ok=True)
+    except (PermissionError, OSError):
+        pass
+    else:
+        return candidate
+
+    # 2. Try repo root / sub_path
+    try:
+        repo_root = Path(__file__).resolve().parents[3]
+        candidate = repo_root / sub_path
+        candidate.mkdir(parents=True, exist_ok=True)
+    except (PermissionError, OSError):
+        pass
+    else:
+        return candidate
+
+    # 3. Fallback to ~/.rugbot/state
+    candidate = Path.home() / ".rugbot" / "state"
+    candidate.mkdir(parents=True, exist_ok=True)
+    return candidate
+
+
+def resolve_dotenv(*, include_signing: bool = False) -> None:
+    """Load only environment values needed by the current execution mode."""
+
+    allowed = {
+        "SOLANA_RPC_HTTP",
+        "SOLANA_RPC_WEBSOCKET",
+        "SOLANA_NODE_RPC_ENDPOINT",
+        "SOLANA_NODE_WSS_ENDPOINT",
+        "GMGN_API_KEY",
+    }
+    if include_signing:
+        allowed.add("SOLANA_PRIVATE_KEY")
+    paths = (Path.cwd() / ".env", Path(__file__).resolve().parents[3] / ".env")
+    for env_path in paths:
+        if not env_path.exists():
+            continue
+        for key, value in dotenv_values(env_path).items():
+            if key in allowed and value is not None and key not in os.environ:
+                os.environ[key] = value
 
 
 def load_sniper_config(path: Path) -> CoreSniperConfig:
@@ -260,13 +353,16 @@ def parse_sniper_config(text: str) -> CoreSniperConfig:
             "rules",
             "volume_sizing",
             "strategy",
+            "risk",
         },
     )
     _require_required_keys(document, {"target", "execution"})
 
+    execution = _parse_execution(document["execution"])
     return CoreSniperConfig(
         target=_parse_target(document["target"]),
-        execution=_parse_execution(document["execution"]),
+        execution=execution,
+        risk=_parse_risk(document.get("risk"), execution),
         tracking_mode=_parse_tracking_mode(
             document.get("tracking_mode", TrackingMode.NEW_TOKEN_CREATIONS.value)
         ),
@@ -274,6 +370,43 @@ def parse_sniper_config(text: str) -> CoreSniperConfig:
         volume_sizing=_parse_volume_sizing(document.get("volume_sizing")),
         strategy=_parse_strategy(document.get("strategy")),
     )
+
+
+def _parse_risk(
+    raw: object,
+    execution: SniperExecution,
+) -> SniperRiskSettings:
+    """Parse wallet risk limits; live mode requires every value explicitly."""
+
+    if raw is None:
+        if execution.mode is ExecutionMode.LIVE:
+            raise SniperConfigError("risk settings are required for live execution")
+        return SniperRiskSettings(
+            max_buy_lamports=execution.quote_size_lamports,
+            max_exposure_lamports=execution.quote_size_lamports,
+            daily_loss_limit_lamports=execution.quote_size_lamports,
+            max_open_positions=1,
+            minimum_wallet_reserve_lamports=0,
+        )
+    mapping = _mapping(raw, "risk")
+    fields = {
+        "max_buy_lamports",
+        "max_exposure_lamports",
+        "daily_loss_limit_lamports",
+        "max_open_positions",
+        "minimum_wallet_reserve_lamports",
+    }
+    _require_exact_keys(mapping, fields, "risk")
+    values = {field: _positive_int(mapping[field], f"risk.{field}") for field in fields}
+    if values["max_buy_lamports"] < execution.quote_size_lamports:
+        raise SniperConfigError(
+            "risk.max_buy_lamports must cover execution.quote_size_lamports"
+        )
+    if values["max_exposure_lamports"] < values["max_buy_lamports"]:
+        raise SniperConfigError(
+            "risk.max_exposure_lamports must cover risk.max_buy_lamports"
+        )
+    return SniperRiskSettings(**values)
 
 
 def _parse_tracking_mode(raw: object) -> TrackingMode:
@@ -295,17 +428,30 @@ def _parse_target(raw: object) -> SniperTarget:
     return SniperTarget(kind=TargetKind(kind), id=target_id)
 
 
-def _parse_execution(raw: object) -> SniperExecution:
+def _parse_execution(raw: object) -> SniperExecution:  # noqa: C901
     mapping = _mapping(raw, "execution")
     _require_known_keys(
         mapping,
-        {"mode", "quote_size_lamports", "max_slippage_bps", "signer_pubkey"},
+        {
+            "mode",
+            "quote_size_lamports",
+            "max_slippage_bps",
+            "signer_pubkey",
+            "routing_policy",
+            "priority_fee_microlamports",
+            "jito_tip_lamports",
+            "compute_unit_limit",
+            "loaded_accounts_data_size_limit",
+            "jito_block_engine_url",
+        },
         "execution",
     )
     mode = mapping["mode"]
     quote_size = mapping["quote_size_lamports"]
     if not isinstance(mode, str) or mode not in {item.value for item in ExecutionMode}:
-        raise SniperConfigError("execution.mode must be observe, paper, or live")
+        raise SniperConfigError(
+            "execution.mode must be observe, paper, simulation, or live"
+        )
     if type(quote_size) is not int or quote_size <= 0:
         raise SniperConfigError(
             "execution.quote_size_lamports must be a positive integer"
@@ -321,11 +467,48 @@ def _parse_execution(raw: object) -> SniperExecution:
     signer_pubkey = mapping.get("signer_pubkey")
     if signer_pubkey is not None:
         _validate_pubkey(signer_pubkey, "execution.signer_pubkey")
+    routing_policy = mapping.get("routing_policy", "jito")
+    if routing_policy not in SUPPORTED_ROUTING_POLICIES:
+        raise SniperConfigError("execution.routing_policy must be rpc or jito")
+    priority_fee = mapping.get("priority_fee_microlamports", 200_000)
+    jito_tip = mapping.get("jito_tip_lamports", 1_000_000)
+    compute_limit = mapping.get("compute_unit_limit", 400_000)
+    loaded_limit = mapping.get("loaded_accounts_data_size_limit", 128_000)
+    if (
+        type(priority_fee) is not int
+        or not 0 <= priority_fee <= MAX_PRIORITY_FEE_MICROLAMPORTS
+    ):
+        raise SniperConfigError("execution.priority_fee_microlamports is out of range")
+    if type(jito_tip) is not int or not 0 <= jito_tip <= MAX_JITO_TIP_LAMPORTS:
+        raise SniperConfigError("execution.jito_tip_lamports is out of range")
+    if (
+        type(compute_limit) is not int
+        or not 1 <= compute_limit <= MAX_COMPUTE_UNIT_LIMIT
+    ):
+        raise SniperConfigError("execution.compute_unit_limit is out of range")
+    if (
+        type(loaded_limit) is not int
+        or not 1 <= loaded_limit <= MAX_LOADED_ACCOUNTS_DATA_SIZE
+    ):
+        raise SniperConfigError(
+            "execution.loaded_accounts_data_size_limit is out of range"
+        )
+    jito_url = mapping.get("jito_block_engine_url")
+    if jito_url is not None and (
+        type(jito_url) is not str or not jito_url.startswith("https://")
+    ):
+        raise SniperConfigError("execution.jito_block_engine_url must be an https URL")
     return SniperExecution(
         mode=ExecutionMode(mode),
         quote_size_lamports=quote_size,
         max_slippage_bps=max_slippage_bps,
         signer_pubkey=signer_pubkey,
+        routing_policy=routing_policy,
+        priority_fee_microlamports=priority_fee,
+        jito_tip_lamports=jito_tip,
+        compute_unit_limit=compute_limit,
+        loaded_accounts_data_size_limit=loaded_limit,
+        jito_block_engine_url=jito_url,
     )
 
 
@@ -786,10 +969,14 @@ def _bounded_ppm(
 def _bounded_pnl(value: object, field_name: str, *, positive: bool) -> int:
     if type(value) is not int:
         raise SniperConfigError(f"{field_name}.trigger_pnl_ppm must be an integer")
-    if positive and not 0 < value <= PROBABILITY_PPM_DENOMINATOR:
-        raise SniperConfigError(f"{field_name}.trigger_pnl_ppm must be positive")
-    if not positive and not -PROBABILITY_PPM_DENOMINATOR <= value < 0:
-        raise SniperConfigError(f"{field_name}.trigger_pnl_ppm must be negative")
+    if positive and not 0 < value <= MAX_PNL_PPM:
+        raise SniperConfigError(
+            f"{field_name}.trigger_pnl_ppm must be between 1 and {MAX_PNL_PPM}"
+        )
+    if not positive and not -MAX_PNL_PPM <= value < 0:
+        raise SniperConfigError(
+            f"{field_name}.trigger_pnl_ppm must be between {-MAX_PNL_PPM} and -1"
+        )
     return value
 
 

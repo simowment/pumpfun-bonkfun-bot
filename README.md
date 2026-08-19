@@ -4,10 +4,6 @@ Private research bot for identifying repeat Pump.fun operators, watching their
 next launch, and evaluating fixed-size entries in observe, paper, and backtest
 modes.
 
-The repository also retains the original configurable Pump.fun/letsbonk.fun
-trader as an execution reference. Do not run it with real funds while developing
-the repeat-rugger strategy.
-
 ## Setup
 
 Python 3.11 or newer and [uv](https://docs.astral.sh/uv/) are required.
@@ -16,13 +12,7 @@ Python 3.11 or newer and [uv](https://docs.astral.sh/uv/) are required.
 uv sync
 ```
 
-Yellowstone Geyser is optional:
-
-```powershell
-uv sync --extra geyser
-```
-
-HTTP observation and backtesting do not require gRPC.
+Observation and backtesting use finalized HTTP JSON-RPC; no gRPC provider is required.
 
 Environment variables used by the remaining tools:
 
@@ -32,8 +22,10 @@ SOLANA_NODE_WSS_ENDPOINT=wss://...
 SOLANA_PRIVATE_KEY=...
 ```
 
-Observe and paper processes use only the RPC endpoint. They must not load
-`SOLANA_PRIVATE_KEY`.
+Observe, paper, and route-simulation processes use only the RPC endpoint. They
+must not load `SOLANA_PRIVATE_KEY`. Route simulation requires only the public
+`execution.signer_pubkey` because the payer account is used for RPC simulation;
+it never signs or broadcasts.
 
 ## Commands
 
@@ -148,40 +140,31 @@ The `Buy` toolbar button or `5` opens a direct Pump.fun buy/sell form. Enter the
 mint, buy amount in SOL (for example `0.001`), or sell amount in token base
 units, plus slippage in basis points. `6` opens durable paper/live positions
 from `--state-dir` and
-prefills the sell form when a position is selected. Observe and paper
-configurations never submit transactions; paper requires exact finalized market
-context and otherwise abstains. A live direct trade requires
-`execution.mode: live`, the configured public signer, `SOLANA_PRIVATE_KEY`, and
-the explicit TUI flag:
+prefills the sell form when a position is selected. Observe, paper, and simulation configurations never submit transactions;
+paper requires exact finalized market context and otherwise abstains.
+Simulation uses the live Pump V2 builder, dynamic finalized account-state
+decoders, pre-sign firewall, real blockhash, configured priority/tip policy,
+and finalized RPC `simulateTransaction`, while never loading a private key or
+calling a transaction sender. Set `execution.mode: simulation` and provide a
+public `execution.signer_pubkey` to run it. Live uses the same build/firewall/
+simulation path before requiring `SOLANA_PRIVATE_KEY`, routing, and finalized
+landing reconciliation.
 
-```powershell
-uv run rug_wallet_tui --config watch.yaml --enable-live
-```
+The TUI never loads or stores a private key. Its Live and Route Simulation
+controls persist configuration only; the TUI cannot submit on its own. Route
+Simulation can be started by `rug_watch` with the saved `mode: simulation`
+configuration and a public signer identity. A failed, stale, malformed, or
+dynamically unsupported finalized account state abstains before simulation or
+signing.
 
-The TUI never stores the private key. Use a dedicated funded burner wallet and
-verify the mint, amount, slippage, and returned signature before relying on a
-live transaction.
 The UI refreshes every 30 seconds by default and uses the same bounded,
 finalized-RPC report as the JSON command. The Settings tab edits the same
 strict `watch.yaml` consumed by `rug_watch`; saving validates the whole file
-and replaces it atomically. It exposes the public target wallet, execution
-sizing, entry market-cap, timing gates, and configured qualification fields
-without creating a second configuration. The TUI preserves the execution
-behavior already configured for the watcher instead of exposing a separate
-mode switch. Missing historical or market evidence remains an abstention.
-For live submission, it also stores the signing wallet's public
-address for startup verification; it never stores the private key. After saving,
-restart the watcher with `uv run rug_watch --config watch.yaml`. RPC endpoints
-remain environment variables. Live mode additionally requires the explicit
-`--enable-live` switch and `SOLANA_PRIVATE_KEY`; the key is loaded only for
-that live process and is never stored in the TUI or `watch.yaml`:
-
-```powershell
-uv run rug_watch --config watch.yaml --enable-live
-```
-
-Use a dedicated funded burner wallet for this path. The TUI and observe/paper
-modes never load signing keys.
+and replaces it atomically. It exposes the public target wallet, quote size,
+slippage, routing policy, priority fee, Jito tip, compute/data limits, signer
+public key, entry market-cap, timing gates, exit thresholds, and qualification
+fields without creating a second configuration. Missing historical or market
+evidence remains an abstention.
 
 The result contains `stats`, a `rug_evidence` summary, historical Pump creates,
 and a `graph` payload with nodes and direct native-transfer edges. It also
@@ -216,8 +199,9 @@ Helius Enhanced Transactions can be useful for later display-only enrichment,
 but the canonical graph continues to use raw finalized RPC evidence so
 offline replay and online inspection cannot diverge.
 
-[`watch.yaml`](watch.yaml) contains the fixed quote size and observe/paper
-mode; its wallet is used when neither `--wallet` nor `--portfolio` is given.
+[`watch.yaml`](watch.yaml) contains the fixed quote size and observe/paper/
+simulation mode; its wallet is used when neither `--wallet` nor `--portfolio`
+is given.
 The watcher persists immutable raw observations in
 `.state/watch/observations.jsonl` and derived restart state in
 `.state/watch/state.sqlite3` for a single wallet, or under the per-wallet
@@ -232,26 +216,28 @@ The sell rules also accept up to three bounded `auto_sell_big_buy.levels`
 ranges under `rules.sell`; each range uses integer quote base units and a
 `sell_fraction_ppm`.
 
-Run the original bot only after reviewing and enabling its YAML:
-
-```powershell
-uv run pump_bot
-```
-
-The default watch configuration uses `observe`. Changing it to `paper` fails
-closed until an executable Pump quote simulator is connected to the same
-decision path. The core simulator is already available through
-`PaperContextInput`: it uses the pinned Pump quote engine and exact
-point-in-time protocol, mint, reserve, and stress evidence, and fills paper
-buy/sell intents without signing. It refuses stale contexts instead of
-inventing later market state.
+The default watch configuration uses `observe`. Changing it to `paper` uses
+`PaperContextInput`: the pinned Pump quote engine and exact point-in-time
+protocol, mint, reserve, and stress evidence fill paper buy/sell intents
+without signing. Changing it to `simulation` runs the real Pump V2 transaction
+builder and firewall against finalized mainnet state, then calls only
+`simulateTransaction` with placeholder signatures. It refuses stale contexts
+instead of inventing later market state.
 
 ## Live execution
 
-Live execution is disabled in the core watcher. The configuration parser rejects
-`execution.mode: live` until the paper simulator and out-of-sample evaluation
-have proven the strategy. The legacy live adapter remains isolated as a
-reference implementation and is not part of the supported development path.
+Live execution uses the same Pump V2 build, firewall, and simulation gates as
+route simulation, then signs once, broadcasts according to the configured
+Jito/RPC policy, and waits for finalized landing evidence. It requires
+`execution.mode: live`, `SOLANA_PRIVATE_KEY`, and a matching public
+`execution.signer_pubkey`. Route simulation requires the public key only and
+never calls `sendTransaction`.
+
+The current Pump documentation describes `buy_v2` with a 27-account layout,
+dynamic fee and buyback recipients, and quote-token accounts. The legacy adapter
+still builds the old account path, reads processed state, and does not run the
+validated firewall/simulation/landing pipeline, so it must not be used with a
+funded account.
 
 The core filters live in `watch.yaml`: `max_market_cap_quote_base_units`,
 `max_token_age_minutes`, `buy_only_once`, `max_consecutive_losses`, and
@@ -274,7 +260,7 @@ current Pump fee-recipient requirements documented in the
 - `src/rugbot/protocol`: pinned Pump decoders, state, and integer quotes.
 - `src/rugbot/graph`: point-in-time wallet and operator evidence.
 - `src/rugbot/decision`: matching, sizing, timing, and exits.
-- `src/rugbot/runtime`: shared observation loop and wallet watch mode.
+- `src/rugbot/runtime`: shared observation loop, wallet watch mode, and TUI.
 - `src/rugbot/backtest`: historical calibration and evaluation.
 - `src/rugbot/storage`: immutable JSONL evidence and the SQLite derived-state store.
 - `fixtures`: finalized protocol and backtest evidence.

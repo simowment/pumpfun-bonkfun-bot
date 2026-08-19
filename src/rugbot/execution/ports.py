@@ -15,6 +15,7 @@ class ExecutionMode(Enum):
 
     OBSERVE = "observe"
     PAPER = "paper"
+    SIMULATION = "simulation"
     PROBE = "probe"
     LIVE = "live"
 

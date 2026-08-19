@@ -160,7 +160,7 @@ class WalletTuiTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test() as pilot:
             await pilot.pause()
-            app._render_report(report)  # noqa: SLF001
+            app._render_report(report)
             self.assertEqual(app.query_one("#launches-table", DataTable).row_count, 1)
             self.assertEqual(app.query_one("#nodes-table", DataTable).row_count, 1)
             self.assertEqual(app.query_one("#edges-table", DataTable).row_count, 1)
@@ -171,10 +171,10 @@ class WalletTuiTests(unittest.IsolatedAsyncioTestCase):
 
             launch_filter = app.query_one("#launch-filter", Input)
             launch_filter.value = "missing"
-            app._render_launches(report)  # noqa: SLF001
+            app._render_launches(report)
             self.assertEqual(app.query_one("#launches-table", DataTable).row_count, 0)
             launch_filter.value = "sym"
-            app._render_launches(report)  # noqa: SLF001
+            app._render_launches(report)
             self.assertEqual(app.query_one("#launches-table", DataTable).row_count, 1)
 
             app.action_show_graph()
@@ -194,18 +194,24 @@ class WalletTuiTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test() as pilot:
             await pilot.pause()
             for input_id in (
+                "target-wallet",
+                "snipe-size-sol",
+                "take-profit-pct",
+                "stop-loss-pct",
+                "priority-fee",
+                "jito-tip",
+                "max-slippage",
+                "max-gas-cap",
+                "max-entry-mc",
+                "min-winrate-pct",
                 "snipe-delay",
-                "min-mc",
-                "max-mc",
-                "max-age",
-                "follow-cooldown",
-                "max-losses",
             ):
                 self.assertIsInstance(app.query_one(f"#{input_id}", Input), Input)
-            self.assertIsInstance(app.query_one("#buy-once", Checkbox), Checkbox)
             self.assertIsInstance(
-                app.query_one("#require-historical-qualification", Checkbox),
-                Checkbox,
+                app.query_one("#require-block-zero", Checkbox), Checkbox
+            )
+            self.assertIsInstance(
+                app.query_one("#require-funding-match", Checkbox), Checkbox
             )
 
     async def test_settings_save_persists_public_setup(self) -> None:
@@ -229,19 +235,19 @@ class WalletTuiTests(unittest.IsolatedAsyncioTestCase):
             )
             async with app.run_test() as pilot:
                 await pilot.pause()
-                app.query_one("#quote-size", Input).value = "2000000"
+                app.query_one("#snipe-size-sol", Input).value = "0.020"
                 app.query_one("#max-slippage", Input).value = "750"
-                app.query_one("#max-entry-mc", Input).value = "42000000"
-                app._save_settings()  # noqa: SLF001
+                app.query_one("#max-entry-mc", Input).value = "42000"
+                app._save_settings()
 
             saved = load_sniper_config(config_path)
             self.assertEqual(saved.target.id, "11111111111111111111111111111111")
             self.assertEqual(saved.execution.mode.value, "observe")
-            self.assertEqual(saved.execution.quote_size_lamports, 2_000_000)
+            self.assertEqual(saved.execution.quote_size_lamports, 20_000_000)
             self.assertEqual(saved.execution.max_slippage_bps, 750)
             self.assertEqual(
                 saved.strategy.max_entry_market_cap_quote_base_units,
-                42_000_000,
+                42_000,
             )
 
 

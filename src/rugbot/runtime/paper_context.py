@@ -159,7 +159,10 @@ def _validate_current_reserves(  # noqa: PLR0911
     mint_metadata: PumpCreateMintMetadataProof | None,
     as_of_slot: int,
 ) -> PoolReserves | AbstainResult:
-    if protocol_snapshot is None or type(protocol_snapshot) is not PumpProtocolVersionSnapshot:
+    if (
+        protocol_snapshot is None
+        or type(protocol_snapshot) is not PumpProtocolVersionSnapshot
+    ):
         return _abstain(
             AbstainReason.MISSING_FEATURE,
             "protocol snapshot is required for current Pump reserves",

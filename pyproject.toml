@@ -1,5 +1,5 @@
 [project]
-name = "pump_bot"
+name = "rugbot"
 version = "2.0"
 description = "Trade tokens on pump.fun"
 readme = "README.md"
@@ -25,14 +25,8 @@ dependencies = [
 dev = [
     "ruff>=0.10.0"
 ]
-geyser = [
-    "grpcio>=1.71.0",
-    "grpcio-tools>=1.71.0",
-    "protobuf>=5.29.4",
-]
 
 [project.scripts]
-pump_bot = "bot_runner:main"
 rug_watch = "rugbot.runtime.cli:main"
 rug_wallet = "rugbot.runtime.wallet_cli:main"
 rug_wallet_tui = "rugbot.runtime.wallet_tui:main"
@@ -69,6 +63,10 @@ exclude = [
     "node_modules",
     "site-packages",
     "venv",
+    # Retained legacy compatibility modules; Rugbot uses src/rugbot exclusively.
+    "src/core",
+    "src/platforms",
+    "src/utils",
 ]
 
 line-length = 88
@@ -91,6 +89,10 @@ select = [
     "PL",   # pylint conventions
 ]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004", "ANN", "ARG", "SLF001", "TC003", "FBT003"]
+"learning-examples/**" = ["S101", "PLR2004", "ANN", "ARG", "C901", "PLR0912", "PLR0915", "BLE001", "TRY", "PTH", "ERA", "S106", "T10", "T201", "PLW2901"]
 
 [tool.ruff.format]
 quote-style = "double"

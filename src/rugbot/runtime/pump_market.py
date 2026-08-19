@@ -232,6 +232,21 @@ class PumpOnlineMarket:
             return _abstain("finalized slot response is malformed", -1)
         return result
 
+    async def buy_quote(self, mint: str, quote_lamports: int) -> int:
+        """Calculate exact token units received for quote lamports using bonding curve state."""
+        state = await self._state(mint)
+        virtual_tokens = int(state["virtual_token_reserves"])
+        virtual_sol = int(state["virtual_sol_reserves"])
+        if quote_lamports <= 0 or virtual_tokens <= 0 or virtual_sol <= 0:
+            raise ValueError("invalid buy quote inputs")  # noqa: TRY003
+        net_sol = quote_lamports * 9900 // 10000
+        return virtual_tokens * net_sol // (virtual_sol + net_sol)
+
+    async def sell_quote(self, mint: str, token_amount: int) -> int:
+        """Calculate exact SOL lamports received for token units using bonding curve state."""
+        state = await self._state(mint)
+        return _sell_quote(token_amount, state)
+
     async def _state(self, mint: str) -> dict[str, object]:
         mint_key = Pubkey.from_string(mint)
         curve = self._provider.derive_pool_address(mint_key)

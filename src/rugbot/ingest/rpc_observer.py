@@ -1,5 +1,6 @@
 """Bounded finalized HTTP JSON-RPC observation ingestion."""
 
+import asyncio
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Sequence
@@ -21,7 +22,9 @@ DEFAULT_MAX_PAGES = 10
 MAX_SIGNATURES = 1000
 MAX_TRANSACTIONS = 1000
 MAX_PAGES = 100
+MAX_RPC_RETRIES = 2
 HTTP_OK = 200
+HTTP_TOO_MANY_REQUESTS = 429
 FINALIZED = "finalized"
 JSON_TRANSACTION_FORMAT = "solana_json_rpc_getTransaction_json"
 SOLANA_ADDRESS_BYTES = 32
@@ -135,15 +138,29 @@ class AiohttpRpcTransport:
         """POST one raw JSON-RPC request and return its raw response bytes."""
 
         timeout = aiohttp.ClientTimeout(total=self._timeout_seconds)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                endpoint,
-                data=body,
-                headers={"content-type": "application/json"},
-            ) as response:
-                return RpcHttpResponse(
-                    status=response.status, body=await response.read()
-                )
+        for attempt in range(MAX_RPC_RETRIES + 1):
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(
+                        endpoint,
+                        data=body,
+                        headers={"content-type": "application/json"},
+                    ) as response:
+                        if (
+                            response.status == HTTP_TOO_MANY_REQUESTS
+                            and attempt < MAX_RPC_RETRIES
+                        ):
+                            await asyncio.sleep(0.5 * (attempt + 1))
+                            continue
+                        return RpcHttpResponse(
+                            status=response.status, body=await response.read()
+                        )
+            except Exception:
+                if attempt < MAX_RPC_RETRIES:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                raise
+        return RpcHttpResponse(status=HTTP_TOO_MANY_REQUESTS, body=b"{}")
 
 
 async def observe_address(  # noqa: C901, PLR0911, PLR0912, PLR0913

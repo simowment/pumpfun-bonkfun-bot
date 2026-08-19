@@ -12,12 +12,8 @@ from time import sleep
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit, urlunsplit
 
-from dotenv import load_dotenv
-
 from rugbot.domain.decisions import AbstainReason, AbstainResult
-from rugbot.execution.live import LivePumpExecutionPort
 from rugbot.execution.observe import ObserveExecutionPort
-from rugbot.execution.paper import PaperExecutionPort
 from rugbot.ingest.observation_pipeline import DurableObservationIngestor
 from rugbot.ingest.pump_create_observation import (
     decode_pump_create_v2_observation,
@@ -31,7 +27,11 @@ from rugbot.runtime.config import (
     TargetKind,
     load_sniper_config,
     load_wallet_portfolio,
+    resolve_config_path,
+    resolve_dotenv,
+    resolve_state_dir,
 )
+from rugbot.runtime.execution_factory import build_execution_port as _execution_port
 from rugbot.runtime.observation_loop import (
     ObservationCycleReport,
     ObservationSource,
@@ -39,6 +39,7 @@ from rugbot.runtime.observation_loop import (
     SharedObservationLoop,
 )
 from rugbot.runtime.pump_market import PumpOnlineMarket
+from rugbot.runtime.sniper_runtime import build_sniper_runtime
 from rugbot.runtime.wallet_intelligence import (
     WalletIntelligenceReport,
     abstention_to_json,
@@ -84,7 +85,7 @@ async def run_watch_cycle(  # noqa: PLR0913
     *,
     endpoint: str,
     state_dir: Path,
-    max_transactions: int = 5,
+    max_transactions: int = MAX_WATCH_TRANSACTIONS,
     transport: RpcHttpTransport | None = None,
     execution_port: ExecutionPort | None = None,
     execution_port_resolver: ExecutionPortResolver | None = None,
@@ -117,13 +118,18 @@ async def run_watch_cycle(  # noqa: PLR0913
             as_of_slot=-1,
         )
     if (
-        config.execution.mode in (ExecutionMode.PAPER, ExecutionMode.LIVE)
+        config.execution.mode
+        in (ExecutionMode.PAPER, ExecutionMode.SIMULATION, ExecutionMode.LIVE)
         and execution_port is None
         and execution_port_resolver is None
     ):
         return AbstainResult(
             reason=AbstainReason.MISSING_FEATURE,
-            message="exact finalized paper execution context is required",
+            message=(
+                "exact finalized paper execution context is required"
+                if config.execution.mode is ExecutionMode.PAPER
+                else "exact finalized route simulation context is required"
+            ),
             as_of_slot=-1,
         )
 
@@ -179,7 +185,8 @@ async def run_watch_cycle(  # noqa: PLR0913
             ),
             position_store=(
                 state_store
-                if config.execution.mode in (ExecutionMode.PAPER, ExecutionMode.LIVE)
+                if config.execution.mode
+                in (ExecutionMode.PAPER, ExecutionMode.SIMULATION, ExecutionMode.LIVE)
                 else None
             ),
         )
@@ -194,7 +201,8 @@ async def run_watch_cycle(  # noqa: PLR0913
         if (
             report.abstention is None
             and market is not None
-            and config.execution.mode in (ExecutionMode.PAPER, ExecutionMode.LIVE)
+            and config.execution.mode
+            in (ExecutionMode.PAPER, ExecutionMode.SIMULATION, ExecutionMode.LIVE)
         ):
             poll_slot = await market.finalized_slot()
             if isinstance(poll_slot, AbstainResult):
@@ -256,7 +264,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Watch Pump.fun creator wallets using finalized HTTP evidence, "
-            "optionally triggered by WebSocket logs."
+            "optionally triggered by PumpPortal real-time events."
         )
     )
     parser.add_argument(
@@ -288,14 +296,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=(
             ExecutionMode.OBSERVE.value,
             ExecutionMode.PAPER.value,
+            ExecutionMode.SIMULATION.value,
             ExecutionMode.LIVE.value,
         ),
         help="override execution.mode for this run",
-    )
-    parser.add_argument(
-        "--enable-live",
-        action="store_true",
-        help="explicitly enable live transaction submission for this run",
     )
     parser.add_argument("--once", action="store_true")
     parser.add_argument(
@@ -304,7 +308,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="use the persistent Pump.fun WebSocket trigger with finalized hydration",
     )
     parser.add_argument("--interval-seconds", type=int, default=2)
-    parser.add_argument("--max-transactions", type=int, default=5)
+    parser.add_argument(
+        "--max-transactions",
+        type=int,
+        default=MAX_WATCH_TRANSACTIONS,
+        help="maximum finalized signatures hydrated per wallet (default: 20)",
+    )
     parser.add_argument("--max-history-pages", type=int, default=10)
     parser.add_argument("--max-linked-wallets", type=int, default=8)
     parser.add_argument("--max-hops", type=int, default=3)
@@ -317,8 +326,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0
     """Run the finalized wallet watcher."""
 
     args = build_arg_parser().parse_args(argv)
-    if args.enable_live:
-        load_dotenv()
+    resolve_dotenv()
     endpoint = os.environ.get("SOLANA_RPC_HTTP") or os.environ.get(
         "SOLANA_NODE_RPC_ENDPOINT"
     )
@@ -410,7 +418,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0
             else 1
         )
     try:
-        config = load_sniper_config(args.config)
+        config_path = resolve_config_path(args.config)
+        config = load_sniper_config(config_path)
     except SniperConfigError as error:
         print(
             json.dumps(
@@ -448,17 +457,6 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0
             config,
             execution=replace(config.execution, mode=ExecutionMode(args.mode)),
         )
-    if config.execution.mode is ExecutionMode.LIVE and not args.enable_live:
-        _print_json(
-            {
-                "status": "abstain",
-                "reason": AbstainReason.MISSING_FEATURE.value,
-                "message": "live mode requires the explicit --enable-live switch",
-                "as_of_slot": -1,
-            },
-            pretty=args.pretty,
-        )
-        return 1
     if (
         args.interval_seconds <= 0
         or not 1 <= args.max_transactions <= MAX_WATCH_TRANSACTIONS
@@ -491,12 +489,16 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0
         watch_wallets = (config.target.id,)
         wallet_configs = {watch_wallets[0]: config}
 
+    state_dir = resolve_state_dir(args.state_dir)
+    if config.execution.mode is ExecutionMode.LIVE:
+        resolve_dotenv(include_signing=True)
     try:
         execution_port = _execution_port(
             config.execution.mode,
             endpoint,
-            allow_live=args.enable_live,
             expected_signer_pubkey=config.execution.signer_pubkey,
+            execution=config.execution,
+            transaction_state_path=state_dir / "transactions.sqlite3",
         )
     except (OSError, ValueError) as error:
         _print_json(
@@ -545,7 +547,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0
                 config=config,
                 endpoint=endpoint,
                 websocket_endpoint=websocket_endpoint,
-                state_dir=args.state_dir,
+                state_dir=state_dir,
                 max_transactions=args.max_transactions,
                 execution_port=execution_port,
                 once=args.once,
@@ -556,9 +558,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0
         results: dict[str, dict[str, object]] = {}
         for wallet, wallet_config in wallet_configs.items():
             wallet_state_dir = (
-                args.state_dir / "wallets" / wallet
-                if portfolio_watch
-                else args.state_dir
+                state_dir / "wallets" / wallet if portfolio_watch else state_dir
             )
             result = asyncio.run(
                 _run_watch_once(
@@ -599,40 +599,6 @@ def _portfolio_json(results: dict[str, dict[str, object]]) -> dict[str, object]:
         },
         "wallets": results,
     }
-
-
-def _execution_port(
-    mode: ExecutionMode,
-    endpoint: str,
-    *,
-    allow_live: bool = False,
-    expected_signer_pubkey: str | None = None,
-) -> ExecutionPort:
-    if mode is ExecutionMode.OBSERVE:
-        return ObserveExecutionPort()
-    if mode is ExecutionMode.PAPER:
-        return PaperExecutionPort()
-    if mode is ExecutionMode.LIVE:
-        if not allow_live:
-            raise ValueError(  # noqa: TRY003
-                "live mode requires the explicit --enable-live switch"
-            )
-        private_key = os.environ.get("SOLANA_PRIVATE_KEY")
-        if not private_key:
-            raise ValueError(  # noqa: TRY003
-                "live mode requires SOLANA_PRIVATE_KEY in the process environment"
-            )
-        if not expected_signer_pubkey:
-            raise ValueError(  # noqa: TRY003
-                "live mode requires execution.signer_pubkey in watch.yaml"
-            )
-        port = LivePumpExecutionPort(endpoint, private_key)
-        if port.signer_pubkey != expected_signer_pubkey:
-            raise ValueError(  # noqa: TRY003
-                "SOLANA_PRIVATE_KEY does not match execution.signer_pubkey"
-            )
-        return port
-    raise ValueError(f"unsupported execution mode: {mode}")  # noqa: TRY003
 
 
 async def _run_watch_once(
@@ -685,6 +651,14 @@ async def _run_stream_watch(  # noqa: PLR0913
             pretty=pretty,
         )
         return 1
+    sniper_runtime = build_sniper_runtime(
+        config=config,
+        endpoint=endpoint,
+        state_dir=state_dir,
+        execution_port_override=execution_port,
+    )
+    if sniper_runtime is not None:
+        await sniper_runtime.daemon.start()
     source = PumpCreateStreamSource(
         wallet=config.target.id,
         websocket_endpoint=websocket_endpoint,
@@ -692,16 +666,32 @@ async def _run_stream_watch(  # noqa: PLR0913
         raw_observation_path=state_dir / "observations.jsonl",
         handled_ledger=stream_state,
         max_catchup_transactions=max_transactions,
+        processed_handler=(
+            sniper_runtime.handle_processed_create
+            if sniper_runtime is not None
+            else None
+        ),
     )
     market = PumpOnlineMarket(endpoint)
+    watch_config = (
+        replace(
+            config,
+            execution=replace(config.execution, mode=ExecutionMode.OBSERVE),
+        )
+        if sniper_runtime is not None
+        else config
+    )
+    watch_execution_port = (
+        ObserveExecutionPort() if sniper_runtime is not None else execution_port
+    )
     try:
         while True:
             result = await run_watch_cycle(
-                config,
+                watch_config,
                 endpoint=endpoint,
                 state_dir=state_dir,
                 max_transactions=max_transactions,
-                execution_port=execution_port,
+                execution_port=watch_execution_port,
                 market=market,
                 source=source,
             )
@@ -714,6 +704,8 @@ async def _run_stream_watch(  # noqa: PLR0913
     finally:
         await source.close()
         await market.close()
+        if sniper_runtime is not None:
+            await sniper_runtime.close()
         stream_state.close()
 
 

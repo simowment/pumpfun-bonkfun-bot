@@ -243,11 +243,10 @@ def _required_addresses(
     )
     if isinstance(global_address, AbstainResult):
         return global_address
+    global_position = CREATE_V2_ACCOUNT_NAMES.index("global")
     if global_address != _address_at(
         launch,
-        launch.account_indices[launch.global_account_index]
-        if 0 <= launch.global_account_index < len(launch.account_indices)
-        else -1,
+        launch.account_indices[global_position],
         role="global",
     ):
         return _abstain(

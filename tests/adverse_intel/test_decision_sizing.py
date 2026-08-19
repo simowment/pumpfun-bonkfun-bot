@@ -41,9 +41,7 @@ from rugbot.graph.wallet_churn import (
     OPERATOR_WALLET_CHURN_SNAPSHOT_VERSION,
 )
 
-DECISION_MODULES = (
-    Path("src/rugbot/decision/sizing.py"),
-)
+DECISION_MODULES = (Path("src/rugbot/decision/sizing.py"),)
 FORBIDDEN_IMPORT_PREFIXES = (
     "requests",
     "aiohttp",

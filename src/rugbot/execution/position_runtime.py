@@ -47,8 +47,15 @@ class PaperPositionState:
 
     as_of_slot: Slot
     market_id: str
+    target_id: str
+    execution_mode: str
     original_position_base_units: TokenBaseUnits
     current_position_base_units: TokenBaseUnits
+    entry_quote_lamports: int
+    entry_cost_lamports: int
+    take_profit_pnl_ppm: int | None
+    stop_loss_pnl_ppm: int | None
+    max_slippage_bps: int
     peak_pnl_ppm: int = 0
     exit_rule_state: ExitRuleState = field(default_factory=ExitRuleState)
     emitted_sell_intent_count: int = 0

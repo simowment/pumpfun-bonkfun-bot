@@ -651,6 +651,7 @@ def _validate_config(config: object) -> AbstainResult | None:
     if config.execution.mode not in (
         ExecutionMode.OBSERVE,
         ExecutionMode.PAPER,
+        ExecutionMode.SIMULATION,
         ExecutionMode.LIVE,
     ):
         return AbstainResult(
