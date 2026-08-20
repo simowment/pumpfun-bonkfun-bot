@@ -125,7 +125,12 @@ class TargetsTable(Widget):
 
         for target in self._targets.values():
             marker, mode_text, buy_text = self._policy_cells(target)
-            wallet_text = f"{marker} [white]{short_address(target.address)}[/white]"
+            label_display = (
+                target.label
+                if target.label and target.label != "Target Dev"
+                else short_address(target.address)
+            )
+            wallet_text = f"{marker} [white]{label_display}[/white]"
             if target.address in table.rows:
                 table.update_cell(target.address, "wallet", wallet_text)
                 table.update_cell(target.address, "mode", mode_text)

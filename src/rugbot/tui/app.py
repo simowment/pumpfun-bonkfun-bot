@@ -52,6 +52,7 @@ from rugbot.runtime.config import (
     save_sniper_document,
 )
 from rugbot.runtime.event_bus import EventBus
+from rugbot.runtime.token_resolver import resolve_token_or_wallet
 from rugbot.runtime.tracker_service import TrackerService
 from rugbot.runtime.wallet_intelligence import (
     MIN_REPEAT_LAUNCH_EVIDENCE,
@@ -808,8 +809,17 @@ class RugbotTuiApp(App[None]):
                                         )
                                         yield Input(
                                             id="target-wallet",
-                                            placeholder="Solana Pubkey...",
+                                            placeholder="Solana Pubkey or Token Mint...",
                                             value=self._wallet or "",
+                                        )
+                                    with Horizontal(classes="setting-line"):
+                                        yield Label(
+                                            "Dev Alias / Label", classes="setting-label"
+                                        )
+                                        yield Input(
+                                            id="target-alias",
+                                            placeholder="e.g. Mega-Bundle Dev...",
+                                            value="",
                                         )
                                     with Horizontal(classes="setting-line"):
                                         yield Label(
@@ -1075,13 +1085,21 @@ class RugbotTuiApp(App[None]):
                             id="graph-explorer-btn",
                         )
                         yield Input(
-                            placeholder="Add Dev / Funder Pubkey...",
+                            placeholder="Dev Wallet or Token Mint...",
                             id="new-funder-input",
                         )
-                        yield Button(
-                            "Add Funder", variant="primary", id="add-funder-btn"
+                        yield Input(
+                            placeholder="Alias / Name (optional)...",
+                            id="new-funder-alias",
                         )
-                        yield Input(placeholder="Wallet / Funder...", id="wallet-input")
+                        yield Button(
+                            "Add Target", variant="primary", id="add-funder-btn"
+                        )
+                        yield Input(
+                            placeholder="Wallet / Funder...",
+                            id="wallet-input",
+                            classes="legacy-compat",
+                        )
                     with Container(classes="table-container"):
                         yield DataTable(id="nodes-table", cursor_type="row")
 
@@ -1809,6 +1827,7 @@ class RugbotTuiApp(App[None]):
     def _load_target_policy_fields(self, target: TargetRecord) -> None:
         """Load the selected funder's persisted execution policy into Settings."""
         self._set_setting("target-wallet", target.address)
+        self._set_setting("target-alias", target.label or "")
         if target.policy is None:
             with contextlib.suppress(Exception):
                 self.query_one("#settings-status", Static).update(
@@ -2349,11 +2368,13 @@ class RugbotTuiApp(App[None]):
         table.add_column("STATUS", key="status")
 
     def _init_nodes_table(self) -> None:
-        table = self.query_one("#nodes-table", DataTable)
-        table.add_column("FUNDER PUBKEY", key="address")
-        table.add_column("LABEL", key="label")
-        table.add_column("STATUS", key="status")
-        table.add_column("CREATED", key="created_at")
+        with contextlib.suppress(Exception):
+            table = self.query_one("#nodes-table", DataTable)
+            table.clear(columns=True)
+            table.add_column("ALIAS / LABEL", key="label", width=26)
+            table.add_column("DEV PUBKEY", key="address", width=44)
+            table.add_column("MODE", key="status", width=12)
+            table.add_column("CREATED", key="created_at", width=14)
 
     def _init_edges_table(self) -> None:
         table = self.query_one("#edges-table", DataTable)
@@ -2420,15 +2441,28 @@ class RugbotTuiApp(App[None]):
             funders = self._repository.get_funders()
             nodes_table = self.query_one("#nodes-table", DataTable)
             nodes_table.clear()
-            for funder in funders:
+            if not funders:
                 nodes_table.add_row(
-                    short_address(funder.address),
-                    funder.label,
-                    (
-                        "[bold green]ACTIVE[/bold green]"
-                        if funder.enabled
-                        else "[dim]PAUSED[/dim]"
-                    ),
+                    "[dim]No Target[/dim]",
+                    "[dim]Use toolbar above to add Dev or Token[/dim]",
+                    "[dim]--[/dim]",
+                    "[dim]--[/dim]",
+                    key="empty",
+                )
+                return
+            for funder in funders:
+                policy = self._repository.get_target_execution_policy(funder.address)
+                mode_str = (
+                    f"[bold red]{policy.execution_mode.value.upper()}[/bold red]"
+                    if policy and policy.execution_mode.value == "live"
+                    else f"[bold yellow]{policy.execution_mode.value.upper()}[/bold yellow]"
+                    if policy and policy.execution_mode.value in {"simulated", "paper"}
+                    else "[dim]PAUSED[/dim]"
+                )
+                nodes_table.add_row(
+                    funder.label or "Target Dev",
+                    funder.address,
+                    mode_str,
                     format_age(funder.created_at),
                     key=funder.address,
                 )
@@ -3692,11 +3726,17 @@ class RugbotTuiApp(App[None]):
         settings_file.write_text(json.dumps(settings_data, indent=2), encoding="utf-8")
 
         # 3. Update runtime memory state
+        target_alias = self._get_setting("target-alias", "").strip()
+        dev_label = target_alias or "Target Dev"
         if target_wallet and target_wallet != _SYSTEM_PROGRAM_ID:
             with contextlib.suppress(Exception):
-                Pubkey.from_string(target_wallet)
+                resolved = resolve_token_or_wallet(
+                    target_wallet, custom_label=target_alias or None
+                )
+                target_wallet = resolved.target_wallet
+                dev_label = target_alias or resolved.default_label
                 self._wallet = target_wallet
-                self._service.add_funder(target_wallet, label="Target Dev")
+                self._service.add_funder(target_wallet, label=dev_label)
 
         self._live_requested = enable_live
         self._simulation_requested = simulation_mode
@@ -3764,15 +3804,21 @@ class RugbotTuiApp(App[None]):
 
     def _handle_add_funder_btn(self) -> None:
         val = self.query_one("#new-funder-input", Input).value.strip()
+        alias_val = ""
+        with contextlib.suppress(Exception):
+            alias_val = self.query_one("#new-funder-alias", Input).value.strip()
         if not val:
             return
         try:
-            Pubkey.from_string(val)
-            self._service.add_funder(val, label="Manual UI Funder")
-            if self._repository.get_target_execution_policy(val) is None:
+            resolved = resolve_token_or_wallet(val, custom_label=alias_val or None)
+            dev_addr = resolved.target_wallet
+            dev_label = alias_val or resolved.default_label
+
+            self._service.add_funder(dev_addr, label=dev_label)
+            if self._repository.get_target_execution_policy(dev_addr) is None:
                 self._service.save_target_execution_policy(
                     TargetExecutionPolicy(
-                        funder_address=val,
+                        funder_address=dev_addr,
                         monitoring_enabled=True,
                         execution_mode=TargetExecutionMode.SIMULATED,
                         quote_size_lamports=25_000_000,
@@ -3784,16 +3830,45 @@ class RugbotTuiApp(App[None]):
                         updated_at=datetime.now(UTC).isoformat(),
                     )
                 )
+            if resolved.is_token and resolved.creation_slot:
+                self._repository.save_launch(
+                    LaunchRecord(
+                        mint=resolved.input_address,
+                        creator_wallet=dev_addr,
+                        root_funder=dev_addr,
+                        symbol=resolved.symbol or "PUMP",
+                        name=resolved.name or "Pump Token",
+                        created_signature=resolved.creation_signature or "",
+                        created_slot=resolved.creation_slot,
+                        created_at=int(datetime.now(UTC).timestamp()),
+                        depth=0,
+                        funding_signature=None,
+                        funding_amount_lamports=None,
+                        funding_timestamp=None,
+                    )
+                )
             self.query_one("#new-funder-input", Input).value = ""
+            with contextlib.suppress(Exception):
+                self.query_one("#new-funder-alias", Input).value = ""
             self._refresh_target_records()
+            self._refresh_tables()
             funders = [
                 f.address for f in self._repository.get_funders(enabled_only=True)
             ]
             self.query_one("#live-activity-view", LiveActivityView).set_funders(funders)
             self._refresh_header_counts()
-            self.notify(f"Added target {val[:6]}... to SQLite", severity="information")
+            if resolved.is_token:
+                self.notify(
+                    f"Resolved Token -> Creator Dev {dev_addr[:6]}... ({dev_label})",
+                    severity="information",
+                )
+            else:
+                self.notify(
+                    f"Added Target Dev {dev_addr[:6]}... ({dev_label})",
+                    severity="information",
+                )
         except Exception as e:
-            self.notify(f"Invalid Pubkey: {e}", severity="error")
+            self.notify(f"Invalid Address: {e}", severity="error")
 
     def _handle_graph_track_btn(self) -> None:
         """Enroll the selected row in nodes-table into SQLite as an active target."""
