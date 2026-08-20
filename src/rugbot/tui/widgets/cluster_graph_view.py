@@ -9,8 +9,9 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
-from rugbot.tui.formatters import format_age, short_address
 from textual.widgets import Static
+
+from rugbot.tui.formatters import format_age, short_address
 
 if TYPE_CHECKING:
     from rugbot.storage.tracker import SQLiteTrackerRepository

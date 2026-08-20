@@ -19,6 +19,8 @@ dependencies = [
     "uvloop>=0.21.0; sys_platform != 'win32'",
     "winloop>=0.1.0; sys_platform == 'win32'",
     "textual>=1.0.0",
+    "python-telegram-bot>=22.8",
+    "discord-py>=2.7.1",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +33,8 @@ rug_watch = "rugbot.runtime.cli:main"
 rug_wallet = "rugbot.runtime.wallet_cli:main"
 rug_wallet_tui = "rugbot.runtime.wallet_tui:main"
 rug_tui = "rugbot.runtime.wallet_tui:main"
+rug_discord = "rugbot.interfaces.discord:main"
+rug_telegram = "rugbot.interfaces.telegram_runner:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]

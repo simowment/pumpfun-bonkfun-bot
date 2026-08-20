@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+from rugbot.core.factory import build_ui_runtime
 from rugbot.runtime.config import (
     ExecutionMode,
     SniperConfigError,
@@ -108,6 +109,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Sniper runtime unavailable: {error}", file=sys.stderr)
         return 1
 
+    core = build_ui_runtime(
+        state_dir=state_dir,
+        wallet=wallet,
+        config_path=config_path,
+        sniper_runtime=sniper_runtime,
+    )
     app = RugbotTuiApp(
         wallet,
         endpoint=endpoint,
@@ -118,7 +125,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         config_path=config_path,
         state_dir=state_dir,
         theme=args.theme,
-        sniper_runtime=sniper_runtime,
+        core=core,
     )
     app.run()
     return 0

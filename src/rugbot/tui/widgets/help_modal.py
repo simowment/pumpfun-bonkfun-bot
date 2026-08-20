@@ -125,6 +125,11 @@ class HelpCheatsheetScreen(ModalScreen[None]):
             "Instantly dump half of the open position to secure profits.",
         )
         table.add_row(
+            "[C]",
+            "Clear All Targets",
+            "Wipe all tracked targets and policies from the SQLite database.",
+        )
+        table.add_row(
             "[X]",
             "Panic Exit 100%",
             "Immediately market-sell the entire position with high priority fee.",

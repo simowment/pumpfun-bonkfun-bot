@@ -41,6 +41,11 @@ from textual.widgets import (
     TabPane,
 )
 
+from rugbot.backtest.cluster_optimizer import (
+    HistoricalTokenSample,
+    run_cluster_tp_grid_search,
+)
+from rugbot.core.factory import build_ui_runtime
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.ingest.rpc_observer import AiohttpRpcTransport
 from rugbot.protocol.pump.models import TokenLaunch
@@ -54,9 +59,7 @@ from rugbot.runtime.config import (
     resolve_state_dir,
     save_sniper_document,
 )
-from rugbot.runtime.event_bus import EventBus
 from rugbot.runtime.token_resolver import resolve_token_or_wallet
-from rugbot.runtime.tracker_service import TrackerService
 from rugbot.runtime.wallet_intelligence import (
     MIN_REPEAT_LAUNCH_EVIDENCE,
     WalletIntelligenceReport,
@@ -65,11 +68,6 @@ from rugbot.runtime.wallet_intelligence import (
     WalletNode,
     scan_wallet_intelligence,
 )
-from rugbot.storage.database import DatabaseManager
-from rugbot.storage.sqlite_state_store import SqliteStateStore
-from rugbot.storage.tracker import SQLiteTrackerRepository
-from rugbot.tracker.clock import SystemClock
-from rugbot.tracker.engine import TrackerEngine
 from rugbot.tracker.events import (
     DecisionEvent,
     FunderAdded,
@@ -136,9 +134,13 @@ from rugbot.tui.widgets.wallet_risk import WalletRiskPanel
 from rugbot.tui.widgets.watching import FunderCardInfo, WatchingView
 
 if TYPE_CHECKING:
+    from rugbot.core.rugbot_core import RugbotCore
     from rugbot.ingest.rpc_observer import RpcHttpTransport
+    from rugbot.runtime.event_bus import EventBus
     from rugbot.runtime.sniper_daemon import SniperDaemonService
     from rugbot.runtime.sniper_runtime import SniperRuntime
+    from rugbot.runtime.tracker_service import TrackerService
+    from rugbot.storage.tracker import SQLiteTrackerRepository
 
 __all__ = [
     "RugbotTuiApp",
@@ -610,6 +612,7 @@ class RugbotTuiApp(App[None]):
         Binding(
             "x", "context_dismiss_action", "X: Exit 100%", show=True, priority=True
         ),
+        Binding("c", "clear_targets", "C: Clear", show=True, priority=True),
         Binding("slash", "toggle_search", "/: Search", show=True, priority=True),
         Binding(
             "question_mark", "show_help", "?: Cheatsheet", show=True, priority=True
@@ -658,6 +661,7 @@ class RugbotTuiApp(App[None]):
         theme: str = "textual-dark",
         enable_live: bool = False,
         transport: RpcHttpTransport | None = None,
+        core: RugbotCore | None = None,
         sniper_daemon: SniperDaemonService | None = None,
         sniper_runtime: SniperRuntime | None = None,
     ) -> None:
@@ -680,27 +684,53 @@ class RugbotTuiApp(App[None]):
         self._simulation_requested = False
         self._enable_live = False
         self._transport = transport
-        if sniper_daemon is not None and sniper_runtime is not None:
-            raise ValueError("inject either sniper_daemon or sniper_runtime, not both")
-        self._sniper_runtime = sniper_runtime
-        self._sniper_daemon = (
-            sniper_runtime.daemon if sniper_runtime is not None else sniper_daemon
-        )
         self.theme = theme
 
-        # Initialize SQLite database and domain tracker service
-        db_path = self._state_dir / "rugbot.db"
-        self._db = DatabaseManager(db_path)
-        self._repository = SQLiteTrackerRepository(self._db)
-        self._engine = TrackerEngine(clock=SystemClock())
-        self._event_bus = EventBus()
-        self._service = TrackerService(self._engine, self._repository, self._event_bus)
+        # Drive the TUI from the shared RugbotCore facade. When no core is
+        # injected, compose one through the canonical factory so the app never
+        # builds its own runtime stack.
+        self._core = (
+            core
+            if core is not None
+            else build_ui_runtime(
+                state_dir=self._state_dir,
+                wallet=wallet,
+                config_path=self._config_path,
+                sniper_runtime=sniper_runtime,
+                sniper_daemon=sniper_daemon,
+            )
+        )
 
         # Activity cache for instant causal lookup
         self._activity_events: dict[str, ActivityItem] = {}
         # Live funder balances and token holdings cache
         self._funder_balances: dict[str, int] = {}
         self._funder_tokens: dict[str, list[dict[str, Any]]] = {}
+
+    @property
+    def _repository(self) -> SQLiteTrackerRepository:
+        """Delegate tracker repository access to the shared core."""
+        return self._core.repository
+
+    @property
+    def _service(self) -> TrackerService:
+        """Delegate tracker service access to the shared core."""
+        return self._core.service
+
+    @property
+    def _event_bus(self) -> EventBus:
+        """Delegate event bus access to the shared core."""
+        return self._core.event_bus
+
+    @property
+    def _sniper_runtime(self) -> SniperRuntime | None:
+        """Delegate sniper runtime access to the shared core."""
+        return self._core.sniper_runtime
+
+    @property
+    def _sniper_daemon(self) -> SniperDaemonService | None:
+        """Delegate sniper daemon access to the shared core."""
+        return self._core.sniper_daemon
 
     def compose(self) -> ComposeResult:
         # 1. Compact 2-line header
@@ -1146,6 +1176,7 @@ class RugbotTuiApp(App[None]):
             r"[bold cyan]\[E][/bold cyan] Edit  "
             r"[bold cyan]\[L][/bold cyan] Live/Sim  "
             r"[bold cyan]\[P][/bold cyan] Pause  "
+            r"[bold red]\[C][/bold red] Clear  "
             r"[bold red]\[H][/bold red] Sell 50%  "
             r"[bold red]\[X][/bold red] Exit 100%  │  "
             r"[bold white]\[/][/bold white] Search  "
@@ -1170,23 +1201,9 @@ class RugbotTuiApp(App[None]):
         self._init_edges_table()
         self._init_positions_table()
 
-        # Subscribe to EventBus domain events
-        self._event_bus.subscribe("*", self._on_domain_event)
+        # Subscribe to EventBus domain events through the shared core
+        self._core.subscribe(self._on_domain_event)
 
-        # Purge placeholder system program funder if present
-        with contextlib.suppress(Exception):
-            with self._db.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM tracker_funders WHERE address = ?",
-                    (_SYSTEM_PROGRAM_ID,),
-                )
-                cur.execute(
-                    "DELETE FROM tracker_wallets WHERE address = ? OR root_funder = ?",
-                    (
-                        _SYSTEM_PROGRAM_ID,
-                        _SYSTEM_PROGRAM_ID,
-                    ),
-                )
         # Register initial funder if provided
         if self._wallet and self._wallet != _SYSTEM_PROGRAM_ID:
             try:
@@ -1276,13 +1293,12 @@ class RugbotTuiApp(App[None]):
             raise
 
     async def on_unmount(self) -> None:
-        """Release the project-owned SQLite connection on application exit."""
+        """Release the shared sniper runtime or daemon on application exit."""
 
         if self._sniper_runtime is not None:
             await self._sniper_runtime.close()
         elif self._sniper_daemon is not None:
             await self._sniper_daemon.stop()
-        self._db.close()
 
     def _target_records(self) -> list[TargetRecord]:
         """Project persisted tracker funders and their policies into the TUI."""
@@ -1771,6 +1787,19 @@ class RugbotTuiApp(App[None]):
         """Display the full interactive operator shortcuts cheatsheet."""
         self.push_screen(HelpCheatsheetScreen())
 
+    def action_clear_targets(self) -> None:
+        """Clear all active targets from SQLite database and reset UI tables."""
+        try:
+            self._repository.clear_all_funders()
+            self._refresh_target_records()
+            self._refresh_tables()
+            with contextlib.suppress(Exception):
+                self.query_one("#live-activity-view", LiveActivityView).set_funders([])
+            self._refresh_header_counts()
+            self.notify("Cleared all targets from database", severity="information")
+        except Exception as e:
+            self.notify(f"Could not clear targets: {e}", severity="error")
+
     def action_show_graph(self) -> None:
         self.query_one(TabbedContent).active = "graph-tab"
 
@@ -1971,19 +2000,45 @@ class RugbotTuiApp(App[None]):
                 f"Target {short_address(target.address)}: BACKTEST RUN · 0 recorded launches in database. Run watcher to collect launches.",
             )
 
+        samples = [
+            HistoricalTokenSample(
+                mint=rec.mint,
+                symbol=rec.symbol,
+                creator_wallet=rec.creator_wallet,
+                created_slot=rec.created_slot,
+                created_at=rec.created_at,
+                ath_multiplier=min(
+                    5.0,
+                    max(
+                        1.10,
+                        ((rec.funding_amount_lamports or 1_000_000_000) / 1_000_000_000)
+                        * 0.5
+                        + (rec.depth * 0.15)
+                        + 1.0,
+                    ),
+                ),
+                ath_delay_seconds=60 + (rec.depth * 20),
+                rug_delay_seconds=180 + (rec.depth * 60),
+                entry_mc_usd=8000.0,
+                peak_mc_usd=16000.0,
+            )
+            for rec in target_launches
+        ]
+
+        report = run_cluster_tp_grid_search(
+            root_funder=target.address,
+            samples=samples,
+            buy_size_sol=size_sol,
+            realized_dump_loss_pct=0.75,
+            jito_tip_sol=jito_sol,
+            gas_fee_sol=gas_sol,
+        )
+
         wins = 0
         losses = 0
         net_sol_total = 0.0
-        ath_samples: list[float] = []
-
-        for rec in target_launches:
-            funding_sol = (rec.funding_amount_lamports or 1_000_000_000) / 1_000_000_000
-            estimated_ath = min(
-                500.0, max(10.0, funding_sol * 50.0 + (rec.depth * 15.0))
-            )
-            ath_samples.append(estimated_ath)
-
-            if estimated_ath >= tp_pct:
+        for token in samples:
+            if token.ath_multiplier >= (1.0 + tp_pct / 100.0):
                 wins += 1
                 gross_gain = size_sol * (tp_pct / 100.0)
                 net_sol_total += gross_gain - total_fee_sol
@@ -1995,7 +2050,11 @@ class RugbotTuiApp(App[None]):
         total_trades = wins + losses
         winrate_pct = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
         total_r = (net_sol_total / size_sol) if size_sol > 0 else 0.0
-        avg_ath_pct = sum(ath_samples) / len(ath_samples) if ath_samples else 0.0
+        avg_ath_pct = (
+            sum((s.ath_multiplier - 1.0) * 100 for s in samples) / len(samples)
+            if samples
+            else 0.0
+        )
 
         perf_str = f"{total_r:+.2f}R ({wins}W/{losses}L {winrate_pct:.1f}% WR)"
 
@@ -2004,11 +2063,15 @@ class RugbotTuiApp(App[None]):
         target.avg_ath_pct = avg_ath_pct
         target.perf_metric = perf_str
 
+        opt_text = (
+            f"👑 Optimal TP: {report.optimal_tp_label} (Net EV: {report.optimal_net_ev_sol:+.4f} SOL)"
+            if report.is_net_profitable
+            else "⚠️ Cluster Unprofitable"
+        )
         log_msg = (
-            f"Target {short_address(target.address)}: BACKTEST RUN · "
-            f"Size {size_sol:.3f} SOL · TP +{tp_pct:.0f}% / SL -{sl_pct:.0f}% · "
-            f"{winrate_pct:.1f}% WR ({wins}W/{losses}L) · "
-            f"Net PnL {net_sol_total:+.4f} SOL ({total_r:+.2f}R) ✓"
+            f"Cluster {short_address(target.address)} ({len(samples)} tokens): "
+            f"Current TP +{tp_pct:.0f}% -> {winrate_pct:.1f}% WR ({net_sol_total:+.4f} SOL) │ "
+            f"{opt_text} ✓"
         )
         return target, log_msg
 

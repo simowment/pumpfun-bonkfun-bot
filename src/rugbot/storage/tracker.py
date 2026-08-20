@@ -165,6 +165,27 @@ class SQLiteTrackerRepository:
             last_seen_at=row["last_seen_at"],
         )
 
+    def delete_funder(self, address: str) -> None:
+        """Delete a root funder, policy, and associated links."""
+        conn = self._db.connection
+        conn.execute(
+            "DELETE FROM tracker_target_execution_policies WHERE funder_address = ?",
+            (address,),
+        )
+        conn.execute("DELETE FROM tracker_launches WHERE root_funder = ?", (address,))
+        conn.execute("DELETE FROM tracker_transfers WHERE root_funder = ?", (address,))
+        conn.execute("DELETE FROM tracker_wallets WHERE root_funder = ?", (address,))
+        conn.execute("DELETE FROM tracker_funders WHERE address = ?", (address,))
+
+    def clear_all_funders(self) -> None:
+        """Delete all root funders, target policies, and tracked nodes."""
+        conn = self._db.connection
+        conn.execute("DELETE FROM tracker_target_execution_policies")
+        conn.execute("DELETE FROM tracker_launches")
+        conn.execute("DELETE FROM tracker_transfers")
+        conn.execute("DELETE FROM tracker_wallets")
+        conn.execute("DELETE FROM tracker_funders")
+
     def enable_funder(self, address: str, *, enabled: bool) -> None:
         """Enable or disable tracking for a root funder."""
         conn = self._db.connection
