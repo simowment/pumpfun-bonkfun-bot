@@ -114,6 +114,7 @@ from rugbot.tui.formatters import (
     short_address,
 )
 from rugbot.tui.widgets.activity import ActivityItem, EmptyStateView, LiveActivityView
+from rugbot.tui.widgets.cluster_graph_view import ClusterGraphWidget
 from rugbot.tui.widgets.execution_rail import ExecutionCard
 from rugbot.tui.widgets.graph_modal import ClusterGraphModal
 from rugbot.tui.widgets.header import CompactHeader
@@ -1107,7 +1108,7 @@ class RugbotTuiApp(App[None]):
                             id="wallet-input",
                             classes="legacy-compat",
                         )
-                    yield Static("", id="graph-flowchart-panel")
+                    yield ClusterGraphWidget(id="cluster-graph-widget")
                     with Container(classes="table-container"):
                         yield DataTable(id="nodes-table", cursor_type="row")
 
@@ -2512,8 +2513,22 @@ class RugbotTuiApp(App[None]):
 
     def _refresh_nodes_table(self) -> None:
         with contextlib.suppress(Exception):
-            self.query_one("#graph-flowchart-panel", Static).update(
-                self._render_cluster_flowchart()
+            target_addr = ""
+            target_label = ""
+            with contextlib.suppress(Exception):
+                targets_table = self.query_one("#targets-table", TargetsTable)
+                selected = targets_table.get_selected_target()
+                if selected:
+                    target_addr = selected.address
+                    target_label = selected.label
+
+            if not target_addr and self._wallet:
+                target_addr = self._wallet
+                funder_rec = self._repository.get_funder(self._wallet)
+                target_label = funder_rec.label if funder_rec else "Target Dev"
+
+            self.query_one("#cluster-graph-widget", ClusterGraphWidget).update_cluster(
+                target_addr, target_label, self._repository
             )
             funders = self._repository.get_funders()
             nodes_table = self.query_one("#nodes-table", DataTable)
