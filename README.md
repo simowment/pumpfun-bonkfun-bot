@@ -91,6 +91,27 @@ reconnects after transport failure and performs durable HTTP catch-up first, so
 restarts do not rely solely on the live socket. `--stream` currently targets
 one wallet; portfolio polling remains available through `--portfolio`.
 
+Expose the shared core to a browser through the aiohttp web bridge:
+
+```powershell
+uv run rug_web
+```
+
+The bridge serves a UI-agnostic JSON API and a live WebSocket event stream:
+
+- `GET /api/health` returns a liveness payload.
+- `GET /api/state` returns a JSON projection of targets, funders, wallets,
+  launches, positions, and the daemon snapshot.
+- `POST /api/command` accepts `{ "name": string, "args": string[] }` and
+  dispatches it through the shared command registry.
+- `GET /api/events` opens a WebSocket that sends the current state on connect
+  and then broadcasts every core tracker event.
+
+Configuration is read from validated environment variables: `RUG_WEB_HOST`
+(default `127.0.0.1`), `RUG_WEB_PORT` (default `8787`), `RUGBOT_STATE_DIR`
+(default `.state/web`), and `RUGBOT_CONFIG` (default `watch.yaml`). CORS is
+permissive for local development.
+
 Watch a persistent portfolio of known creator wallets in paper mode:
 
 ```yaml

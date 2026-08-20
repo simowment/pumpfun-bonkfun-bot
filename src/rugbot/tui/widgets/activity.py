@@ -244,6 +244,18 @@ class LiveActivityView(Widget):
         self.rpc_status_str = rpc_status
         self._update_top()
 
+    def clear(self) -> None:
+        """Wipe all activity feed items and reset state."""
+        self._items.clear()
+        self._row_order.clear()
+        self.selected_row_id = None
+        self.last_event_str = "—"
+        try:
+            self.query_one("#activity-table", DataTable).clear()
+        except Exception:
+            pass
+        self._update_top()
+
     def _update_top(self) -> None:
         try:
             self.query_one("#activity-top-card", Static).update(self._render_top_card())

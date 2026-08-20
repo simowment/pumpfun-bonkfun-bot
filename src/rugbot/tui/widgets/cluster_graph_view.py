@@ -140,8 +140,13 @@ class ClusterGraphWidget(Static):
         token_tree = Tree("🪙 [bold green]Durable Token Records[/bold green]")
         if launches:
             for launch in launches[:6]:
+                token_label = (
+                    f"[bold white]{launch.name}[/bold white] [cyan]${launch.symbol}[/cyan]"
+                    if launch.name and launch.name != launch.symbol
+                    else f"[bold white]${launch.symbol}[/bold white]"
+                )
                 node = token_tree.add(
-                    f"🪙 [bold white]{launch.symbol}[/bold white] ({short_address(launch.mint)})"
+                    f"🪙 {token_label} ({short_address(launch.mint)})"
                 )
                 node.add(f"• Slot: {launch.created_slot:,}")
                 node.add(f"• Age: {format_age(launch.created_at)}")

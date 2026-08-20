@@ -54,8 +54,10 @@ def build_ui_runtime(
         repository=repository,
         event_bus=event_bus,
         service=service,
+        database=db,
         sniper_runtime=sniper_runtime,
         sniper_daemon=daemon,
+        owns_sniper=False,
     )
     if config_path is not None:
         _seed_configured_target(repository, service, config_path)

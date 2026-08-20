@@ -210,3 +210,8 @@ In addition to `textual-tui-ux` verification, exercise:
 At `80x24`, the operator MUST still identify execution state, current exposure, immediate event, and valid action.
 
 Read `references/example-layouts.md` for compositions, not fixed mockups.
+
+## 16. Keyboard & Footer Bar Invariants
+
+1. Core operator actions and tab navigation shortcuts MUST remain persistently visible in the footer bar.
+2. Textual `Binding` declarations MUST include explicit `key_display` labels to ensure readable formatting across all terminal sizes.

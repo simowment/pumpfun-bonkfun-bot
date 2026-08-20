@@ -9,7 +9,7 @@ import json
 import os
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 from solders.pubkey import Pubkey
 
@@ -18,6 +18,7 @@ from rugbot.runtime.config import resolve_dotenv
 resolve_dotenv()
 PUMP_PROGRAM_ID = Pubkey.from_string("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
 MAX_PAGE_SIGNATURES = 1000
+MIN_BASE58_ADDRESS_LENGTH: Final[int] = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +33,7 @@ class ResolvedTarget:
     creation_slot: int | None = None
     creation_signature: str | None = None
     default_label: str = "Tracked Target"
+    bundle_wallets: tuple[str, ...] = ()
 
 
 def _rpc_call(rpc_url: str, method: str, params: list[object]) -> object:
@@ -45,6 +47,56 @@ def _rpc_call(rpc_url: str, method: str, params: list[object]) -> object:
     with urllib.request.urlopen(req, timeout=10) as resp:
         data: dict[str, Any] = json.loads(resp.read().decode())
         return data.get("result")
+
+
+def fetch_token_metadata(mint: str) -> tuple[str, str]:
+    """Fetch real token (name, symbol) using DexScreener and Pump.fun APIs."""
+    # 1. DexScreener API (fast, unthrottled, returns verified on-chain token name and symbol)
+    try:
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+            pairs = data.get("pairs") or []
+            if pairs:
+                base = pairs[0].get("baseToken", {})
+                name = str(base.get("name", "")).strip() or "Pump Token"
+                symbol = str(base.get("symbol", "")).strip() or name[:6].upper()
+                return (name, symbol)
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+        KeyError,
+        ValueError,
+        OSError,
+    ):
+        pass
+
+    # 2. Fallback to pump.fun frontend API
+    try:
+        url = f"https://frontend-api-v2.pump.fun/coins/{mint}"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+            name = str(data.get("name", "")).strip() or "Pump Token"
+            symbol = str(data.get("symbol", "")).strip() or "PUMP"
+            return (name, symbol)
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+        KeyError,
+        ValueError,
+        OSError,
+    ):
+        return ("Pump Token", "PUMP")
 
 
 def resolve_token_or_wallet(
@@ -99,23 +151,42 @@ def resolve_token_or_wallet(
                     ],
                 )
                 if tx_info and tx_info.get("transaction"):
-                    account_keys = tx_info["transaction"]["message"]["accountKeys"]
-                    creator_wallet = (
-                        account_keys[0]["pubkey"]
-                        if isinstance(account_keys[0], dict)
-                        else account_keys[0]
+                    raw_keys = tx_info["transaction"]["message"]["accountKeys"]
+                    account_keys = [
+                        k["pubkey"] if isinstance(k, dict) else k for k in raw_keys
+                    ]
+                    creator_wallet = account_keys[0]
+
+                    known_system = {
+                        "11111111111111111111111111111111",
+                        "ComputeBudget111111111111111111111111111111",
+                        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                        "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+                        "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+                        "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s",
+                        "SysvarRent111111111111111111111111111111111",
+                        "8fwS3wUbk5qeUe9RAyxiLi21hVM6EqiTCX1NA1DH6FyG",
+                    }
+                    bundle_wallets = tuple(
+                        acc
+                        for acc in account_keys[1:]
+                        if acc not in known_system
+                        and not acc.endswith("pump")
+                        and len(acc) >= MIN_BASE58_ADDRESS_LENGTH
                     )
 
-                    label = custom_label or f"Dev of {cleaned[:6]}...pump"
+                    name, symbol = fetch_token_metadata(cleaned)
+                    label = custom_label or f"Dev of {name} (${symbol})"
                     return ResolvedTarget(
                         input_address=cleaned,
                         target_wallet=creator_wallet,
                         is_token=True,
-                        symbol="PUMP",
-                        name="Pump Token",
+                        symbol=symbol,
+                        name=name,
                         creation_slot=creation_slot,
                         creation_signature=creation_sig,
                         default_label=label,
+                        bundle_wallets=bundle_wallets,
                     )
 
     label = custom_label or f"Dev {cleaned[:6]}..."

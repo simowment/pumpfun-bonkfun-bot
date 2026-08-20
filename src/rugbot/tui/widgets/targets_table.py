@@ -98,6 +98,10 @@ class TargetsTable(Widget):
         table.add_column("BUY", key="buy", width=7)
         self.refresh_table()
 
+    def get_target(self, address: str) -> TargetRecord | None:
+        """Fetch one tracked target by address."""
+        return self._targets.get(address)
+
     def set_targets(self, targets: list[TargetRecord]) -> None:
         """Replace projections with the repository-backed funder set."""
         self._targets = {target.address: target for target in targets}

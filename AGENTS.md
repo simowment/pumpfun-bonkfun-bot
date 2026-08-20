@@ -744,3 +744,12 @@ When multiple valid implementations remain, the agent MUST choose the one that m
 A lower-priority objective MUST NOT override a higher-priority objective.
 
 If no option can be selected without violating a normative rule, ABORT before coding.
+
+---
+
+## 14. Real-World Execution Mechanics & Data Honesty
+
+1. **Realistic Market Dynamics**: Simulation and paper backtesting MUST model realistic on-chain market dynamics (slippage, actual liquidity floor, and adverse price impact) rather than theoretical ideal exits that cannot execute in practice.
+2. **Zero Synthetic Feed Pollution**: Live activity feeds and monitoring views MUST display only real-time events. Never pre-populate live feeds with historical, synthetic, or mock data.
+3. **High-Density Decision Metrics**: Backtesting and evaluation tools MUST visually render full actionable metrics (winrate, sample size, fee breakdowns, and net ROI) directly in the UI.
+4. **Lean & Deterministic Test Suites**: Prefer fast, unified integration tests over sprawling, fragile mock unit tests. Keep test runs deterministic and fast.

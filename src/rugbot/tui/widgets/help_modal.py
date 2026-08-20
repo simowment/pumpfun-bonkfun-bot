@@ -105,6 +105,11 @@ class HelpCheatsheetScreen(ModalScreen[None]):
             "Paste token mint or dev address + optional alias (stored in SQLite).",
         )
         table.add_row(
+            "[B]",
+            "Run Cluster Backtest",
+            "Run multi-token Take-Profit optimizer across cluster with realistic dump modeling.",
+        )
+        table.add_row(
             "[E]",
             "Edit Target Policy",
             "Open Settings for highlighted target to customize take-profit & size.",

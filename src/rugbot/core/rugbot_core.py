@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from rugbot.runtime.sniper_daemon import SniperDaemonService, SniperDaemonSnapshot
     from rugbot.runtime.sniper_runtime import SniperRuntime
     from rugbot.runtime.tracker_service import TrackerService
+    from rugbot.storage.database import DatabaseManager
     from rugbot.storage.tracker import SQLiteTrackerRepository
     from rugbot.tracker.engine import TrackerEngine
     from rugbot.tracker.events import TrackerEvent
@@ -38,15 +39,20 @@ class RugbotCore:
         repository: SQLiteTrackerRepository,
         event_bus: EventBus,
         service: TrackerService,
+        database: DatabaseManager,
         sniper_runtime: SniperRuntime | None = None,
         sniper_daemon: SniperDaemonService | None = None,
+        owns_sniper: bool = False,
     ) -> None:
         self._engine = engine
         self._repository = repository
         self._event_bus = event_bus
         self._service = service
+        self._database = database
         self._sniper_runtime = sniper_runtime
         self._sniper_daemon = sniper_daemon
+        self._owns_sniper = owns_sniper
+        self._closed = False
 
     @property
     def engine(self) -> TrackerEngine:
@@ -188,6 +194,25 @@ class RugbotCore:
     def publish(self, event: TrackerEvent) -> None:
         """Publish one tracker event to all subscribers."""
         self._event_bus.publish(event)
+
+    async def close(self) -> None:
+        """Release owned sniper resources and the database connection exactly once.
+
+        The core closes the sniper runtime/daemon only when it owns it (created
+        internally); an externally-injected runtime/daemon is left to its owner
+        (for example the TUI) so it is never closed twice. The database is
+        always owned by the core and is always closed. Calling ``close`` more
+        than once is a no-op.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        if self._owns_sniper:
+            if self._sniper_runtime is not None:
+                await self._sniper_runtime.close()
+            elif self._sniper_daemon is not None:
+                await self._sniper_daemon.stop()
+        self._database.close()
 
 
 __all__ = ["RugbotCore"]

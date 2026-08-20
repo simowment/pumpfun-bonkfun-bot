@@ -25,6 +25,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from solders.pubkey import Pubkey
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
@@ -98,6 +99,7 @@ from rugbot.tracker.queries import (
     build_funding_path,
     format_path_tree,
 )
+from rugbot.tui.clipboard import get_system_clipboard
 from rugbot.tui.formatters import (
     format_age,
     format_amount,
@@ -112,6 +114,7 @@ from rugbot.tui.formatters import (
     short_address,
 )
 from rugbot.tui.widgets.activity import ActivityItem, EmptyStateView, LiveActivityView
+from rugbot.tui.widgets.backtest_matrix_view import BacktestMatrixWidget
 from rugbot.tui.widgets.cluster_graph_view import ClusterGraphWidget
 from rugbot.tui.widgets.execution_rail import ExecutionCard
 from rugbot.tui.widgets.graph_modal import ClusterGraphModal
@@ -404,6 +407,20 @@ class RugbotTuiApp(App[None]):
     #launches-detail-col {
         width: 1fr;
         height: 100%;
+        layout: vertical;
+    }
+
+    #backtest-matrix-widget {
+        height: auto;
+        max-height: 16;
+        width: 100%;
+        margin-bottom: 1;
+        overflow-y: auto;
+    }
+
+    #launches-table {
+        height: 1fr;
+        width: 100%;
     }
 
     #target-profile-card,
@@ -571,6 +588,22 @@ class RugbotTuiApp(App[None]):
         background: #161b22;
     }
 
+    .paste-btn {
+        height: 1;
+        min-height: 1;
+        min-width: 9;
+        padding: 0 1;
+        margin-left: 1;
+        border: none;
+        background: #21262d;
+        color: #58a6ff;
+    }
+
+    .paste-btn:hover {
+        background: #30363d;
+        color: #ffffff;
+    }
+
     .table-header {
         height: 1;
         width: 100%;
@@ -596,28 +629,92 @@ class RugbotTuiApp(App[None]):
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
-        Binding("1", "show_tracker", "1: Dashboard", show=True, priority=True),
-        Binding("2", "show_launches", "2: Dev History", show=True, priority=True),
-        Binding("3", "show_sniper", "3: Sniper", show=True, priority=True),
-        Binding("a", "add_target", "A: Add Dev", show=True, priority=True),
         Binding(
-            "f", "show_funding_graph", "F: Cluster Graph", show=True, priority=True
-        ),
-        Binding("e", "context_action", "E: Edit Policy", show=True, priority=True),
-        Binding("p", "pause_target", "P: Pause", show=True, priority=True),
-        Binding("l", "toggle_live_trading", "L: Live/Sim", show=True, priority=True),
-        Binding(
-            "h", "context_secondary_action", "H: Sell 50%", show=True, priority=True
+            "1", "show_tracker", "Dashboard", key_display="1", show=True, priority=True
         ),
         Binding(
-            "x", "context_dismiss_action", "X: Exit 100%", show=True, priority=True
+            "2",
+            "show_launches",
+            "Dev History",
+            key_display="2",
+            show=True,
+            priority=True,
         ),
-        Binding("c", "clear_targets", "C: Clear", show=True, priority=True),
-        Binding("slash", "toggle_search", "/: Search", show=True, priority=True),
         Binding(
-            "question_mark", "show_help", "?: Cheatsheet", show=True, priority=True
+            "3", "show_sniper", "Sniper", key_display="3", show=True, priority=True
         ),
-        Binding("q", "quit", "Q: Quit", show=True, priority=True),
+        Binding(
+            "4", "show_settings", "Settings", key_display="4", show=True, priority=True
+        ),
+        Binding(
+            "f",
+            "show_funding_graph",
+            "Cluster Graph",
+            key_display="5/F",
+            show=True,
+            priority=True,
+        ),
+        Binding(
+            "a", "add_target", "Add Dev", key_display="A", show=True, priority=True
+        ),
+        Binding(
+            "b", "run_backtest", "Backtest", key_display="B", show=True, priority=True
+        ),
+        Binding(
+            "e",
+            "context_action",
+            "Edit Policy",
+            key_display="E",
+            show=True,
+            priority=True,
+        ),
+        Binding(
+            "l",
+            "toggle_live_trading",
+            "Live/Sim",
+            key_display="L",
+            show=True,
+            priority=True,
+        ),
+        Binding(
+            "p", "pause_target", "Pause", key_display="P", show=True, priority=True
+        ),
+        Binding(
+            "c", "clear_targets", "Clear", key_display="C", show=True, priority=True
+        ),
+        Binding(
+            "h",
+            "context_secondary_action",
+            "Sell 50%",
+            key_display="H",
+            show=True,
+            priority=True,
+        ),
+        Binding(
+            "x",
+            "context_dismiss_action",
+            "Exit 100%",
+            key_display="X",
+            show=True,
+            priority=True,
+        ),
+        Binding(
+            "slash",
+            "toggle_search",
+            "Search",
+            key_display="/",
+            show=True,
+            priority=True,
+        ),
+        Binding(
+            "question_mark",
+            "show_help",
+            "Cheatsheet",
+            key_display="?",
+            show=True,
+            priority=True,
+        ),
+        Binding("q", "quit", "Quit", key_display="Q", show=True, priority=True),
         # Aliases / Background keys
         Binding("f1", "show_tracker", "Tracker", show=False, priority=True),
         Binding("f2", "show_backtester", "Backtest", show=False, priority=True),
@@ -628,7 +725,6 @@ class RugbotTuiApp(App[None]):
         ),
         Binding("s", "show_settings", "Settings", show=False, priority=True),
         Binding("n", "analyze_target", "Add Target", show=False, priority=True),
-        Binding("b", "show_backtester", "Backtester", show=False, priority=True),
         Binding("d", "toggle_dry_run", "Dry Run", show=False, priority=True),
         Binding("w", "analyze_target", "Watch", show=False, priority=True),
         Binding("u", "quick_buy", "Quick Buy", show=False, priority=True),
@@ -643,6 +739,8 @@ class RugbotTuiApp(App[None]):
         ),
         Binding("5", "show_funders", "Funders", show=False, priority=True),
         Binding("6", "show_wallets", "Wallets", show=False, priority=True),
+        Binding("ctrl+v", "paste_clipboard", "Paste", show=False, priority=True),
+        Binding("shift+insert", "paste_clipboard", "Paste", show=False, priority=True),
         Binding("escape", "clear_focus", "Back", show=False, priority=True),
     ]
 
@@ -774,6 +872,11 @@ class RugbotTuiApp(App[None]):
                             placeholder="Filter tokens by name, symbol, mint, or dev wallet...",
                             id="launch-filter",
                         )
+                        yield Button(
+                            "🎯 Run Backtest (B)",
+                            variant="primary",
+                            id="run-backtest-btn",
+                        )
                         yield Static(
                             "Select a developer from the left list to filter creation history.",
                             id="backtest-status",
@@ -783,6 +886,7 @@ class RugbotTuiApp(App[None]):
                             yield Static("DEVELOPER WALLETS", classes="table-header")
                             yield DataTable(id="launches-devs-table", cursor_type="row")
                         with Vertical(id="launches-detail-col"):
+                            yield BacktestMatrixWidget(id="backtest-matrix-widget")
                             yield Static(
                                 "CREATED TOKENS & LAUNCH HISTORY",
                                 classes="table-header",
@@ -843,12 +947,19 @@ class RugbotTuiApp(App[None]):
                                 with Vertical(classes="card-body"):
                                     with Horizontal(classes="setting-line"):
                                         yield Label(
-                                            "Target Dev Wallet", classes="setting-label"
+                                            "Target Dev / Token",
+                                            classes="setting-label",
                                         )
                                         yield Input(
                                             id="target-wallet",
                                             placeholder="Solana Pubkey or Token Mint...",
                                             value=self._wallet or "",
+                                        )
+                                        yield Button(
+                                            "📋 Paste",
+                                            variant="default",
+                                            id="btn-paste-target-settings",
+                                            classes="paste-btn",
                                         )
                                     with Horizontal(classes="setting-line"):
                                         yield Label(
@@ -1126,6 +1237,12 @@ class RugbotTuiApp(App[None]):
                             placeholder="Dev Wallet or Token Mint...",
                             id="new-funder-input",
                         )
+                        yield Button(
+                            "📋 Paste",
+                            variant="default",
+                            id="btn-paste-funder-graph",
+                            classes="paste-btn",
+                        )
                         yield Input(
                             placeholder="Alias / Name (optional)...",
                             id="new-funder-alias",
@@ -1173,6 +1290,7 @@ class RugbotTuiApp(App[None]):
             r"[bold yellow]\[4][/bold yellow] Settings  "
             r"[bold yellow]\[5/F][/bold yellow] Cluster Graph  │  "
             r"[bold cyan]\[A][/bold cyan] Add Dev/Token  "
+            r"[bold cyan]\[B][/bold cyan] Backtest  "
             r"[bold cyan]\[E][/bold cyan] Edit  "
             r"[bold cyan]\[L][/bold cyan] Live/Sim  "
             r"[bold cyan]\[P][/bold cyan] Pause  "
@@ -1233,25 +1351,6 @@ class RugbotTuiApp(App[None]):
                     self._target_policy_mode_label(real_targets[0]),
                 )
 
-        # Check existing launches from SQLite database
-        existing_launches = self._repository.get_launches(limit=50)
-        if existing_launches:
-            for launch in reversed(existing_launches):
-                item = ActivityItem(
-                    row_id=f"launch_{launch.mint}",
-                    timestamp=launch.created_at,
-                    event_type="LAUNCH",
-                    root_funder=launch.root_funder,
-                    target_wallet=launch.creator_wallet,
-                    token_symbol=launch.symbol,
-                    token_name=launch.name,
-                    token_mint=launch.mint,
-                    market_cap_usd=None,
-                    signal="DETECTED",
-                )
-                self._activity_events[item.row_id] = item
-                activity_view.add_event(item)
-
         # Hydrate funders in Activity empty state and tables
         funders = [
             f.address
@@ -1302,15 +1401,25 @@ class RugbotTuiApp(App[None]):
 
     def _target_records(self) -> list[TargetRecord]:
         """Project persisted tracker funders and their policies into the TUI."""
-        return [
-            TargetRecord(
-                address=funder.address,
-                label=funder.label or "Tracked funder",
-                policy=self._repository.get_target_execution_policy(funder.address),
+        records = []
+        for funder in self._repository.get_funders(enabled_only=False):
+            if funder.address == _SYSTEM_PROGRAM_ID:
+                continue
+            launches = self._repository.get_launches_for_funder(funder.address)
+            records.append(
+                TargetRecord(
+                    address=funder.address,
+                    label=funder.label or "Tracked funder",
+                    policy=self._repository.get_target_execution_policy(funder.address),
+                    launches_count=len(launches),
+                    winrate_pct=0.0,
+                    avg_ath_pct=0.0,
+                    perf_metric=f"{len(launches)} launches"
+                    if launches
+                    else "0 launches",
+                )
             )
-            for funder in self._repository.get_funders(enabled_only=False)
-            if funder.address != _SYSTEM_PROGRAM_ID
-        ]
+        return records
 
     def _ensure_config_target_policy(self) -> None:
         """Seed the active watch target from the verified watcher configuration."""
@@ -1453,68 +1562,29 @@ class RugbotTuiApp(App[None]):
         )
 
     def _refresh_footer_actions(self) -> None:
-        """Render the global and contextual keyboard maps for the active tab."""
-        try:
-            active_tab = self.query_one(TabbedContent).active
-        except Exception:
-            active_tab = "overview-tab"
-
-        context = {
-            "overview-tab": (
-                ("UP/DN", "SELECT"),
-                ("ENTER", "POLICY"),
-                ("A", "ADD"),
-                ("E", "EDIT"),
-                ("P", "PAUSE"),
-                ("D", "SIM"),
-                ("ESC", "BACK"),
-            ),
-            "launches-tab": (
-                ("UP/DN", "SELECT"),
-                ("ENTER", "DETAILS"),
-                ("F1", "TRACKER"),
-                ("F3", "SNIPER"),
-                ("ESC", "BACK"),
-            ),
-            "positions-tab": (
-                ("D", "DRY RUN"),
-                ("P", "PAUSE"),
-                ("E", "EDIT/EXIT"),
-                ("L", "REQUEST LIVE"),
-                ("H", "HISTORY/SELL"),
-                ("ESC", "BACK"),
-            ),
-            "settings-tab": (
-                ("TAB", "NEXT"),
-                ("SHIFT+TAB", "PREV"),
-                ("CTRL+S", "SAVE POLICY"),
-                ("ESC", "TRACKER"),
-            ),
-        }.get(active_tab, ())
-        global_actions = (
-            ("F1", "TRACK"),
-            ("F2", "BACKTEST"),
-            ("F3", "SNIPER"),
-            ("F4", "SETTINGS"),
-            ("/", "SEARCH"),
-            ("R", "REFRESH"),
-            ("Q", "QUIT"),
+        """Update persistent 2-line shortcuts bar with all core operator keys."""
+        line1 = (
+            r"[bold yellow]\[1][/bold yellow] Dashboard  "
+            r"[bold yellow]\[2][/bold yellow] Dev History  "
+            r"[bold yellow]\[3][/bold yellow] Sniper  "
+            r"[bold yellow]\[4][/bold yellow] Settings  "
+            r"[bold yellow]\[5/F][/bold yellow] Cluster Graph  │  "
+            r"[bold cyan]\[A][/bold cyan] Add Dev/Token  "
+            r"[bold cyan]\[B][/bold cyan] Backtest  "
+            r"[bold cyan]\[E][/bold cyan] Edit  "
+            r"[bold cyan]\[L][/bold cyan] Live/Sim  "
+            r"[bold cyan]\[P][/bold cyan] Pause"
         )
-        width = self.size.width if self.size and self.size.width > 0 else 120
-        if width < 100:
-            global_actions = (
-                ("F1", "TRACK"),
-                ("F2", "BACKTEST"),
-                ("F3", "SNIPER"),
-                ("F4", "SETTINGS"),
-                ("Q", "QUIT"),
-            )
-            context = context[:5]
-        global_line = self._format_full_width_shortcuts(global_actions, width)
-        context_line = self._format_full_width_shortcuts(context, width)
-        lines = [line for line in (global_line, context_line) if line]
+        line2 = (
+            r"[bold red]\[C][/bold red] Clear All  "
+            r"[bold red]\[H][/bold red] Sell 50%  "
+            r"[bold red]\[X][/bold red] Exit 100%  │  "
+            r"[bold white]\[/][/bold white] Search  "
+            r"[bold magenta]\[?][/bold magenta] Cheatsheet  "
+            r"[bold white]\[Q][/bold white] Quit"
+        )
         with contextlib.suppress(Exception):
-            self.query_one("#footer-actions-bar", Static).update("\n".join(lines))
+            self.query_one("#footer-actions-bar", Static).update(f"{line1}\n{line2}")
 
     def on_watching_view_funder_selected(
         self, message: WatchingView.FunderSelected
@@ -1794,6 +1864,7 @@ class RugbotTuiApp(App[None]):
             self._refresh_target_records()
             self._refresh_tables()
             with contextlib.suppress(Exception):
+                self.query_one("#live-activity-view", LiveActivityView).clear()
                 self.query_one("#live-activity-view", LiveActivityView).set_funders([])
             self._refresh_header_counts()
             self.notify("Cleared all targets from database", severity="information")
@@ -1855,6 +1926,44 @@ class RugbotTuiApp(App[None]):
             )
             return
         self._save_target_policy()
+
+    def action_paste_clipboard(self) -> None:
+        """Paste plain text from system clipboard into the currently focused input."""
+        text = get_system_clipboard().strip()
+        if not text:
+            self.notify("Clipboard is empty", severity="warning")
+            return
+        focused = self.focused
+        if isinstance(focused, Input):
+            pos = focused.cursor_position
+            val = focused.value
+            focused.value = val[:pos] + text + val[pos:]
+            focused.cursor_position = pos + len(text)
+            self.notify(f"Pasted: {text[:24]}...", severity="information")
+        else:
+            with contextlib.suppress(Exception):
+                if self.query_one(TabbedContent).active == "graph-tab":
+                    inp = self.query_one("#new-funder-input", Input)
+                else:
+                    inp = self.query_one("#target-wallet", Input)
+                inp.value = text
+                inp.focus()
+                self.notify(f"Pasted Target: {text[:24]}...", severity="information")
+
+    def on_paste(self, event: events.Paste) -> None:
+        """Handle terminal bracketed paste sequences."""
+        if not event.text:
+            return
+        text = event.text.strip()
+        focused = self.focused
+        if isinstance(focused, Input):
+            pos = focused.cursor_position
+            val = focused.value
+            focused.value = val[:pos] + text + val[pos:]
+            focused.cursor_position = pos + len(text)
+            self.notify(f"Pasted: {text[:24]}...", severity="information")
+            event.prevent_default()
+            event.stop()
 
     def action_watch_wallet(self) -> None:
         """Switch to Settings tab to configure or add target."""
@@ -1947,7 +2056,16 @@ class RugbotTuiApp(App[None]):
 
     def _save_target_policy(self) -> None:
         """Persist settings only for the selected target; watcher YAML is unchanged."""
-        funder_address = self._setting_text("target-wallet")
+        input_address = self._setting_text("target-wallet")
+        resolved = None
+        funder_address = input_address
+        if input_address:
+            try:
+                resolved = resolve_token_or_wallet(input_address)
+                funder_address = resolved.target_wallet
+            except Exception as exc:
+                self.notify(f"Could not resolve target: {exc}", severity="warning")
+
         try:
             policy = self._policy_from_settings(funder_address)
         except (SniperConfigError, InvalidOperation, ValueError) as error:
@@ -1958,10 +2076,47 @@ class RugbotTuiApp(App[None]):
                 )
             return
 
+        label = (resolved.default_label if resolved else None) or "Configured target"
         if self._repository.get_funder(funder_address) is None:
-            self._service.add_funder(funder_address, label="Configured target")
+            self._service.add_funder(funder_address, label=label)
         self._service.save_target_execution_policy(policy)
+
+        if resolved and resolved.is_token and resolved.creation_slot:
+            self._repository.save_launch(
+                LaunchRecord(
+                    mint=resolved.input_address,
+                    creator_wallet=funder_address,
+                    root_funder=funder_address,
+                    symbol=resolved.symbol or "PUMP",
+                    name=resolved.name or "Pump Token",
+                    created_signature=resolved.creation_signature or "",
+                    created_slot=resolved.creation_slot,
+                    created_at=int(datetime.now(UTC).timestamp()),
+                    depth=0,
+                    funding_signature=None,
+                    funding_amount_lamports=None,
+                    funding_timestamp=None,
+                )
+            )
+
+        if resolved and resolved.bundle_wallets:
+            now_iso = datetime.now(UTC).isoformat()
+            for sat in resolved.bundle_wallets:
+                self._repository.save_wallet(
+                    WalletRecord(
+                        address=sat,
+                        root_funder=funder_address,
+                        parent_wallet=funder_address,
+                        depth=1,
+                        status=WalletStatus.FUNDED,
+                        discovered_at=now_iso,
+                        expires_at=None,
+                        last_active_at=now_iso,
+                    )
+                )
+
         self._refresh_target_records()
+        self._refresh_tables()
         with contextlib.suppress(Exception):
             self.query_one("#settings-status", Static).update(
                 "[bold green]Target policy saved: "
@@ -1989,17 +2144,6 @@ class RugbotTuiApp(App[None]):
             for rec in launches
             if target.address in {rec.creator_wallet, rec.root_funder}
         ] or list(launches)
-
-        if not target_launches:
-            target.launches_count = 0
-            target.winrate_pct = 0.0
-            target.avg_ath_pct = 0.0
-            target.perf_metric = "0.00R (0 launches)"
-            return (
-                target,
-                f"Target {short_address(target.address)}: BACKTEST RUN · 0 recorded launches in database. Run watcher to collect launches.",
-            )
-
         samples = [
             HistoricalTokenSample(
                 mint=rec.mint,
@@ -2033,6 +2177,21 @@ class RugbotTuiApp(App[None]):
             jito_tip_sol=jito_sol,
             gas_fee_sol=gas_sol,
         )
+
+        with contextlib.suppress(Exception):
+            self.query_one(
+                "#backtest-matrix-widget", BacktestMatrixWidget
+            ).update_report(report)
+
+        if not samples:
+            target.launches_count = 0
+            target.winrate_pct = 0.0
+            target.avg_ath_pct = 0.0
+            target.perf_metric = "0.00R (0 launches)"
+            return (
+                target,
+                f"Target {short_address(target.address)}: BACKTEST RUN · 0 recorded launches in database.",
+            )
 
         wins = 0
         losses = 0
@@ -2073,10 +2232,46 @@ class RugbotTuiApp(App[None]):
             f"Current TP +{tp_pct:.0f}% -> {winrate_pct:.1f}% WR ({net_sol_total:+.4f} SOL) │ "
             f"{opt_text} ✓"
         )
+        with contextlib.suppress(Exception):
+            self.query_one(
+                "#backtest-matrix-widget", BacktestMatrixWidget
+            ).update_report(report)
+
         return target, log_msg
 
     def action_run_backtest(self) -> None:
-        """Open historical backtesting rather than fabricate a result."""
+        """Run cluster Take-Profit grid optimization on the selected target and show metrics."""
+        target_addr = self._wallet
+        with contextlib.suppress(Exception):
+            targets_table = self.query_one("#targets-table", TargetsTable)
+            selected = targets_table.get_selected_target()
+            if selected:
+                target_addr = selected.address
+
+        if not target_addr:
+            funders = self._repository.get_funders()
+            if funders:
+                target_addr = funders[0].address
+
+        if not target_addr:
+            self.notify(
+                "No target selected to backtest. Add a dev with 'A'.",
+                severity="warning",
+            )
+            return
+
+        with contextlib.suppress(Exception):
+            targets_table = self.query_one("#targets-table", TargetsTable)
+            target_rec = targets_table.get_target(target_addr)
+            if target_rec is not None:
+                updated_target, log_msg = self._execute_backtest_simulation(target_rec)
+                targets_table.update_target(updated_target)
+                self._refresh_tables()
+                self._log_activity(log_msg)
+                self.action_show_launches()
+                self.notify(log_msg, severity="information")
+                return
+
         self.action_show_backtester()
 
     def action_toggle_dry_run(self) -> None:
@@ -2326,6 +2521,13 @@ class RugbotTuiApp(App[None]):
         """Handle real-time search input changes."""
         if event.input.id == "launch-filter":
             self._filter_launches_table(event.value.strip().lower())
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle Enter key submissions in input fields."""
+        if event.input.id in {"new-funder-input", "new-funder-alias"}:
+            self._handle_add_funder_btn()
+        elif event.input.id == "target-wallet":
+            self._save_target_policy()
 
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
         """Handle cursor/cell selection on dev history table."""
@@ -2692,8 +2894,13 @@ class RugbotTuiApp(App[None]):
                     if launch.funding_amount_lamports
                     else "—"
                 )
+                token_display = (
+                    f"[bold white]{launch.name}[/bold white] [cyan]${launch.symbol}[/cyan] [dim]({short_address(launch.mint)})[/dim]"
+                    if launch.name and launch.name != launch.symbol
+                    else f"[bold white]${launch.symbol}[/bold white] [dim]({short_address(launch.mint)})[/dim]"
+                )
                 launches_table.add_row(
-                    f"[bold white]{launch.symbol}[/bold white] [dim]({short_address(launch.mint)})[/dim]",
+                    token_display,
                     short_address(launch.creator_wallet),
                     short_address(launch.root_funder),
                     funding_sol,
@@ -2729,8 +2936,13 @@ class RugbotTuiApp(App[None]):
                     if launch.funding_amount_lamports
                     else "—"
                 )
+                token_display = (
+                    f"[bold white]{launch.name}[/bold white] [cyan]${launch.symbol}[/cyan] [dim]({short_address(launch.mint)})[/dim]"
+                    if launch.name and launch.name != launch.symbol
+                    else f"[bold white]${launch.symbol}[/bold white] [dim]({short_address(launch.mint)})[/dim]"
+                )
                 launches_table.add_row(
-                    f"[bold white]{launch.symbol}[/bold white] [dim]({short_address(launch.mint)})[/dim]",
+                    token_display,
                     short_address(launch.creator_wallet),
                     short_address(launch.root_funder),
                     funding_sol,
@@ -3849,6 +4061,20 @@ class RugbotTuiApp(App[None]):
             "enable_live": enable_live,
             "simulation_mode": simulation_mode,
         }
+        # 2. Resolve token mint to creator dev if token address was provided
+        target_alias = self._get_setting("target-alias", "").strip()
+        dev_label = target_alias or "Target Dev"
+        resolved = None
+        if target_wallet and target_wallet != _SYSTEM_PROGRAM_ID:
+            try:
+                resolved = resolve_token_or_wallet(
+                    target_wallet, custom_label=target_alias or None
+                )
+                target_wallet = resolved.target_wallet
+                dev_label = target_alias or resolved.default_label
+            except Exception as exc:
+                self.notify(f"Could not resolve target: {exc}", severity="warning")
+
         try:
             self._sync_yaml_config(
                 target_wallet=target_wallet,
@@ -3881,17 +4107,26 @@ class RugbotTuiApp(App[None]):
         settings_file.write_text(json.dumps(settings_data, indent=2), encoding="utf-8")
 
         # 3. Update runtime memory state
-        target_alias = self._get_setting("target-alias", "").strip()
-        dev_label = target_alias or "Target Dev"
         if target_wallet and target_wallet != _SYSTEM_PROGRAM_ID:
-            with contextlib.suppress(Exception):
-                resolved = resolve_token_or_wallet(
-                    target_wallet, custom_label=target_alias or None
+            self._wallet = target_wallet
+            self._service.add_funder(target_wallet, label=dev_label)
+            if resolved and resolved.is_token and resolved.creation_slot:
+                self._repository.save_launch(
+                    LaunchRecord(
+                        mint=resolved.input_address,
+                        creator_wallet=target_wallet,
+                        root_funder=target_wallet,
+                        symbol=resolved.symbol or "PUMP",
+                        name=resolved.name or "Pump Token",
+                        created_signature=resolved.creation_signature or "",
+                        created_slot=resolved.creation_slot,
+                        created_at=int(datetime.now(UTC).timestamp()),
+                        depth=0,
+                        funding_signature=None,
+                        funding_amount_lamports=None,
+                        funding_timestamp=None,
+                    )
                 )
-                target_wallet = resolved.target_wallet
-                dev_label = target_alias or resolved.default_label
-                self._wallet = target_wallet
-                self._service.add_funder(target_wallet, label=dev_label)
 
         self._live_requested = enable_live
         self._simulation_requested = simulation_mode
@@ -4002,6 +4237,23 @@ class RugbotTuiApp(App[None]):
                         funding_timestamp=None,
                     )
                 )
+
+            if resolved and resolved.bundle_wallets:
+                now_iso = datetime.now(UTC).isoformat()
+                for sat in resolved.bundle_wallets:
+                    self._repository.save_wallet(
+                        WalletRecord(
+                            address=sat,
+                            root_funder=dev_addr,
+                            parent_wallet=dev_addr,
+                            depth=1,
+                            status=WalletStatus.FUNDED,
+                            discovered_at=now_iso,
+                            expires_at=None,
+                            last_active_at=now_iso,
+                        )
+                    )
+
             self.query_one("#new-funder-input", Input).value = ""
             with contextlib.suppress(Exception):
                 self.query_one("#new-funder-alias", Input).value = ""
@@ -4088,6 +4340,8 @@ class RugbotTuiApp(App[None]):
             "btn-exec-ignore": self.action_ignore_candidate,
             "btn-exec-exit": self.action_exit_position,
             "btn-exec-sell50": self.action_quick_sell,
+            "btn-paste-target-settings": self._handle_paste_target_settings,
+            "btn-paste-funder-graph": self._handle_paste_funder_graph,
             "add-funder-btn": self._handle_add_funder_btn,
             "save-target-policy-btn": self._save_target_policy,
             "save-settings-btn": self._save_settings,
@@ -4098,6 +4352,26 @@ class RugbotTuiApp(App[None]):
         handler = dispatch.get(btn_id)
         if handler:
             handler()
+
+    def _handle_paste_target_settings(self) -> None:
+        text = get_system_clipboard().strip()
+        if text:
+            inp = self.query_one("#target-wallet", Input)
+            inp.value = text
+            inp.focus()
+            self.notify(f"Pasted Target: {text[:24]}...", severity="information")
+        else:
+            self.notify("Clipboard is empty", severity="warning")
+
+    def _handle_paste_funder_graph(self) -> None:
+        text = get_system_clipboard().strip()
+        if text:
+            inp = self.query_one("#new-funder-input", Input)
+            inp.value = text
+            inp.focus()
+            self.notify(f"Pasted Target: {text[:24]}...", severity="information")
+        else:
+            self.notify("Clipboard is empty", severity="warning")
 
     # --- Test report compatibility methods ---
     def _render_report(self, report: WalletIntelligenceReport) -> None:

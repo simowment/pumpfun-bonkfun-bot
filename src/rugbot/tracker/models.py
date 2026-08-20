@@ -127,10 +127,10 @@ class TargetRecord:
     label: str = "Target Dev"
     policy: TargetExecutionPolicy | None = None
     strategy: TargetStrategy = field(default_factory=TargetStrategy)
-    launches_count: int = 17
-    winrate_pct: float = 64.7
-    avg_ath_pct: float = 184.0
-    perf_metric: str = "WR 64.7%"
+    launches_count: int = 0
+    winrate_pct: float = 0.0
+    avg_ath_pct: float = 0.0
+    perf_metric: str = "—"
 
 
 @dataclass(frozen=True, slots=True)
