@@ -11,6 +11,7 @@ import json
 import math
 import os
 import time
+import webbrowser
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timezone
@@ -1044,10 +1045,13 @@ class RugbotTuiApp(App[None]):
                             yield Input(id=f"big-{i}-max", value="")
                             yield Input(id=f"big-{i}-fraction", value="")
 
-            # Tab 5: Funders
-            with TabPane("5: Funders", id="graph-tab"):
+            # Tab 5: Cluster Graph
+            with TabPane("5: Cluster Graph", id="graph-tab"):
                 with Vertical(classes="tab-body"):
-                    yield Static("ROOT FUNDERS & CLUSTERS", classes="table-header")
+                    yield Static(
+                        "DEV ON-CHAIN CLUSTER & SATELLITE WALLETS (IN-PLACE EXPLORER)",
+                        classes="table-header",
+                    )
                     with Horizontal(classes="toolbar-row"):
                         yield Button(
                             "← Back to Dashboard (Esc)",
@@ -1055,8 +1059,24 @@ class RugbotTuiApp(App[None]):
                             id="graph-back-btn",
                             classes="back-to-dashboard-btn",
                         )
+                        yield Button(
+                            "[+] Track Selected",
+                            variant="success",
+                            id="graph-track-btn",
+                        )
+                        yield Button(
+                            "🎯 Backtest",
+                            variant="default",
+                            id="graph-backtest-btn",
+                        )
+                        yield Button(
+                            "🌐 Solscan / GMGN",
+                            variant="warning",
+                            id="graph-explorer-btn",
+                        )
                         yield Input(
-                            placeholder="Enter Funder Pubkey...", id="new-funder-input"
+                            placeholder="Add Dev / Funder Pubkey...",
+                            id="new-funder-input",
                         )
                         yield Button(
                             "Add Funder", variant="primary", id="add-funder-btn"
@@ -2132,14 +2152,8 @@ class RugbotTuiApp(App[None]):
         self.query_one(TabbedContent).active = "launches-tab"
 
     def action_show_funding_graph(self) -> None:
-        """Display the rich on-chain cluster and bundle graph modal for the selected target."""
-        table = self.query_one("#targets-table", TargetsTable)
-        target = table.get_selected_target()
-        target_addr = (
-            target.address if target else "83t4PoByoYJLxcFyxT7Cd3smiYz7JAeHadcrW8LRL8f1"
-        )
-        target_label = target.label if target else "Target Developer"
-        self.push_screen(ClusterGraphModal(target_addr, target_label))
+        """Switch to in-place Cluster Graph tab without modal overlay."""
+        self.query_one(TabbedContent).active = "graph-tab"
 
     def action_toggle_pause_feed(self) -> None:
         """Toggle pause/resume live follow feed."""
@@ -3781,6 +3795,53 @@ class RugbotTuiApp(App[None]):
         except Exception as e:
             self.notify(f"Invalid Pubkey: {e}", severity="error")
 
+    def _handle_graph_track_btn(self) -> None:
+        """Enroll the selected row in nodes-table into SQLite as an active target."""
+        try:
+            table = self.query_one("#nodes-table", DataTable)
+            if table.cursor_row < 0 or table.cursor_row >= len(table.rows):
+                self.notify("Select a wallet in the table first", severity="warning")
+                return
+            row_key = list(table.rows.keys())[table.cursor_row]
+            funder_addr = str(row_key.value)
+            Pubkey.from_string(funder_addr)
+            self._service.add_funder(funder_addr, label=f"Tracked {funder_addr[:6]}...")
+            if self._repository.get_target_execution_policy(funder_addr) is None:
+                self._service.save_target_execution_policy(
+                    TargetExecutionPolicy(
+                        funder_address=funder_addr,
+                        monitoring_enabled=True,
+                        execution_mode=TargetExecutionMode.SIMULATED,
+                        quote_size_lamports=25_000_000,
+                        take_profit_pnl_ppm=100_000,
+                        stop_loss_pnl_ppm=-30_000,
+                        max_slippage_bps=500,
+                        priority_fee_microlamports=50_000,
+                        jito_tip_lamports=1_500_000,
+                        updated_at=datetime.now(UTC).isoformat(),
+                    )
+                )
+            self._refresh_target_records()
+            self._refresh_nodes_table()
+            self.notify(
+                f"Enrolled {funder_addr[:8]}... as Tracked Target!",
+                severity="information",
+            )
+        except Exception as e:
+            self.notify(f"Could not enroll target: {e}", severity="error")
+
+    def _handle_graph_explorer_btn(self) -> None:
+        """Open Solscan or GMGN for the selected wallet in nodes-table."""
+        try:
+            table = self.query_one("#nodes-table", DataTable)
+            if table.cursor_row < 0 or table.cursor_row >= len(table.rows):
+                return
+            row_key = list(table.rows.keys())[table.cursor_row]
+            funder_addr = str(row_key.value)
+            webbrowser.open(f"https://solscan.io/account/{funder_addr}")
+        except Exception as e:
+            self.notify(f"Could not open explorer: {e}", severity="error")
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id or ""
         if (
@@ -3800,6 +3861,9 @@ class RugbotTuiApp(App[None]):
             "add-funder-btn": self._handle_add_funder_btn,
             "save-target-policy-btn": self._save_target_policy,
             "save-settings-btn": self._save_settings,
+            "graph-track-btn": self._handle_graph_track_btn,
+            "graph-backtest-btn": self.action_show_backtester,
+            "graph-explorer-btn": self._handle_graph_explorer_btn,
         }
         handler = dispatch.get(btn_id)
         if handler:
