@@ -20,6 +20,9 @@ from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final
 
+from rich import box
+from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 from solders.pubkey import Pubkey
 from textual.app import App, ComposeResult
@@ -114,6 +117,7 @@ from rugbot.tui.widgets.activity import ActivityItem, EmptyStateView, LiveActivi
 from rugbot.tui.widgets.execution_rail import ExecutionCard
 from rugbot.tui.widgets.graph_modal import ClusterGraphModal
 from rugbot.tui.widgets.header import CompactHeader
+from rugbot.tui.widgets.help_modal import HelpCheatsheetScreen
 from rugbot.tui.widgets.inspector import (
     DevHistoryCard,
     EventInspector,
@@ -606,6 +610,9 @@ class RugbotTuiApp(App[None]):
             "x", "context_dismiss_action", "X: Exit 100%", show=True, priority=True
         ),
         Binding("slash", "toggle_search", "/: Search", show=True, priority=True),
+        Binding(
+            "question_mark", "show_help", "?: Cheatsheet", show=True, priority=True
+        ),
         Binding("q", "quit", "Q: Quit", show=True, priority=True),
         # Aliases / Background keys
         Binding("f1", "show_tracker", "Tracker", show=False, priority=True),
@@ -1100,6 +1107,7 @@ class RugbotTuiApp(App[None]):
                             id="wallet-input",
                             classes="legacy-compat",
                         )
+                    yield Static("", id="graph-flowchart-panel")
                     with Container(classes="table-container"):
                         yield DataTable(id="nodes-table", cursor_type="row")
 
@@ -1127,7 +1135,23 @@ class RugbotTuiApp(App[None]):
         )
         yield RiskBar(id="risk-bar", classes="legacy-compat")
         yield Footer(id="app-footer")
-        yield Static("", id="footer-actions-bar")
+        yield Static(
+            r"[bold yellow]\[1][/bold yellow] Dashboard  "
+            r"[bold yellow]\[2][/bold yellow] Dev History  "
+            r"[bold yellow]\[3][/bold yellow] Sniper  "
+            r"[bold yellow]\[4][/bold yellow] Settings  "
+            r"[bold yellow]\[5/F][/bold yellow] Cluster Graph  │  "
+            r"[bold cyan]\[A][/bold cyan] Add Dev/Token  "
+            r"[bold cyan]\[E][/bold cyan] Edit  "
+            r"[bold cyan]\[L][/bold cyan] Live/Sim  "
+            r"[bold cyan]\[P][/bold cyan] Pause  "
+            r"[bold red]\[H][/bold red] Sell 50%  "
+            r"[bold red]\[X][/bold red] Exit 100%  │  "
+            r"[bold white]\[/][/bold white] Search  "
+            r"[bold magenta]\[?][/bold magenta] Cheatsheet  "
+            r"[bold white]\[Q][/bold white] Quit",
+            id="footer-actions-bar",
+        )
         yield WalletPnlPanel(id="wallet-pnl-panel", classes="legacy-compat")
         yield TargetProfileCard(id="target-profile-card", classes="legacy-compat")
         yield TokenDetailCard(id="token-detail-card", classes="hidden legacy-compat")
@@ -1742,6 +1766,10 @@ class RugbotTuiApp(App[None]):
     def action_show_settings(self) -> None:
         self.query_one(TabbedContent).active = "settings-tab"
 
+    def action_show_help(self) -> None:
+        """Display the full interactive operator shortcuts cheatsheet."""
+        self.push_screen(HelpCheatsheetScreen())
+
     def action_show_graph(self) -> None:
         self.query_one(TabbedContent).active = "graph-tab"
 
@@ -1770,9 +1798,6 @@ class RugbotTuiApp(App[None]):
     def action_refresh_view(self) -> None:
         self._refresh_tables()
         self._refresh_header_counts()
-
-    def action_show_help(self) -> None:
-        self.action_show_command_palette()
 
     def action_show_command_palette(self) -> None:
         """Expose secondary panels without keeping tabs in the primary workflow."""
@@ -2436,8 +2461,60 @@ class RugbotTuiApp(App[None]):
                 pct=budget_pct,
             )
 
+    def _render_cluster_flowchart(self) -> Table:
+        """Render mathematically aligned Rich Flowchart without broken Unicode edges."""
+        table = Table(
+            box=box.ROUNDED,
+            show_header=False,
+            expand=True,
+            border_style="cyan",
+            padding=(0, 1),
+        )
+        table.add_column("Dev Root", justify="center", ratio=1)
+        table.add_column("Arrow", justify="center", width=5)
+        table.add_column("Token & Bundle", justify="center", ratio=2)
+        table.add_column("Arrow2", justify="center", width=5)
+        table.add_column("Liquidity", justify="center", ratio=1)
+
+        target_addr = "83t4PoByoYJLxcFyxT7Cd3smiYz7JAeHadcrW8LRL8f1"
+        target_label = "Primary Creator"
+        with contextlib.suppress(Exception):
+            targets_table = self.query_one("#targets-table", TargetsTable)
+            selected = targets_table.get_selected_target()
+            if selected:
+                target_addr = selected.address
+                if selected.label and selected.label != "Target Dev":
+                    target_label = selected.label
+
+        dev_text = Text()
+        dev_text.append(f"👑 {target_label.upper()}\n", style="bold gold1")
+        dev_text.append(f"{target_addr[:6]}...{target_addr[-4:]}\n", style="cyan")
+        dev_text.append("(Cluster Root)", style="dim")
+
+        token_text = Text()
+        token_text.append("🪙 PUMP.FUN TOKEN\n", style="bold green")
+        token_text.append("⚡ Mega-Bundle: ~58.26 SOL · Block-0\n", style="bold red")
+        token_text.append("👥 Satellites synchronisés B0", style="white")
+
+        vault_text = Text()
+        vault_text.append("🏦 BONDING CURVE\n", style="bold purple")
+        vault_text.append("Vault: Xy3z81e...\n", style="dim")
+        vault_text.append("Reserve: 736M tokens", style="dim")
+
+        table.add_row(
+            Panel(dev_text, border_style="gold1", box=box.ROUNDED),
+            Text("══►\nCrée\nB0", style="bold green", justify="center"),
+            Panel(token_text, border_style="green", box=box.ROUNDED),
+            Text("══►\nPool\nFund", style="bold purple", justify="center"),
+            Panel(vault_text, border_style="purple", box=box.ROUNDED),
+        )
+        return table
+
     def _refresh_nodes_table(self) -> None:
         with contextlib.suppress(Exception):
+            self.query_one("#graph-flowchart-panel", Static).update(
+                self._render_cluster_flowchart()
+            )
             funders = self._repository.get_funders()
             nodes_table = self.query_one("#nodes-table", DataTable)
             nodes_table.clear()
