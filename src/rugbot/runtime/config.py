@@ -69,6 +69,13 @@ class TrackingMode(StrEnum):
     TRACK_BUYS = "track_buys"
 
 
+class ListenerKind(StrEnum):
+    """Ingestion listener that feeds the watch loop."""
+
+    PUMPPORTAL = "pumpportal"
+    RPC = "rpc"
+
+
 @dataclass(frozen=True, slots=True)
 class SniperTarget:
     """One Solana wallet or token identity."""
@@ -139,6 +146,7 @@ class CoreSniperConfig:
     execution: SniperExecution
     risk: SniperRiskSettings
     tracking_mode: TrackingMode = TrackingMode.NEW_TOKEN_CREATIONS
+    listener: ListenerKind = ListenerKind.PUMPPORTAL
     rules: PlaybookRules = field(default_factory=PlaybookRules)
     volume_sizing: VolumeSizingPolicy = field(default_factory=VolumeSizingPolicy)
     strategy: StrategyFilterSettings = field(default_factory=StrategyFilterSettings)
@@ -350,6 +358,7 @@ def parse_sniper_config(text: str) -> CoreSniperConfig:
             "target",
             "execution",
             "tracking_mode",
+            "listener",
             "rules",
             "volume_sizing",
             "strategy",
@@ -365,6 +374,9 @@ def parse_sniper_config(text: str) -> CoreSniperConfig:
         risk=_parse_risk(document.get("risk"), execution),
         tracking_mode=_parse_tracking_mode(
             document.get("tracking_mode", TrackingMode.NEW_TOKEN_CREATIONS.value)
+        ),
+        listener=_parse_listener(
+            document.get("listener", ListenerKind.PUMPPORTAL.value)
         ),
         rules=_parse_rules(document.get("rules")),
         volume_sizing=_parse_volume_sizing(document.get("volume_sizing")),
@@ -415,6 +427,12 @@ def _parse_tracking_mode(raw: object) -> TrackingMode:
             "tracking_mode must be new_token_creations or track_buys"
         )
     return TrackingMode(raw)
+
+
+def _parse_listener(raw: object) -> ListenerKind:
+    if not isinstance(raw, str) or raw not in {item.value for item in ListenerKind}:
+        raise SniperConfigError("listener must be pumpportal or rpc")
+    return ListenerKind(raw)
 
 
 def _parse_target(raw: object) -> SniperTarget:

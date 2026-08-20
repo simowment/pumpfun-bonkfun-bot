@@ -30,6 +30,7 @@ dev = [
 rug_watch = "rugbot.runtime.cli:main"
 rug_wallet = "rugbot.runtime.wallet_cli:main"
 rug_wallet_tui = "rugbot.runtime.wallet_tui:main"
+rug_tui = "rugbot.runtime.wallet_tui:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]

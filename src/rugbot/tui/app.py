@@ -110,6 +110,7 @@ from rugbot.tui.formatters import (
 )
 from rugbot.tui.widgets.activity import ActivityItem, EmptyStateView, LiveActivityView
 from rugbot.tui.widgets.execution_rail import ExecutionCard
+from rugbot.tui.widgets.graph_modal import ClusterGraphModal
 from rugbot.tui.widgets.header import CompactHeader
 from rugbot.tui.widgets.inspector import (
     DevHistoryCard,
@@ -586,28 +587,30 @@ class RugbotTuiApp(App[None]):
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
-        Binding("f1", "show_tracker", "Tracker", show=True, priority=True),
-        Binding("f2", "show_backtester", "Backtest", show=True, priority=True),
-        Binding("f3", "show_sniper", "Sniper", show=True, priority=True),
-        Binding("f4", "show_settings", "Settings", show=True, priority=True),
-        Binding("a", "add_target", "Add Target", show=True, priority=True),
-        Binding("p", "pause_target", "Pause", show=True, priority=True),
-        Binding("slash", "toggle_search", "Search", show=True, priority=True),
-        Binding("ctrl+p", "show_command_palette", "Commands", show=True, priority=True),
-        Binding("q", "quit", "Quit", show=True, priority=True),
-        Binding("l", "toggle_live_trading", "Go Live", show=False, priority=True),
+        Binding("1", "show_tracker", "1: Dashboard", show=True, priority=True),
+        Binding("2", "show_launches", "2: Dev History", show=True, priority=True),
+        Binding("3", "show_sniper", "3: Sniper", show=True, priority=True),
+        Binding("a", "add_target", "A: Add Dev", show=True, priority=True),
+        Binding("f", "show_funding_graph", "F: Cluster Graph", show=True, priority=True),
+        Binding("e", "context_action", "E: Edit Policy", show=True, priority=True),
+        Binding("p", "pause_target", "P: Pause", show=True, priority=True),
+        Binding("l", "toggle_live_trading", "L: Live/Sim", show=True, priority=True),
+        Binding("h", "context_secondary_action", "H: Sell 50%", show=True, priority=True),
+        Binding("x", "context_dismiss_action", "X: Exit 100%", show=True, priority=True),
+        Binding("slash", "toggle_search", "/: Search", show=True, priority=True),
+        Binding("q", "quit", "Q: Quit", show=True, priority=True),
+        # Aliases / Background keys
+        Binding("f1", "show_tracker", "Tracker", show=False, priority=True),
+        Binding("f2", "show_backtester", "Backtest", show=False, priority=True),
+        Binding("f3", "show_sniper", "Sniper", show=False, priority=True),
+        Binding("f4", "show_settings", "Settings", show=False, priority=True),
+        Binding("ctrl+p", "show_command_palette", "Commands", show=False, priority=True),
         Binding("s", "show_settings", "Settings", show=False, priority=True),
         Binding("n", "analyze_target", "Add Target", show=False, priority=True),
         Binding("b", "show_backtester", "Backtester", show=False, priority=True),
         Binding("d", "toggle_dry_run", "Dry Run", show=False, priority=True),
         Binding("w", "analyze_target", "Watch", show=False, priority=True),
         Binding("u", "quick_buy", "Quick Buy", show=False, priority=True),
-        Binding("e", "context_action", "Context Action", show=False, priority=True),
-        Binding(
-            "h", "context_secondary_action", "Fast Sell", show=False, priority=True
-        ),
-        Binding("x", "context_dismiss_action", "Dismiss", show=False, priority=True),
-        Binding("f", "show_funding_graph", "Funding Graph", show=False, priority=True),
         Binding("space", "toggle_pause_feed", "Pause Feed", show=False, priority=True),
         Binding("r", "refresh_view", "Refresh", show=False, priority=True),
         Binding(
@@ -617,10 +620,6 @@ class RugbotTuiApp(App[None]):
             show=False,
             priority=True,
         ),
-        Binding("1", "show_tracker", "Dashboard", show=False, priority=True),
-        Binding("2", "show_launches", "Dev History", show=False, priority=True),
-        Binding("3", "show_sniper", "Sniper", show=False, priority=True),
-        Binding("4", "show_settings", "Settings", show=False, priority=True),
         Binding("5", "show_funders", "Funders", show=False, priority=True),
         Binding("6", "show_wallets", "Wallets", show=False, priority=True),
         Binding("escape", "clear_focus", "Back", show=False, priority=True),
@@ -2125,8 +2124,14 @@ class RugbotTuiApp(App[None]):
         self.query_one(TabbedContent).active = "launches-tab"
 
     def action_show_funding_graph(self) -> None:
-        """Switch to Funders & Graph tab."""
-        self.query_one(TabbedContent).active = "graph-tab"
+        """Display the rich on-chain cluster and bundle graph modal for the selected target."""
+        table = self.query_one("#targets-table", TargetsTable)
+        target = table.get_selected_target()
+        target_addr = (
+            target.address if target else "83t4PoByoYJLxcFyxT7Cd3smiYz7JAeHadcrW8LRL8f1"
+        )
+        target_label = target.label if target else "Target Developer"
+        self.push_screen(ClusterGraphModal(target_addr, target_label))
 
     def action_toggle_pause_feed(self) -> None:
         """Toggle pause/resume live follow feed."""
@@ -3742,12 +3747,29 @@ class RugbotTuiApp(App[None]):
         try:
             Pubkey.from_string(val)
             self._service.add_funder(val, label="Manual UI Funder")
+            if self._repository.get_target_execution_policy(val) is None:
+                self._service.save_target_execution_policy(
+                    TargetExecutionPolicy(
+                        funder_address=val,
+                        monitoring_enabled=True,
+                        execution_mode=TargetExecutionMode.SIMULATED,
+                        quote_size_lamports=25_000_000,
+                        take_profit_pnl_ppm=100_000,
+                        stop_loss_pnl_ppm=-30_000,
+                        max_slippage_bps=500,
+                        priority_fee_microlamports=50_000,
+                        jito_tip_lamports=1_500_000,
+                        updated_at=datetime.now(UTC).isoformat(),
+                    )
+                )
             self.query_one("#new-funder-input", Input).value = ""
+            self._refresh_target_records()
             funders = [
                 f.address for f in self._repository.get_funders(enabled_only=True)
             ]
             self.query_one("#live-activity-view", LiveActivityView).set_funders(funders)
             self._refresh_header_counts()
+            self.notify(f"Added target {val[:6]}... to SQLite", severity="information")
         except Exception as e:
             self.notify(f"Invalid Pubkey: {e}", severity="error")
 

@@ -10,7 +10,6 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from time import sleep
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit, urlunsplit
 
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.execution.observe import ObserveExecutionPort
@@ -22,6 +21,7 @@ from rugbot.ingest.pump_stream import PumpCreateStreamSource
 from rugbot.runtime.config import (
     CoreSniperConfig,
     ExecutionMode,
+    ListenerKind,
     SniperConfigError,
     SniperTarget,
     TargetKind,
@@ -511,32 +511,13 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0
             pretty=args.pretty,
         )
         return 1
-    if args.stream:
+    if args.stream or config.listener is ListenerKind.PUMPPORTAL:
         if portfolio is not None:
             _print_json(
                 {
                     "status": "abstain",
                     "reason": AbstainReason.MISSING_FEATURE.value,
-                    "message": "--stream currently requires one wallet target",
-                    "as_of_slot": -1,
-                },
-                pretty=args.pretty,
-            )
-            return 1
-        websocket_endpoint = (
-            os.environ.get("SOLANA_RPC_WEBSOCKET")
-            or os.environ.get("SOLANA_NODE_WSS_ENDPOINT")
-            or _websocket_endpoint_from_http(endpoint)
-        )
-        if not websocket_endpoint:
-            _print_json(
-                {
-                    "status": "abstain",
-                    "reason": AbstainReason.MISSING_FEATURE.value,
-                    "message": (
-                        "a WebSocket endpoint could not be derived; set "
-                        "SOLANA_RPC_WEBSOCKET with --stream"
-                    ),
+                    "message": "the pumpportal listener requires one wallet target",
                     "as_of_slot": -1,
                 },
                 pretty=args.pretty,
@@ -546,7 +527,6 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0
             _run_stream_watch(
                 config=config,
                 endpoint=endpoint,
-                websocket_endpoint=websocket_endpoint,
                 state_dir=state_dir,
                 max_transactions=args.max_transactions,
                 execution_port=execution_port,
@@ -629,7 +609,6 @@ async def _run_stream_watch(  # noqa: PLR0913
     *,
     config: CoreSniperConfig,
     endpoint: str,
-    websocket_endpoint: str,
     state_dir: Path,
     max_transactions: int,
     execution_port: ExecutionPort,
@@ -661,7 +640,6 @@ async def _run_stream_watch(  # noqa: PLR0913
         await sniper_runtime.daemon.start()
     source = PumpCreateStreamSource(
         wallet=config.target.id,
-        websocket_endpoint=websocket_endpoint,
         endpoint=endpoint,
         raw_observation_path=state_dir / "observations.jsonl",
         handled_ledger=stream_state,
@@ -711,16 +689,6 @@ async def _run_stream_watch(  # noqa: PLR0913
 
 def _print_json(payload: dict[str, object], *, pretty: bool) -> None:
     print(json.dumps(payload, indent=2 if pretty else None, sort_keys=True))
-
-
-def _websocket_endpoint_from_http(endpoint: str) -> str | None:
-    """Derive a standard Solana WebSocket URL while preserving its query key."""
-
-    parsed = urlsplit(endpoint)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return None
-    scheme = "ws" if parsed.scheme == "http" else "wss"
-    return urlunsplit((scheme, parsed.netloc, parsed.path, parsed.query, ""))
 
 
 def _json_result(result: WatchCycleResult | AbstainResult) -> dict[str, object]:
