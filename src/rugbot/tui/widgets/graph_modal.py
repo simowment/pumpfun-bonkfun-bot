@@ -1,20 +1,26 @@
 """Interactive and actionable On-Chain Cluster & Bundle Graph modal."""
 
+# ruff: noqa: SLF001
+
 from __future__ import annotations
 
 import webbrowser
 from dataclasses import dataclass
-from pathlib import Path
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from rich import box
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
-from rich.tree import Tree
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label, Static
+
+from rugbot.tracker.models import (
+    TargetExecutionMode,
+    TargetExecutionPolicy,
+)
 
 if TYPE_CHECKING:
     from textual.app import ComposeResult
@@ -99,7 +105,7 @@ class ClusterGraphModal(ModalScreen[None]):
 
     def _build_cluster_entities(self) -> list[ClusterEntity]:
         """Build structured cluster entities discovered on-chain."""
-        entities = [
+        return [
             ClusterEntity(
                 role="👑 ROOT DEV",
                 label="Primary Creator (Fee Payer)",
@@ -164,7 +170,6 @@ class ClusterGraphModal(ModalScreen[None]):
                 actionable_as_target=False,
             ),
         ]
-        return entities
 
     def compose(self) -> ComposeResult:
         with Vertical(id="cluster-card"):
@@ -225,9 +230,7 @@ class ClusterGraphModal(ModalScreen[None]):
         if 0 <= idx < len(self._entities):
             self._selected_entity = self._entities[idx]
 
-    def on_data_table_row_highlighted(
-        self, event: DataTable.RowHighlighted
-    ) -> None:
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         idx = int(event.row_key.value)
         if 0 <= idx < len(self._entities):
             self._selected_entity = self._entities[idx]
@@ -249,7 +252,9 @@ class ClusterGraphModal(ModalScreen[None]):
 
         dev_text = Text()
         dev_text.append("👑 DEV PRINCIPAL\n", style="bold gold1")
-        dev_text.append(f"{self._target_address[:6]}...{self._target_address[-4:]}\n", style="cyan")
+        dev_text.append(
+            f"{self._target_address[:6]}...{self._target_address[-4:]}\n", style="cyan"
+        )
         dev_text.append("(Cluster Root)", style="dim")
 
         token_text = Text()
@@ -271,6 +276,35 @@ class ClusterGraphModal(ModalScreen[None]):
         )
         return table
 
+    def _enroll_selected_target(self, entity: ClusterEntity) -> None:
+        """Enroll the selected cluster entity into SQLite targets repository."""
+        app = self.app
+        if not hasattr(app, "_service") or not hasattr(app, "_repository"):
+            return
+        now = datetime.now(UTC).isoformat()
+        app._service.add_funder(entity.address, label=f"Cluster {entity.label}")
+        if app._repository.get_target_execution_policy(entity.address) is None:
+            app._service.save_target_execution_policy(
+                TargetExecutionPolicy(
+                    funder_address=entity.address,
+                    monitoring_enabled=True,
+                    execution_mode=TargetExecutionMode.SIMULATED,
+                    quote_size_lamports=25_000_000,
+                    take_profit_pnl_ppm=100_000,
+                    stop_loss_pnl_ppm=-30_000,
+                    max_slippage_bps=500,
+                    priority_fee_microlamports=50_000,
+                    jito_tip_lamports=1_500_000,
+                    updated_at=now,
+                )
+            )
+        if hasattr(app, "_refresh_target_records"):
+            app._refresh_target_records()
+        self.notify(
+            f"Enrolled {entity.address[:8]}... as Tracked Target in SQLite!",
+            severity="information",
+        )
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id
         entity = self._selected_entity
@@ -279,33 +313,12 @@ class ClusterGraphModal(ModalScreen[None]):
             self.dismiss()
         elif btn_id == "btn-track-entity":
             if not entity.actionable_as_target:
-                self.notify(f"{entity.role} is a token/contract, not a wallet to track", severity="warning")
+                self.notify(
+                    f"{entity.role} is a token/contract, not a wallet to track",
+                    severity="warning",
+                )
                 return
-            # Add to SQLite target database immediately via app
-            app = self.app
-            if hasattr(app, "_service") and hasattr(app, "_repository"):
-                from rugbot.tracker.models import TargetExecutionMode, TargetExecutionPolicy
-                from datetime import datetime, UTC
-                now = datetime.now(UTC).isoformat()
-                app._service.add_funder(entity.address, label=f"Cluster {entity.label}")
-                if app._repository.get_target_execution_policy(entity.address) is None:
-                    app._service.save_target_execution_policy(
-                        TargetExecutionPolicy(
-                            funder_address=entity.address,
-                            monitoring_enabled=True,
-                            execution_mode=TargetExecutionMode.SIMULATED,
-                            quote_size_lamports=25_000_000,
-                            take_profit_pnl_ppm=100_000,
-                            stop_loss_pnl_ppm=-30_000,
-                            max_slippage_bps=500,
-                            priority_fee_microlamports=50_000,
-                            jito_tip_lamports=1_500_000,
-                            updated_at=now,
-                        )
-                    )
-                if hasattr(app, "_refresh_target_records"):
-                    app._refresh_target_records()
-                self.notify(f"Enrolled {entity.address[:8]}... as Tracked Target in SQLite!", severity="information")
+            self._enroll_selected_target(entity)
         elif btn_id == "btn-backtest-entity":
             self.dismiss()
             if hasattr(self.app, "action_show_backtester"):

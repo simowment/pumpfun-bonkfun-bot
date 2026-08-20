@@ -591,12 +591,18 @@ class RugbotTuiApp(App[None]):
         Binding("2", "show_launches", "2: Dev History", show=True, priority=True),
         Binding("3", "show_sniper", "3: Sniper", show=True, priority=True),
         Binding("a", "add_target", "A: Add Dev", show=True, priority=True),
-        Binding("f", "show_funding_graph", "F: Cluster Graph", show=True, priority=True),
+        Binding(
+            "f", "show_funding_graph", "F: Cluster Graph", show=True, priority=True
+        ),
         Binding("e", "context_action", "E: Edit Policy", show=True, priority=True),
         Binding("p", "pause_target", "P: Pause", show=True, priority=True),
         Binding("l", "toggle_live_trading", "L: Live/Sim", show=True, priority=True),
-        Binding("h", "context_secondary_action", "H: Sell 50%", show=True, priority=True),
-        Binding("x", "context_dismiss_action", "X: Exit 100%", show=True, priority=True),
+        Binding(
+            "h", "context_secondary_action", "H: Sell 50%", show=True, priority=True
+        ),
+        Binding(
+            "x", "context_dismiss_action", "X: Exit 100%", show=True, priority=True
+        ),
         Binding("slash", "toggle_search", "/: Search", show=True, priority=True),
         Binding("q", "quit", "Q: Quit", show=True, priority=True),
         # Aliases / Background keys
@@ -604,7 +610,9 @@ class RugbotTuiApp(App[None]):
         Binding("f2", "show_backtester", "Backtest", show=False, priority=True),
         Binding("f3", "show_sniper", "Sniper", show=False, priority=True),
         Binding("f4", "show_settings", "Settings", show=False, priority=True),
-        Binding("ctrl+p", "show_command_palette", "Commands", show=False, priority=True),
+        Binding(
+            "ctrl+p", "show_command_palette", "Commands", show=False, priority=True
+        ),
         Binding("s", "show_settings", "Settings", show=False, priority=True),
         Binding("n", "analyze_target", "Add Target", show=False, priority=True),
         Binding("b", "show_backtester", "Backtester", show=False, priority=True),

@@ -83,9 +83,11 @@ class TargetsTable(Widget):
             with Vertical(classes="targets-table-container"):
                 yield DataTable(id="targets-datatable", cursor_type="row")
             yield Static(
-                "[bold cyan][A][/bold cyan] ADD TARGET   "
-                "[bold cyan][P][/bold cyan] PAUSE/RESUME   "
-                "[bold cyan][E][/bold cyan] EDIT POLICY",
+                "[bold cyan][A][/bold cyan] ADD DEV   "
+                "[bold cyan][F][/bold cyan] CLUSTER GRAPH   "
+                "[bold cyan][E][/bold cyan] EDIT   "
+                "[bold cyan][L][/bold cyan] LIVE/SIM   "
+                "[bold cyan][P][/bold cyan] PAUSE",
                 classes="panel-action-bar",
             )
 

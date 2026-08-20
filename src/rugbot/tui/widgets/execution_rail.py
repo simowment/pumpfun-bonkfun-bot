@@ -87,7 +87,11 @@ class ExecutionCard(Widget):
                 yield Button("Sell 50%", id="btn-exec-sell50")
                 yield Button("Simulate", id="btn-exec-simulate")
             yield Static(
-                "[bold cyan][E][/bold cyan] EDIT STRATEGY   [bold cyan][P][/bold cyan] PAUSE/RESUME",
+                "[bold cyan][E][/bold cyan] EDIT   "
+                "[bold cyan][L][/bold cyan] LIVE/SIM   "
+                "[bold cyan][F][/bold cyan] GRAPH   "
+                "[bold cyan][H][/bold cyan] SELL 50%   "
+                "[bold cyan][X][/bold cyan] EXIT 100%",
                 classes="panel-action-bar",
             )
 
