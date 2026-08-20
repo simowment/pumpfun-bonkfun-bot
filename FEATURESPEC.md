@@ -366,25 +366,35 @@ F Project also exposes Notifications as a first-class tool area.
 
 P2 — Backtester
 
-Separate screen/module, as discussed:
+Separate screen/module (F4 Backtest):
 
-known dev
-→ historical launches
-→ realistic entries
-→ price-path replay
-→ exact TP breakpoints
-→ TP hit rate
-→ net EV
-→ historical optimal TP
-→ robust region
+1. Target selection:
+   - Single dev address or multi-wallet cluster.
+   - Auto-fetch historical launches (e.g. 10 to 30 past tokens).
 
-Then:
+2. Execution & Latency Simulation Settings:
+   - **Bundle Invariant :** It is **theoretically impossible to frontrun the dev's own bundle** in the creation block (atomic instruction/bundle). The realistic best-case entry is **Post-Bundle B0** (immediately following the bundle transactions in slot 0).
+   - **Configurable Entry Latency :**
+     - `B0 (Post-Bundle)` : ideal sniper with direct Jito route.
+     - `B1 (+1 slot / ~400ms)` : standard RPC / 1-block delay (enters after bundle + first snipers).
+     - `B2+ (+2+ slots / ~800ms+)` : congested / public bot latency.
+   - **Cost & Sizing Settings :**
+     - Simulated buy size (e.g. 0.010 to 0.50 SOL).
+     - Priority fee & Jito tip simulation.
+     - SL rule (Exit on Dev-Sell vs fixed % SL).
 
-[APPLY TO TARGET]
+3. Mathematical Optimizer & Price Replay :
+   - Replays exact historical bonding curve ticks for each past token.
+   - Evaluates a grid of TP thresholds (e.g. +25%, +50%, +75%, +100%, +150%, +200%, +300%).
+   - Calculates for each TP :
+     - **Hit Rate (Winrate %)**.
+     - **Net Expected Value (Net EV)** : $(\text{Winrate} \times \text{TP}_{\text{net}}) - ((1 - \text{Winrate}) \times \text{SL}_{\text{net}})$.
+     - **Max Drawdown** on past trajectory.
+   - Identifies the **Historical Optimal TP** and the **Robust Region** (stable positive EV zone).
 
-copies the chosen parameters into target configuration.
-
-Backtester informs configuration. It never enters the live snipe path.
+4. One-Click Action:
+   - **[APPLY TO TARGET]** : directly copies the optimal TP, SL, and sizing parameters into the target's live execution policy.
+   - Backtester strictly informs configuration. It never enters the hot live snipe path.
 
 P3 — Tracker / Rugger Intelligence
 

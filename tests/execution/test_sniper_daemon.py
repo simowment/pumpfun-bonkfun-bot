@@ -307,22 +307,14 @@ def test_processed_fixture_reaches_daemon_before_finalized_hydration(
 
     notification = json.dumps(
         {
-            "method": "logsNotification",
-            "params": {
-                "result": {
-                    "context": {"slot": slot},
-                    "value": {
-                        "signature": signature,
-                        "err": None,
-                        "logs": logs,
-                    },
-                }
-            },
+            "txType": "create",
+            "signature": signature,
+            "mint": market,
+            "traderPublicKey": target,
         }
     )
     source = PumpCreateStreamSource(
         wallet=target,
-        websocket_endpoint="wss://rpc.example",
         endpoint="https://rpc.example",
         raw_observation_path=tmp_path / "observations.jsonl",
         handled_ledger=positions,

@@ -121,11 +121,23 @@ PositionExitWorker (TP / SL / sortie manuelle)
   panne Jito ne déclenche pas un envoi RPC implicite. 14 tests route/LIVE/
   simulation/config sont passés ; Ruff ciblé est propre.
 
-## Phase 2 — Target Analytics (POST-P0)
+## Phase 2 — Target Analytics & Backtester (POST-P0)
 
-- [ ] Backtester chronologique sans fuite temporelle.
-- [ ] Optimiseur TP fondé sur les sorties réellement exécutables et nettes de
-  frais, avec taille d'échantillon et stabilité locale.
+- [ ] Auto-Profiler de Mint & Cluster Analyzer :
+  - Analyse automatique du bloc-0 (`getBlock`) à partir d'un mint ou d'un dev pour extraire la taille du bundle (ex: 58 SOL) et la flotte de wallets satellites.
+  - Remontée de la signature de funding (CEX Binance/Coinbase vs Master Wallet) et détection des sous-adresses mères.
+  - Calcul automatique du score de qualification (Winrate ≥ 33% sur les 10 derniers tokens, amplitude ATH > +100%, MC départ ≤ 15k$).
+  - Enrôlement direct comme `Target` dans SQLite et affichage dans l'onglet **Launches** / **Settings** du TUI via raccourci clavier (`T` / `Ctrl+I`).
+- [ ] Backtester chronologique par cible / cluster (Écran F4) :
+  - Invariant économique : **Frontrun du bundle du dev théoriquement impossible au bloc-0** (entrée réaliste = post-bundle B0 ou dégradée en B1/B2+).
+  - Paramètres de simulation configurables :
+    - Décalage de slot d'entrée : `B0 (Post-bundle)`, `B1 (+1 slot / ~400ms)`, `B2+ (+2+ slots / ~800ms+)`.
+    - Sizing de test (SOL), priority fee, tip Jito et règle de sortie (Dev-Sell 100% vs Stop Loss % fixe).
+  - Optimiseur mathématique de Take Profit :
+    - Calcul du Winrate pour chaque palier de TP (`+25%`, `+50%`, `+75%`, `+100%`, `+150%`, `+200%`, `+300%`).
+    - Calcul de l'espérance mathématique nette ($\text{Net EV}$) nette de tous les frais et du glissement post-bundle.
+    - Identification du **TP Optimal historique** et de la **zone de robustesse**.
+  - Action en 1 clic `[Apply to Target]` pour synchroniser les paramètres optimisés dans la configuration de la cible dans le TUI.
 - [ ] Historique des lancements, taux de réussite, market cap d'entrée et
   financement parent d'un wallet cible.
 - [ ] Rapport synthétique `WATCH` / `PASS` fondé sur les données observées.
