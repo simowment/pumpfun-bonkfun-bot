@@ -18,8 +18,6 @@ def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     Returns:
         Configured logger
     """
-    global _loggers
-
     if name in _loggers:
         return _loggers[name]
 

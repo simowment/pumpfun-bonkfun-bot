@@ -8,9 +8,9 @@ from solana.rpc.commitment import Processed
 from solana.rpc.types import TxOpts
 from solders.transaction import Transaction
 
-from core.client import SolanaClient
+from rugbot.execution.rpc_client import SolanaClient
 from rugbot.execution.sender.base import SubmissionResult
-from utils.logger import get_logger
+from rugbot.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

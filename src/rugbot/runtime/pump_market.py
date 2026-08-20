@@ -8,15 +8,14 @@ from typing import TYPE_CHECKING
 
 from solders.pubkey import Pubkey
 
-from core.client import SolanaClient
-from interfaces.core import Platform
-from platforms import get_platform_implementations
 from rugbot.decision.playbook_rules import EntryRuleInput
 from rugbot.decision.sizing import EntryLatencySnapshot
 from rugbot.domain.decisions import AbstainReason, AbstainResult
+from rugbot.domain.fees import FeeConfig
 from rugbot.execution.paper_simulator import PaperStress
 from rugbot.execution.ports import MAX_SLIPPAGE_BPS
 from rugbot.execution.position_runtime import PositionMarketEvidence
+from rugbot.execution.rpc_client import SolanaClient
 from rugbot.ingest.pump_create_observation import (
     decode_pump_create_market_state_observation,
 )
@@ -50,6 +49,7 @@ from rugbot.protocol.pump.quote_engine import (
     CANONICAL_PUMP_PROGRAM_CONFIG_VERSION,
     PoolReserves,
 )
+from rugbot.protocol.pump.v2_builder import BONDING_CURVE_SEED, derive_pump_pda
 from rugbot.protocol.pump.version_registry import (
     PUMP_VERSION_REGISTRY_VERSION,
     PumpFeeScheduleVersion,
@@ -71,20 +71,36 @@ if TYPE_CHECKING:
     )
 
 
+# Live read-only protocol provenance for current curve state.  The slot and
+# fee schedule are not consumed by the online quote path; they only satisfy
+# the pinned decoder's provenance contract for a non-replay read.
+_LIVE_PROTOCOL_SNAPSHOT = PumpProtocolVersionSnapshot(
+    as_of_slot=0,
+    program_id=PUMP_PROGRAM_ID,
+    idl_hash=PINNED_PUMP_IDL_SHA256,
+    global_config_hash="runtime:live-read",
+    program_config_version=CANONICAL_PUMP_PROGRAM_CONFIG_VERSION,
+    fee_config=FeeConfig(
+        version="runtime:live-read",
+        protocol_fee_bps=0,
+        creator_fee_bps=0,
+        is_known=False,
+    ),
+    program_config_source_artifact_version="runtime:live-read",
+    fee_source_artifact_version="runtime:live-read",
+    registry_version=PUMP_VERSION_REGISTRY_VERSION,
+)
+
+
 @dataclass(slots=True)
 class PumpOnlineMarket:
     """Read current Pump bonding-curve state without loading signing keys."""
 
     endpoint: str
     _client: SolanaClient = field(init=False, repr=False)
-    _provider: object = field(init=False, repr=False)
-    _curve_manager: object = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._client = SolanaClient(self.endpoint)
-        implementations = get_platform_implementations(Platform.PUMP_FUN, self._client)
-        self._provider = implementations.address_provider
-        self._curve_manager = implementations.curve_manager
 
     async def close(self) -> None:
         """Close the read-only RPC client owned by this market adapter."""
@@ -249,8 +265,42 @@ class PumpOnlineMarket:
 
     async def _state(self, mint: str) -> dict[str, object]:
         mint_key = Pubkey.from_string(mint)
-        curve = self._provider.derive_pool_address(mint_key)
-        return await self._curve_manager.get_pool_state(curve, commitment="finalized")
+        curve = derive_pump_pda(BONDING_CURVE_SEED, mint_key)
+        account = await self._client.get_account_info(curve, commitment="finalized")
+        if not account.data:
+            raise ValueError(f"No data in bonding curve account {curve}")  # noqa: TRY003
+        curve_state = decode_pump_bonding_curve_account(
+            PumpBondingCurveDecodeRequest(
+                account_state=PumpBondingCurveAccountState(
+                    as_of_slot=0,
+                    account_pubkey=str(curve),
+                    owner_program_id=PUMP_PROGRAM_ID,
+                    raw_account_data=account.data,
+                    source_artifact_version="runtime:live-bonding-curve",
+                    layout_artifact_version=PUMP_BONDING_CURVE_LAYOUT_ARTIFACT_VERSION,
+                ),
+                protocol_snapshot=_LIVE_PROTOCOL_SNAPSHOT,
+                idl_hash=PINNED_PUMP_IDL_SHA256,
+                base_decimals=6,
+                quote_decimals=9,
+                base_mint=str(mint),
+                quote_mint=SOL_PUBKEY,
+            )
+        )
+        if isinstance(curve_state, AbstainResult):
+            raise ValueError(  # noqa: TRY003, TRY004
+                f"bonding curve decode failed: {curve_state.message}"
+            )
+        reserves = bonding_curve_snapshot_to_pool_reserves(curve_state)
+        if isinstance(reserves, AbstainResult):
+            raise ValueError(  # noqa: TRY003, TRY004
+                f"bonding curve reserves failed: {reserves.message}"
+            )
+        return {
+            "virtual_token_reserves": int(curve_state.virtual_token_reserves),
+            "virtual_sol_reserves": int(curve_state.virtual_sol_reserves),
+            "token_total_supply": int(curve_state.token_total_supply),
+        }
 
 
 def _market_cap(state: dict[str, object]) -> int:

@@ -22,7 +22,7 @@ from rugbot.protocol.solana.transfers import parse_sol_transfers
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from core.client import SolanaClient
+    from rugbot.execution.rpc_client import SolanaClient
 
 
 @dataclass(frozen=True, slots=True)

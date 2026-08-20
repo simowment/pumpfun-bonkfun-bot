@@ -28,7 +28,6 @@ from solders.message import Message
 from solders.pubkey import Pubkey
 from solders.transaction import Transaction
 
-from core.client import SolanaClient, set_loaded_accounts_data_size_limit
 from rugbot.domain.amounts import Lamports
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.observations import RawChainObservation
@@ -49,6 +48,10 @@ from rugbot.execution.ports import (
     ExecutionReceipt,
     non_submitting_receipt,
     validate_execution_intent,
+)
+from rugbot.execution.rpc_client import (
+    SolanaClient,
+    set_loaded_accounts_data_size_limit,
 )
 from rugbot.execution.sender import (
     JitoSender,

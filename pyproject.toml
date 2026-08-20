@@ -63,10 +63,6 @@ exclude = [
     "node_modules",
     "site-packages",
     "venv",
-    # Retained legacy compatibility modules; Rugbot uses src/rugbot exclusively.
-    "src/core",
-    "src/platforms",
-    "src/utils",
 ]
 
 line-length = 88

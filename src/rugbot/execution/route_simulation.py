@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 
 from solders.pubkey import Pubkey
 
-from core.client import SolanaClient
 from rugbot.domain.amounts import Lamports
 from rugbot.domain.decisions import AbstainResult
 from rugbot.execution.firewall import FirewallPolicy, validate_pump_v2_instructions
@@ -26,6 +25,7 @@ from rugbot.execution.ports import (
     non_submitting_receipt,
     validate_execution_intent,
 )
+from rugbot.execution.rpc_client import SolanaClient
 from rugbot.execution.sender import JitoSender, RoutingPolicy
 from rugbot.execution.simulation import SimulationError, simulate_unsigned_transaction
 from rugbot.protocol.pump.create_decoder import PUMP_PROGRAM_ID

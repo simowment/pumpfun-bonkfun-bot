@@ -16,7 +16,7 @@ from solders.pubkey import Pubkey
 from solders.signature import Signature
 from solders.transaction import Transaction
 
-from core.client import SolanaClient
+from rugbot.execution.rpc_client import SolanaClient
 
 
 @dataclass(frozen=True, slots=True)

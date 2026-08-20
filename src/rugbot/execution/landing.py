@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from core.client import SolanaClient
+from rugbot.execution.rpc_client import SolanaClient
 
 
 @dataclass(frozen=True, slots=True)

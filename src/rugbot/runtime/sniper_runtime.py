@@ -12,12 +12,15 @@ from typing import TYPE_CHECKING
 from solders.pubkey import Pubkey
 from spl.token.instructions import get_associated_token_address
 
-from core.client import SolanaClient
-from core.pubkeys import TOKEN_2022_PROGRAM, TOKEN_ACCOUNT_RENT_EXEMPT_RESERVE
 from rugbot.domain.decisions import AbstainResult
 from rugbot.execution.live import LivePumpExecutionPort
 from rugbot.execution.route_simulation import SimulationPumpExecutionPort
+from rugbot.execution.rpc_client import SolanaClient
 from rugbot.execution.sender import RoutingPolicy
+from rugbot.protocol.solana.pubkeys import (
+    TOKEN_2022_PROGRAM,
+    TOKEN_ACCOUNT_RENT_EXEMPT_RESERVE,
+)
 from rugbot.runtime.config import CoreSniperConfig, ExecutionMode
 from rugbot.runtime.execution_factory import build_execution_port
 from rugbot.runtime.pump_market import PumpOnlineMarket

@@ -34,7 +34,7 @@ from rugbot.tracker.models import (
     TargetExecutionMode,
     TargetExecutionPolicy,
 )
-from src.utils.logger import get_logger
+from rugbot.utils.logger import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

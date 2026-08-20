@@ -19,8 +19,8 @@ from solders.message import Message
 from solders.pubkey import Pubkey
 from solders.transaction import Transaction
 
-from core.rpc_rate_limiter import TokenBucketRateLimiter
-from utils.logger import get_logger
+from rugbot.execution.rpc_rate_limiter import TokenBucketRateLimiter
+from rugbot.utils.logger import get_logger
 
 if TYPE_CHECKING:
     from solders.hash import Hash

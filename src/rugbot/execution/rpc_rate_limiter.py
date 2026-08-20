@@ -4,7 +4,7 @@ import asyncio
 import math
 import time
 
-from utils.logger import get_logger
+from rugbot.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

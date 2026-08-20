@@ -15,7 +15,7 @@ from solders.pubkey import Pubkey
 from solders.system_program import TransferParams, transfer
 
 from rugbot.execution.sender.base import SubmissionResult
-from utils.logger import get_logger
+from rugbot.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
