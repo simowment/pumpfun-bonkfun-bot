@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from rugbot.execution.route_simulation import SimulationPumpExecutionPort
 from sol_trade_sdk.pump.accounts import (
     TOKEN_2022_PROGRAM,
     TOKEN_ACCOUNT_RENT_EXEMPT_RESERVE,
@@ -33,6 +32,7 @@ from rugbot.runtime.workers.sniper_daemon import (
     ProcessedTargetLaunch,
     SniperDaemonService,
 )
+from rugbot.simulation.route_simulation import SimulationPumpExecutionPort
 from rugbot.storage.database import DatabaseManager
 from rugbot.storage.sqlite_state_store import SqliteStateStore
 from rugbot.storage.tracker import SQLiteTrackerRepository

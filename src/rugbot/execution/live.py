@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import base58
-from rugbot.execution.simulation import SimulationError, simulate_unsigned_transaction
 from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
 from solders.instruction import Instruction
 from solders.keypair import Keypair
@@ -105,6 +104,7 @@ from rugbot.integrations.solana_rpc import (
     SolanaClient,
     set_loaded_accounts_data_size_limit,
 )
+from rugbot.simulation.simulation import SimulationError, simulate_unsigned_transaction
 from rugbot.storage.transaction_state import (
     SqliteTransactionStateStore,
     TransactionIntentRecord,
