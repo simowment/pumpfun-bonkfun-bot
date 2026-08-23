@@ -8,8 +8,8 @@ from pathlib import Path
 
 from aiohttp import web
 
-from rugbot.core.factory import build_ui_runtime
-from rugbot.interfaces.web import create_web_app
+from rugbot.interfaces.web.adapter import create_web_app
+from rugbot.runtime.app import build_ui_runtime
 from rugbot.runtime.config import (
     resolve_config_path,
     resolve_dotenv,
@@ -42,7 +42,10 @@ def main() -> int:
     config_path = resolve_config_path(
         Path(os.environ.get("RUGBOT_CONFIG", "watch.yaml"))
     )
-    core = build_ui_runtime(state_dir=state_dir, config_path=config_path)
+    core = build_ui_runtime(
+        state_dir=state_dir,
+        config_path=config_path if config_path.exists() else None,
+    )
     app = create_web_app(core)
     web.run_app(app, host=host, port=port)
     return 0

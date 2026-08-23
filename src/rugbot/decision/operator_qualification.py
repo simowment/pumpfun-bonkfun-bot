@@ -5,9 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from rugbot.domain.amounts import QuoteBaseUnits, Slot
+from rugbot.domain.amounts import PROBABILITY_PPM_DENOMINATOR, QuoteBaseUnits, Slot
 from rugbot.domain.decisions import AbstainReason
-from rugbot.graph.point_in_time import PROBABILITY_PPM_DENOMINATOR
 
 
 class QualificationStatus(Enum):

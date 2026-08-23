@@ -4,6 +4,9 @@ trades/*
 .pylintrc
 .ruff_cache
 .state/
+tmp_*
+*.sqlite3
+*.db
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -173,3 +176,6 @@ trades/trades.log
 
 # Transcription scratch (audio chunks, temp)
 scratch/
+
+# Deepwork orchestrator state
+.slim/deepwork/

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from rugbot.tracker.models import LAMPORTS_PER_SOL
 
 if TYPE_CHECKING:
-    from rugbot.runtime.wallet_intelligence import (
+    from rugbot.intelligence.wallet_intelligence import (
         WalletIntelligenceReport,
         WalletLaunch,
     )

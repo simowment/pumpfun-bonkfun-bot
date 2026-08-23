@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from typing import TYPE_CHECKING, Any
 
 from rugbot.tracker.models import (
+    AlertOutboxRecord,
     FunderRecord,
     LaunchRecord,
     TargetExecutionMode,
@@ -100,6 +102,22 @@ class SQLiteTrackerRepository:
             );
             CREATE INDEX IF NOT EXISTS idx_tracker_launches_creator ON tracker_launches (creator_wallet);
             CREATE INDEX IF NOT EXISTS idx_tracker_launches_root ON tracker_launches (root_funder);
+
+            CREATE TABLE IF NOT EXISTS tracker_alert_outbox (
+                mint TEXT NOT NULL,
+                consumer TEXT NOT NULL,
+                delivered INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (mint, consumer)
+            );
+            CREATE INDEX IF NOT EXISTS idx_tracker_alert_outbox_consumer
+                ON tracker_alert_outbox (consumer, delivered);
+
+            CREATE TABLE IF NOT EXISTS tracker_launch_activation (
+                address TEXT PRIMARY KEY,
+                activation_slot INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
             """
         )
 
@@ -364,6 +382,10 @@ class SQLiteTrackerRepository:
             for row in cursor.fetchall()
         )
 
+    def get_wallets_by_root_funder(self, root_funder: str) -> tuple[WalletRecord, ...]:
+        """Alias for get_descendants."""
+        return self.get_descendants(root_funder)
+
     def expire_wallets(self, now_iso: str) -> tuple[str, ...]:
         """Mark all expired wallets in the database and return their addresses."""
         conn = self._db.connection
@@ -538,11 +560,17 @@ class SQLiteTrackerRepository:
         )
 
     def get_launches_for_funder(self, root_funder: str) -> tuple[LaunchRecord, ...]:
-        """Fetch all launches associated with a root funder."""
+        """Fetch all launches associated with a root funder, creator wallet, or child cluster wallets."""
         conn = self._db.connection
         cursor = conn.execute(
-            "SELECT * FROM tracker_launches WHERE root_funder = ? ORDER BY created_at DESC",
-            (root_funder,),
+            """
+            SELECT * FROM tracker_launches
+            WHERE root_funder = ?
+               OR creator_wallet = ?
+               OR creator_wallet IN (SELECT address FROM tracker_wallets WHERE root_funder = ?)
+            ORDER BY created_at DESC
+            """,
+            (root_funder, root_funder, root_funder),
         )
         return tuple(
             LaunchRecord(
@@ -561,6 +589,188 @@ class SQLiteTrackerRepository:
             )
             for row in cursor.fetchall()
         )
+
+    def get_launches_by_root_funder(self, root_funder: str) -> tuple[LaunchRecord, ...]:
+        """Alias for get_launches_for_funder."""
+        return self.get_launches_for_funder(root_funder)
+
+    def get_transfers_for_funder(self, root_funder: str) -> tuple[TransferRecord, ...]:
+        """Fetch all transfers associated with a root funder."""
+        conn = self._db.connection
+        cursor = conn.execute(
+            """
+            SELECT * FROM tracker_transfers
+            WHERE root_funder = ?
+               OR from_wallet = ?
+               OR to_wallet = ?
+            ORDER BY slot DESC, timestamp DESC
+            """,
+            (root_funder, root_funder, root_funder),
+        )
+        return tuple(
+            TransferRecord(
+                signature=row["signature"],
+                instruction_index=row["instruction_index"],
+                slot=row["slot"],
+                timestamp=row["timestamp"],
+                from_wallet=row["from_wallet"],
+                to_wallet=row["to_wallet"],
+                amount_lamports=row["amount_lamports"],
+                amount_sol=row["amount_sol"],
+                root_funder=row["root_funder"],
+                depth=row["depth"],
+            )
+            for row in cursor.fetchall()
+        )
+
+    def get_transfers_by_root_funder(
+        self, root_funder: str
+    ) -> tuple[TransferRecord, ...]:
+        """Alias for get_transfers_for_funder."""
+        return self.get_transfers_for_funder(root_funder)
+
+    # --- Alert Outbox ---
+
+    def enqueue_launch_alerts(
+        self,
+        launch: LaunchRecord,
+        consumers: tuple[str, ...],
+        creator_wallet: WalletRecord,
+    ) -> bool:
+        """Insert a launch, its creator-wallet CREATOR update, and outbox rows atomically.
+
+        The launch insert, the creator-wallet status update, and the per-consumer
+        outbox rows commit in one transaction: either all rows persist or none do.
+        Returns True when the launch was newly inserted and False when the mint
+        already exists (in which case nothing is written). A persistence failure
+        propagates after rolling back the whole transaction so the caller can
+        retry without leaving partially persisted CREATOR state.
+        """
+        conn = self._db.connection
+        conn.execute("BEGIN")
+        try:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO tracker_launches (mint, creator_wallet, root_funder, symbol, name, created_signature, created_slot, created_at, depth, funding_signature, funding_amount_lamports, funding_timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        launch.mint,
+                        launch.creator_wallet,
+                        launch.root_funder,
+                        launch.symbol,
+                        launch.name,
+                        launch.created_signature,
+                        launch.created_slot,
+                        launch.created_at,
+                        launch.depth,
+                        launch.funding_signature,
+                        launch.funding_amount_lamports,
+                        launch.funding_timestamp,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                conn.execute("ROLLBACK")
+                return False
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO tracker_wallets (address, root_funder, parent_wallet, depth, status, discovered_at, expires_at, last_active_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(address) DO UPDATE SET
+                        status = excluded.status,
+                        expires_at = excluded.expires_at,
+                        last_active_at = excluded.last_active_at
+                    """,
+                    (
+                        creator_wallet.address,
+                        creator_wallet.root_funder,
+                        creator_wallet.parent_wallet,
+                        creator_wallet.depth,
+                        creator_wallet.status.value,
+                        creator_wallet.discovered_at,
+                        creator_wallet.expires_at,
+                        creator_wallet.last_active_at,
+                    ),
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO tracker_alert_outbox (mint, consumer, delivered, created_at)
+                    VALUES (?, ?, 0, ?)
+                    """,
+                    [
+                        (launch.mint, consumer, launch.created_at)
+                        for consumer in consumers
+                    ],
+                )
+                conn.execute("COMMIT")
+                return True
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    def get_undelivered_alerts(self, consumer: str) -> tuple[AlertOutboxRecord, ...]:
+        """Fetch undelivered alert outbox rows for one consumer, oldest first."""
+        conn = self._db.connection
+        cursor = conn.execute(
+            """
+            SELECT mint, consumer, delivered, created_at
+            FROM tracker_alert_outbox
+            WHERE consumer = ? AND delivered = 0
+            ORDER BY created_at ASC
+            """,
+            (consumer,),
+        )
+        return tuple(
+            AlertOutboxRecord(
+                mint=row["mint"],
+                consumer=row["consumer"],
+                delivered=bool(row["delivered"]),
+                created_at=row["created_at"],
+            )
+            for row in cursor.fetchall()
+        )
+
+    def mark_alerts_delivered(self, consumer: str, mints: tuple[str, ...]) -> None:
+        """Mark the given outbox rows as delivered for one consumer."""
+        if not mints:
+            return
+        conn = self._db.connection
+        conn.executemany(
+            """
+            UPDATE tracker_alert_outbox SET delivered = 1
+            WHERE consumer = ? AND mint = ?
+            """,
+            [(consumer, mint) for mint in mints],
+        )
+
+    # --- Launch Activation Cursors ---
+
+    def set_launch_activation(self, address: str, activation_slot: int) -> None:
+        """Persist the per-address finalized-slot activation cursor."""
+        conn = self._db.connection
+        conn.execute(
+            """
+            INSERT INTO tracker_launch_activation (address, activation_slot, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(address) DO UPDATE SET
+                activation_slot = excluded.activation_slot,
+                updated_at = excluded.updated_at
+            """,
+            (address, activation_slot, int(time.time())),
+        )
+
+    def get_launch_activation(self, address: str) -> int | None:
+        """Fetch the persisted activation cursor for one address, or None."""
+        conn = self._db.connection
+        row = conn.execute(
+            "SELECT activation_slot FROM tracker_launch_activation WHERE address = ?",
+            (address,),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["activation_slot"]
 
     # --- Stats & Search ---
 

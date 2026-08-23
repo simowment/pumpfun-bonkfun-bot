@@ -9,20 +9,20 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from sol_trade_sdk.solana import parse_sol_transfers
 from solders.pubkey import Pubkey
 
-from rugbot.protocol.pump.create_decoder import WSOL_MINT_ID
-from rugbot.protocol.pump.trade_decoder import (
+from rugbot.execution.v2_builder import PUMP_PROGRAM_ID
+from rugbot.ingest.pump.create_decoder import WSOL_MINT_ID
+from rugbot.ingest.pump.trade_decoder import (
     BUY_V2_ACCOUNT_NAMES,
     SELL_V2_ACCOUNT_NAMES,
 )
-from rugbot.protocol.pump.v2_builder import PUMP_PROGRAM_ID
-from rugbot.protocol.solana.transfers import parse_sol_transfers
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from rugbot.execution.rpc_client import SolanaClient
+    from rugbot.integrations.solana_rpc import SolanaClient
 
 
 @dataclass(frozen=True, slots=True)

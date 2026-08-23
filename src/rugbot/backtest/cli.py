@@ -11,7 +11,10 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rugbot.backtest.copytrade import CopyTradeConfig
+from rugbot.backtest.cases.rpc_case_acquisition import (
+    acquire_finalized_rpc_case_observations,
+    build_rpc_case_proofs,
+)
 from rugbot.backtest.dataset import (
     FinalizedBacktestDataset,
     FinalizedBacktestResult,
@@ -22,21 +25,20 @@ from rugbot.backtest.evaluation import (
     FrozenModelManifest,
     build_backtest_report,
 )
-from rugbot.backtest.finalized_trade_builder import (
-    build_finalized_trades_from_observations,
-)
 from rugbot.backtest.io import load_backtest_document
-from rugbot.backtest.observation_trade_join import derive_finalized_trade_joins
-from rugbot.backtest.online_pipeline import (
+from rugbot.backtest.runners.copytrade import CopyTradeConfig
+from rugbot.backtest.runners.online_pipeline import (
     FinalizedBacktestMetadata,
     FinalizedBacktestRunArtifacts,
     run_finalized_backtest_pipeline,
     run_production_backtest_pipeline,
 )
-from rugbot.backtest.qualified_run import QualifiedRunResult
-from rugbot.backtest.rpc_case_acquisition import (
-    acquire_finalized_rpc_case_observations,
-    build_rpc_case_proofs,
+from rugbot.backtest.runners.qualified_run import QualifiedRunResult
+from rugbot.backtest.trajectory.finalized_trade_builder import (
+    build_finalized_trades_from_observations,
+)
+from rugbot.backtest.trajectory.observation_trade_join import (
+    derive_finalized_trade_joins,
 )
 from rugbot.domain.amounts import Slot
 from rugbot.domain.decisions import AbstainReason, AbstainResult

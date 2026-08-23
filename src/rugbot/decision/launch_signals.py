@@ -2,12 +2,24 @@
 
 from dataclasses import dataclass
 
-from rugbot.decision.matcher import LaunchAddressSignal
-from rugbot.domain.amounts import Slot
+from rugbot.domain.account_roles import AddressRole
+from rugbot.domain.amounts import PROBABILITY_PPM_DENOMINATOR, Slot
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.launches import LaunchActorRole, LaunchCreatedV2
-from rugbot.graph.entity_resolution import AddressRole
-from rugbot.graph.point_in_time import PROBABILITY_PPM_DENOMINATOR
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchAddressSignal:
+    """Observed launch address signal from an already decoded launch artifact."""
+
+    as_of_slot: Slot
+    launch_id: str
+    address: str
+    role: AddressRole
+    signal_probability_ppm: int
+    evidence_ids: tuple[str, ...]
+    source_version: str
+
 
 PUMP_CREATE_V2_LAUNCH_SIGNAL_SOURCE_VERSION = "pump-create-v2-launch-signals-v1"
 ACCEPTED_PUMP_CREATE_V2_DECODER_VERSION = "pump-create-v2-instruction-v1"

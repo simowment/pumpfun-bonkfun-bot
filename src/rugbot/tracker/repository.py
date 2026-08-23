@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from rugbot.tracker.models import (
+        AlertOutboxRecord,
         FunderRecord,
         LaunchRecord,
         TargetExecutionPolicy,
@@ -29,6 +30,9 @@ class TrackerRepository(Protocol):
 
     def enable_funder(self, address: str, *, enabled: bool) -> None:
         """Enable or disable tracking for a root funder."""
+
+    def delete_funder(self, address: str) -> None:
+        """Completely remove a root funder and its execution policy."""
 
     def save_target_execution_policy(self, policy: TargetExecutionPolicy) -> None:
         """Persist one execution policy owned by a tracked funder."""
@@ -81,6 +85,28 @@ class TrackerRepository(Protocol):
 
     def get_launches_for_funder(self, root_funder: str) -> tuple[LaunchRecord, ...]:
         """Fetch all launches associated with a root funder."""
+
+    # --- Alert Outbox ---
+    def enqueue_launch_alerts(
+        self,
+        launch: LaunchRecord,
+        consumers: tuple[str, ...],
+        creator_wallet: WalletRecord,
+    ) -> bool:
+        """Insert a launch, its creator-wallet CREATOR update, and outbox rows atomically."""
+
+    def get_undelivered_alerts(self, consumer: str) -> tuple[AlertOutboxRecord, ...]:
+        """Fetch undelivered alert outbox rows for one consumer."""
+
+    def mark_alerts_delivered(self, consumer: str, mints: tuple[str, ...]) -> None:
+        """Mark the given outbox rows as delivered for one consumer."""
+
+    # --- Launch Activation Cursors ---
+    def set_launch_activation(self, address: str, activation_slot: int) -> None:
+        """Persist the per-address finalized-slot activation cursor."""
+
+    def get_launch_activation(self, address: str) -> int | None:
+        """Fetch the persisted activation cursor for one address, or None."""
 
     # --- Stats & Search ---
     def get_summary_stats(self) -> dict[str, int]:

@@ -2,9 +2,8 @@
 
 from dataclasses import dataclass
 
-from rugbot.domain.amounts import Slot
+from rugbot.domain.amounts import PROBABILITY_PPM_DENOMINATOR, Slot
 from rugbot.domain.decisions import AbstainReason, AbstainResult
-from rugbot.graph.point_in_time import PROBABILITY_PPM_DENOMINATOR
 
 
 @dataclass(frozen=True, slots=True)

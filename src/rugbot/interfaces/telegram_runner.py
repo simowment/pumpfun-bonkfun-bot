@@ -7,8 +7,8 @@ import os
 import sys
 from pathlib import Path
 
-from rugbot.core.factory import build_ui_runtime
 from rugbot.interfaces.telegram import TelegramAdapter
+from rugbot.runtime.app import build_ui_runtime
 from rugbot.runtime.config import (
     resolve_config_path,
     resolve_dotenv,

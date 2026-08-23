@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-from rugbot.core.factory import build_ui_runtime
+from rugbot.runtime.app import build_ui_runtime
 from rugbot.runtime.config import (
     ExecutionMode,
     SniperConfigError,
@@ -22,30 +22,11 @@ from rugbot.runtime.config import (
     resolve_state_dir,
 )
 from rugbot.runtime.sniper_runtime import SniperRuntimeError, build_sniper_runtime
-from rugbot.tui.app import (
-    RugbotTuiApp,
-    WalletIntelApp,
-    format_assessment,
-    format_flow,
-    format_graph_map,
-    format_network_endpoint,
-    format_sol,
-    launch_matches,
-    report_delta,
-    short_address,
-)
+from rugbot.tui.app import RugbotTuiApp
 
 __all__ = [
-    "RugbotTuiApp",
-    "WalletIntelApp",
-    "format_assessment",
-    "format_flow",
-    "format_graph_map",
-    "format_network_endpoint",
-    "format_sol",
-    "launch_matches",
-    "report_delta",
-    "short_address",
+    "main",
+    "parse_args",
 ]
 
 
@@ -68,6 +49,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-linked-wallets", type=int, default=8)
     parser.add_argument("--refresh-seconds", type=int, default=15)
     parser.add_argument("--as-of-slot", type=int, default=None)
+    parser.add_argument(
+        "--rpc-http",
+        default=None,
+        help="Override the read-only Solana HTTP RPC endpoint.",
+    )
+    parser.add_argument(
+        "--rpc-wss",
+        default=None,
+        help="Override the native Solana WebSocket endpoint.",
+    )
     parser.add_argument("--theme", default="textual-dark")
     return parser.parse_args(argv)
 
@@ -92,9 +83,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         wallet = config.target.id
 
     endpoint = (
-        os.environ.get("SOLANA_NODE_RPC_ENDPOINT")
+        args.rpc_http
+        or os.environ.get("SOLANA_NODE_RPC_ENDPOINT")
         or os.environ.get("SOLANA_RPC_HTTP")
         or "https://api.mainnet-beta.solana.com"
+    )
+    websocket_endpoint = (
+        args.rpc_wss
+        or os.environ.get("SOLANA_NODE_WSS_ENDPOINT")
+        or os.environ.get("SOLANA_RPC_WEBSOCKET")
     )
 
     if config.execution.mode is ExecutionMode.LIVE:
@@ -114,10 +111,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         wallet=wallet,
         config_path=config_path,
         sniper_runtime=sniper_runtime,
+        endpoint=endpoint,
+        websocket_endpoint=websocket_endpoint,
     )
     app = RugbotTuiApp(
         wallet,
         endpoint=endpoint,
+        websocket_endpoint=websocket_endpoint,
         max_transactions=args.max_transactions,
         max_linked_wallets=args.max_linked_wallets,
         refresh_seconds=args.refresh_seconds,

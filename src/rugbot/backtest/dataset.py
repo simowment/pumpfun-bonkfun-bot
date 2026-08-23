@@ -15,12 +15,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from rugbot.backtest.copytrade import (
-    CopyTradeConfig,
-    CopyTradeHistorySample,
-    CopyTradeLaunchCase,
-    evaluate_copy_trade_launches,
-)
 from rugbot.backtest.evaluation import (
     BacktestConfig,
     BacktestLaunchResult,
@@ -28,19 +22,29 @@ from rugbot.backtest.evaluation import (
     FrozenModelManifest,
     build_backtest_report,
 )
-from rugbot.domain.amounts import QuoteBaseUnits, Slot, TokenBaseUnits
+from rugbot.backtest.runners.copytrade import (
+    CopyTradeConfig,
+    CopyTradeHistorySample,
+    CopyTradeLaunchCase,
+    evaluate_copy_trade_launches,
+)
+from rugbot.domain.amounts import (
+    PROBABILITY_PPM_DENOMINATOR,
+    QuoteBaseUnits,
+    Slot,
+    TokenBaseUnits,
+)
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.launches import LaunchCreatedV2
 from rugbot.domain.observations import RawChainObservation
-from rugbot.domain.trades import TradeSide
-from rugbot.graph.point_in_time import PROBABILITY_PPM_DENOMINATOR
-from rugbot.ingest.pump_create_observation import (
-    decode_pump_create_v2_observation,
-)
-from rugbot.models.outcome_labels import (
+from rugbot.domain.outcome_labels import (
     HorizonOutcomeLabel,
     LaunchOutcomeLabels,
     OutcomeObservationPoint,
+)
+from rugbot.domain.trades import TradeSide
+from rugbot.ingest.pump.pump_create_observation import (
+    decode_pump_create_v2_observation,
 )
 from rugbot.storage.jsonl_observation_store import observation_identity
 

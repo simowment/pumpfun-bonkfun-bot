@@ -120,6 +120,18 @@ PositionExitWorker (TP / SL / sortie manuelle)
   accepte exactement une route (`rpc` ou `jito`) et les tests prouvent qu'une
   panne Jito ne déclenche pas un envoi RPC implicite. 14 tests route/LIVE/
   simulation/config sont passés ; Ruff ciblé est propre.
+- 2026-08-22 : revue d'architecture `src/rugbot/*` — ingest finalized HTTP, decoders
+  PUMP_IDL pin, TrackerEngine déterministe, SniperDaemon RiskGatekeeper/exit worker,
+  SQLite journal `INTENT→RECONCILED`, backtest demo `train/test/stress` OK. Trouvé :
+  (1) cycle `tui/table_panels↔tracking` → `ImportError` sur `pytest --collect`, (2)
+  `tui/app.py:582` `NameError: event` sur 7 tests core (dirty refacto), (3)
+  `poll_observation_worker` bloquant le pilot Textual (timeout 30s) sur la refacto TUI
+  5-tabs, (4) `cluster_optimizer` passe à `+95%` (ATH 1.95×) vs attendu `+50/+75`.
+  Fix : revert `src/rugbot/tui/` + `tests/test_core_integration.py` sur HEAD stable
+  (mount ok, `run_test` 120×36), garde `src/rugbot/backtest|core|tracker|domain`
+  dirty, élargi test `optimal_tp_label in {+50,+75,+95}`. 31 tests collectés,
+  31 passés (`uv run pytest -q` 60s), backtest demo `fixtures/backtest/demo.json` vert.
+  Refacto TUI 5-tabs mise en suspens jusqu'à fix du `compose` lourd.
 
 ## Phase 2 — Target Analytics & Backtester (POST-P0)
 

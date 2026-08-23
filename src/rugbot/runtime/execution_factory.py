@@ -10,10 +10,10 @@ from typing import TYPE_CHECKING
 
 from rugbot.execution.live import LivePumpExecutionPort
 from rugbot.execution.observe import ObserveExecutionPort
-from rugbot.execution.paper import PaperExecutionPort
-from rugbot.execution.route_simulation import SimulationPumpExecutionPort
 from rugbot.execution.sender import JitoSender, RoutingPolicy
 from rugbot.runtime.config import ExecutionMode, SniperExecution
+from rugbot.simulation.paper import PaperExecutionPort
+from rugbot.simulation.route_simulation import SimulationPumpExecutionPort
 
 if TYPE_CHECKING:
     from pathlib import Path

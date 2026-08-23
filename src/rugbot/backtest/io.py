@@ -20,7 +20,7 @@ from rugbot.backtest.evaluation import (
 )
 from rugbot.domain.amounts import Slot
 from rugbot.domain.decisions import AbstainReason, AbstainResult
-from rugbot.models.outcome_labels import (
+from rugbot.domain.outcome_labels import (
     HorizonOutcomeLabel,
     LaunchOutcomeLabels,
 )

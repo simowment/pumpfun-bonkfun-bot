@@ -7,24 +7,24 @@ from typing import TYPE_CHECKING
 from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
-from rugbot.core.commands import BotCommand
+from rugbot.application.commands import BotCommand
 from rugbot.interfaces.base import BaseAdapter
 from rugbot.tracker.events import DecisionEvent, LaunchDetected, TrackerEvent
 
 if TYPE_CHECKING:
-    from rugbot.core.rugbot_core import RugbotCore
+    from rugbot.runtime.app import RugbotApp
 
 
 class TelegramAdapter(BaseAdapter):
-    """Drive one RugbotCore through a Telegram bot, sending and receiving messages.
+    """Drive one RugbotApp through a Telegram bot, sending and receiving messages.
 
     The adapter owns the Telegram transport only; all command behavior lives in
-    the shared ``RugbotCore`` and the command registry.
+    the shared ``RugbotApp`` and the command registry.
     """
 
     def __init__(
         self,
-        core: RugbotCore,
+        core: RugbotApp,
         *,
         token: str,
         chat_id: int,

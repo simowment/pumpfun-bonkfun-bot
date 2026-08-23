@@ -21,7 +21,12 @@ dependencies = [
     "textual>=1.0.0",
     "python-telegram-bot>=22.8",
     "discord-py>=2.7.1",
+    "networkx>=3.0",
+    "sol-trade-sdk",
 ]
+
+[tool.uv.sources]
+sol-trade-sdk = { path = "../sol-trade-sdk-python", editable = true }
 
 [project.optional-dependencies]
 dev = [
@@ -31,6 +36,7 @@ dev = [
 [project.scripts]
 rug_watch = "rugbot.runtime.cli:main"
 rug_wallet = "rugbot.runtime.wallet_cli:main"
+rug_target = "rugbot.runtime.wallet_cli:main"
 rug_wallet_tui = "rugbot.runtime.wallet_tui:main"
 rug_tui = "rugbot.runtime.wallet_tui:main"
 rug_discord = "rugbot.interfaces.discord:main"

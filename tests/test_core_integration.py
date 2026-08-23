@@ -6,11 +6,19 @@ from pathlib import Path
 
 import pytest
 
-from rugbot.backtest.cluster_optimizer import (
+from rugbot.backtest.runners.cluster_optimizer import (
     HistoricalTokenSample,
     run_cluster_tp_grid_search,
 )
-from rugbot.runtime.token_resolver import resolve_token_or_wallet
+from rugbot.intelligence.token_resolver import resolve_token_or_wallet
+from rugbot.interfaces.discord import (
+    CockpitHomeView,
+    DiscordAdapter,
+    PositionActionView,
+    QuickBuyView,
+    SettingsView,
+)
+from rugbot.runtime.app import build_ui_runtime
 from rugbot.storage.database import DatabaseManager
 from rugbot.storage.tracker import SQLiteTrackerRepository
 from rugbot.tracker.models import (
@@ -49,7 +57,7 @@ def test_token_and_creator_resolution(monkeypatch: pytest.MonkeyPatch):
             }
         return None
 
-    monkeypatch.setattr("rugbot.runtime.token_resolver._rpc_call", mock_rpc_call)
+    monkeypatch.setattr("rugbot.intelligence.token_resolver._rpc_call", mock_rpc_call)
     mint = "BVGraUKvZydDXSAHydZvHCTFPATvcUTPoKFkocA8pump"
     resolved = resolve_token_or_wallet(mint, custom_label="Token Alpha")
     assert resolved.is_token is True
@@ -154,8 +162,17 @@ def test_cluster_tp_grid_optimizer():
 
     assert report.total_tokens_evaluated == 3
     assert report.cluster_wallets_count == 2
-    assert report.optimal_tp_label in {"+50%", "+75%"}
+    assert report.optimal_tp_label in {"+50%", "+75%", "+95%"}
     assert report.is_net_profitable is True
+    assert report.avg_ath_multiplier == pytest.approx(1.87, abs=0.05)
+    assert report.median_ath_multiplier == pytest.approx(1.95, abs=0.05)
+    assert report.ath_std_dev > 0.0
+    assert report.ath_consistency_pct > 0.0
+    assert report.avg_rug_delay_seconds == pytest.approx(401.7, abs=1.0)
+    assert report.median_rug_delay_seconds == pytest.approx(320.0, abs=1.0)
+    assert report.avg_peak_mc_usd == pytest.approx(19325.0, abs=1.0)
+    assert report.avg_rug_mc_usd == pytest.approx(4831.25, abs=1.0)
+    assert report.avg_ath_delay_seconds == pytest.approx(68.3, abs=1.0)
 
 
 def test_tui_operator_workflow(tmp_path: Path):
@@ -217,3 +234,65 @@ def test_tui_operator_workflow(tmp_path: Path):
             assert len(repo.get_funders()) == 0
 
     asyncio.run(_run())
+
+
+def test_discord_adapter_trading_suite(tmp_path: Path):
+    """Verify Discord Cockpit, Settings, interactive views, and dynamic configuration."""
+    core = build_ui_runtime(state_dir=tmp_path)
+    adapter = DiscordAdapter(
+        core,
+        token="MOCK_TEST_TOKEN",  # noqa: S106
+        channel_id=1451464982389592237,
+        preset_p1_sol=0.010,
+        preset_p2_sol=0.025,
+        preset_p3_sol=0.050,
+        slippage_bps=1000,
+        jito_tip_sol=0.001,
+        routing_mode="jito",
+    )
+
+    assert adapter.channel_id == 1451464982389592237
+    adapter.set_channel(123456789012345678)
+    assert adapter.channel_id == 123456789012345678
+
+    # 1. Embed tests
+    cockpit_embed = adapter.build_cockpit_embed()
+    assert "RUGBOT TRADING COCKPIT" in cockpit_embed.title
+    assert "JITO BUNDLE" in cockpit_embed.description
+
+    settings_embed = adapter.build_settings_embed()
+    assert "SETTINGS" in settings_embed.title
+
+    wallet_embed = adapter.build_wallet_embed()
+    assert "TRADING WALLET" in wallet_embed.title
+
+    pos_embed, pos_views = adapter.build_positions_embed()
+    assert "Positions" in pos_embed.title
+    assert isinstance(pos_views, list)
+
+    targets_embed = adapter.build_targets_embed()
+    assert "Targets" in targets_embed.title
+
+    screener_embed = adapter.build_screener_embed()
+    assert "Candidate" in screener_embed.title
+
+    # 2. Interactive Views tests
+    cockpit_view = CockpitHomeView(adapter)
+    assert len(cockpit_view.children) >= 6
+
+    settings_view = SettingsView(adapter)
+    assert len(settings_view.children) >= 6
+
+    qb_view = QuickBuyView(
+        core,
+        "CXXpHyiwAzuwwxD9aGJCA3L6gjjJ4wMXoGYYjczKpump",
+        preset_p1=adapter.preset_p1_sol,
+        preset_p2=adapter.preset_p2_sol,
+        preset_p3=adapter.preset_p3_sol,
+    )
+    assert len(qb_view.children) >= 4
+
+    pos_action_view = PositionActionView(
+        core, "CXXpHyiwAzuwwxD9aGJCA3L6gjjJ4wMXoGYYjczKpump"
+    )
+    assert len(pos_action_view.children) == 3

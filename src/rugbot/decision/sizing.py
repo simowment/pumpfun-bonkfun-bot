@@ -12,14 +12,18 @@ from rugbot.decision.snapshots import (
     RugTimingSnapshot,
     validate_decision_snapshot_bundle_with_policy,
 )
-from rugbot.domain.amounts import Lamports, QuoteBaseUnits, Slot
+from rugbot.domain.amounts import (
+    PROBABILITY_PPM_DENOMINATOR,
+    Lamports,
+    QuoteBaseUnits,
+    Slot,
+)
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.quotes import ExecutableQuote, QuotePath
-from rugbot.graph.wallet_churn import (
+from rugbot.tracker.wallet_churn import (
     OPERATOR_WALLET_CHURN_SNAPSHOT_VERSION,
 )
 
-PROBABILITY_PPM_DENOMINATOR = 1_000_000
 MAX_SUPPORTED_DECIMALS = 18
 Q05_PROBABILITY_PPM = 50_000
 Q10_PROBABILITY_PPM = 100_000

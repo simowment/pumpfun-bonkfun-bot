@@ -15,27 +15,27 @@ from rugbot.decision.operator_qualification import (
     QualificationStatus,
     WalletEntityEvidence,
 )
-from rugbot.domain.decisions import AbstainReason, AbstainResult
-from rugbot.domain.launches import LaunchCreatedV2
-from rugbot.graph.entity_resolution import AddressRole
-from rugbot.graph.rugger_protection import (
+from rugbot.decision.rugger_protection import (
     FreshWalletStatus,
     RuggerProtectionSnapshot,
     WalletFreshnessEvidence,
     WalletTransferRange,
 )
-from rugbot.graph.wallet_churn import (
-    OPERATOR_WALLET_CHURN_SNAPSHOT_VERSION,
-    OperatorWalletChurnSnapshot,
-    WalletChurnAddress,
-    WalletChurnStatus,
-)
+from rugbot.domain.account_roles import AddressRole
+from rugbot.domain.decisions import AbstainReason, AbstainResult
+from rugbot.domain.launches import LaunchCreatedV2
 from rugbot.runtime.config import (
     CoreSniperConfig,
     ExecutionMode,
     SniperExecution,
     SniperTarget,
     TargetKind,
+)
+from rugbot.tracker.wallet_churn import (
+    OPERATOR_WALLET_CHURN_SNAPSHOT_VERSION,
+    OperatorWalletChurnSnapshot,
+    WalletChurnAddress,
+    WalletChurnStatus,
 )
 
 WATCH_OPTIONAL_EVIDENCE = frozenset({"first_buyer", "transaction_slot_account_state"})

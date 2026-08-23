@@ -152,7 +152,22 @@ Rules:
 
 Read `references/textual-layout.md` and `references/verification.md` when implementing unfamiliar framework behavior.
 
-## 8. Visual system
+## 8. Application organization
+
+ASSERT: The `App` subclass MUST be a thin shell.
+
+- The App owns construction, lifecycle, top-level navigation/composition, dispatch, worker entry points, and typed message wiring.
+- Widgets own their local DOM, reactive UI state, and local event translation; emit typed messages upward (see §7).
+- `Screen`/`ModalScreen` are ONLY for distinct or blocking modes (see §7).
+- Stateful managers exist ONLY for real workflow state/behavior; one typed App reference is allowed when simpler than callback plumbing.
+- Stateless rendering/update logic uses focused module-level functions; a class MUST NOT be a namespace.
+- Styling lives in external TCSS (`CSS_PATH`) or justified component `DEFAULT_CSS`; inline App CSS blocks are INVALID.
+- Repeated panel/command selection uses data-driven dispatch maps, not branching.
+- No mixin-based god-App split; no ceremonial Protocols, result wrappers, callback bundles, or base managers.
+- No speculative manager/plugin/tab/key infrastructure.
+- Prune before splitting; verify behavior and visuals after each batch (see §11).
+
+## 9. Visual system
 
 ASSERT: The visual system MUST remain intentionally small.
 
@@ -178,7 +193,7 @@ Rules:
 - Visual hierarchy MUST use weight, spacing, alignment, case, contrast, and separators before adding containers.
 - Large ASCII branding MUST NOT consume space needed by the primary task.
 
-## 9. Anti-AI-slop bans
+## 10. Anti-AI-slop bans
 
 The following are INVALID unless a product contract explicitly requires them:
 
@@ -196,7 +211,7 @@ The following are INVALID unless a product contract explicitly requires them:
 - clever labels that reduce precision
 - copying web-dashboard card patterns without terminal justification
 
-## 10. Mandatory visual verification
+## 11. Mandatory visual verification
 
 A UI change is NOT complete because it compiles or because event tests pass.
 
@@ -219,7 +234,7 @@ If visual rendering cannot be inspected, report `VISUAL VERIFICATION INCOMPLETE`
 
 Read `references/verification.md` before declaring UI work complete.
 
-## 11. Output contract
+## 12. Output contract
 
 For completed TUI work, report ONLY:
 

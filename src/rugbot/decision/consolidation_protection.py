@@ -7,10 +7,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rugbot.domain.amounts import Slot, TokenBaseUnits
+from rugbot.domain.amounts import (
+    PROBABILITY_PPM_DENOMINATOR,
+    Slot,
+    TokenBaseUnits,
+)
 from rugbot.domain.decisions import AbstainReason, AbstainResult
-from rugbot.graph.point_in_time import PROBABILITY_PPM_DENOMINATOR
-from rugbot.graph.wallet_behavior import (
+from rugbot.intelligence.wallet_behavior import (
     CanonicalTransferEvidence,
     WalletAssetKind,
 )

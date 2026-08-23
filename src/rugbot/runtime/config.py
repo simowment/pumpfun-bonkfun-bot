@@ -239,7 +239,12 @@ def resolve_dotenv(*, include_signing: bool = False) -> None:
         "SOLANA_NODE_RPC_ENDPOINT",
         "SOLANA_NODE_WSS_ENDPOINT",
         "GMGN_API_KEY",
+        "HELIUS_API_KEY",
+        "DISCORD_TOKEN",
+        "DISCORD_CHANNEL_ID",
+        "DISCORD_ALLOWED_USER_IDS",
     }
+
     if include_signing:
         allowed.add("SOLANA_PRIVATE_KEY")
     paths = (Path.cwd() / ".env", Path(__file__).resolve().parents[3] / ".env")

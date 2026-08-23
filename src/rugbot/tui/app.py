@@ -42,15 +42,24 @@ from textual.widgets import (
     TabPane,
 )
 
-from rugbot.backtest.cluster_optimizer import (
+from rugbot.backtest.runners.cluster_optimizer import (
     HistoricalTokenSample,
     run_cluster_tp_grid_search,
 )
-from rugbot.core.factory import build_ui_runtime
 from rugbot.domain.decisions import AbstainReason, AbstainResult
+from rugbot.domain.transfers import SolTransfer
+from rugbot.ingest.pump.models import TokenLaunch
 from rugbot.ingest.rpc_observer import AiohttpRpcTransport
-from rugbot.protocol.pump.models import TokenLaunch
-from rugbot.protocol.solana.models import SolTransfer
+from rugbot.intelligence.token_resolver import resolve_token_or_wallet
+from rugbot.intelligence.wallet_intelligence import (
+    MIN_REPEAT_LAUNCH_EVIDENCE,
+    WalletIntelligenceReport,
+    WalletLaunch,
+    WalletLink,
+    WalletNode,
+    scan_wallet_intelligence,
+)
+from rugbot.runtime.app import build_ui_runtime
 from rugbot.runtime.config import (
     SniperConfigError,
     load_sniper_config,
@@ -59,15 +68,6 @@ from rugbot.runtime.config import (
     resolve_dotenv,
     resolve_state_dir,
     save_sniper_document,
-)
-from rugbot.runtime.token_resolver import resolve_token_or_wallet
-from rugbot.runtime.wallet_intelligence import (
-    MIN_REPEAT_LAUNCH_EVIDENCE,
-    WalletIntelligenceReport,
-    WalletLaunch,
-    WalletLink,
-    WalletNode,
-    scan_wallet_intelligence,
 )
 from rugbot.tracker.events import (
     DecisionEvent,
@@ -113,37 +113,41 @@ from rugbot.tui.formatters import (
     report_delta,
     short_address,
 )
-from rugbot.tui.widgets.activity import ActivityItem, EmptyStateView, LiveActivityView
-from rugbot.tui.widgets.backtest_matrix_view import BacktestMatrixWidget
-from rugbot.tui.widgets.cluster_graph_view import ClusterGraphWidget
-from rugbot.tui.widgets.execution_rail import ExecutionCard
-from rugbot.tui.widgets.graph_modal import ClusterGraphModal
-from rugbot.tui.widgets.header import CompactHeader
-from rugbot.tui.widgets.help_modal import HelpCheatsheetScreen
-from rugbot.tui.widgets.inspector import (
+from rugbot.tui.widgets import (
+    ActivityItem,
+    BacktestMatrixWidget,
+    ClusterGraphModal,
+    ClusterGraphWidget,
+    CompactHeader,
+    DetailInspectModal,
     DevHistoryCard,
+    EmptyStateView,
     EventInspector,
     EventLogTicker,
+    ExecutionCard,
+    FunderCardInfo,
+    HelpCheatsheetScreen,
+    LiveActivityView,
     OperatorStage,
+    PositionExecutionPanel,
     RiskBar,
     TargetProfileCard,
+    TargetsTable,
     TokenDetailCard,
+    WalletPnlHistory,
+    WalletPnlPanel,
+    WalletRiskPanel,
+    WatchingView,
 )
-from rugbot.tui.widgets.modal import DetailInspectModal
-from rugbot.tui.widgets.pnl import WalletPnlHistory, WalletPnlPanel
-from rugbot.tui.widgets.position_panel import PositionExecutionPanel
-from rugbot.tui.widgets.targets_table import TargetsTable
-from rugbot.tui.widgets.wallet_risk import WalletRiskPanel
-from rugbot.tui.widgets.watching import FunderCardInfo, WatchingView
 
 if TYPE_CHECKING:
-    from rugbot.core.rugbot_core import RugbotCore
     from rugbot.ingest.rpc_observer import RpcHttpTransport
+    from rugbot.runtime.app import RugbotApp
     from rugbot.runtime.event_bus import EventBus
-    from rugbot.runtime.sniper_daemon import SniperDaemonService
     from rugbot.runtime.sniper_runtime import SniperRuntime
-    from rugbot.runtime.tracker_service import TrackerService
+    from rugbot.runtime.workers.sniper_daemon import SniperDaemonService
     from rugbot.storage.tracker import SQLiteTrackerRepository
+    from rugbot.tracker.service import TrackerService
 
 __all__ = [
     "RugbotTuiApp",
@@ -267,9 +271,7 @@ class RugbotTuiApp(App[None]):
     }
 
     #dashboard-layout.compact #dashboard-top-row #execution-card {
-        width: 100%;
-        min-width: 0;
-        height: 10;
+        display: none;
     }
 
     #dashboard-layout.compact #dashboard-bottom-row {
@@ -759,7 +761,7 @@ class RugbotTuiApp(App[None]):
         theme: str = "textual-dark",
         enable_live: bool = False,
         transport: RpcHttpTransport | None = None,
-        core: RugbotCore | None = None,
+        core: RugbotApp | None = None,
         sniper_daemon: SniperDaemonService | None = None,
         sniper_runtime: SniperRuntime | None = None,
     ) -> None:
@@ -787,20 +789,31 @@ class RugbotTuiApp(App[None]):
         # Drive the TUI from the shared RugbotCore facade. When no core is
         # injected, compose one through the canonical factory so the app never
         # builds its own runtime stack.
-        self._core = (
-            core
-            if core is not None
-            else build_ui_runtime(
+        if core is not None:
+            self._core = core
+        elif self._websocket_endpoint is not None:
+            self._core = build_ui_runtime(
+                state_dir=self._state_dir,
+                wallet=wallet,
+                config_path=self._config_path,
+                sniper_runtime=sniper_runtime,
+                sniper_daemon=sniper_daemon,
+                endpoint=self._endpoint,
+                websocket_endpoint=self._websocket_endpoint,
+                transport=self._transport,
+            )
+        else:
+            self._core = build_ui_runtime(
                 state_dir=self._state_dir,
                 wallet=wallet,
                 config_path=self._config_path,
                 sniper_runtime=sniper_runtime,
                 sniper_daemon=sniper_daemon,
             )
-        )
 
         # Activity cache for instant causal lookup
         self._activity_events: dict[str, ActivityItem] = {}
+        self._rendered_launch_mints: set[str] = set()
         # Live funder balances and token holdings cache
         self._funder_balances: dict[str, int] = {}
         self._funder_tokens: dict[str, list[dict[str, Any]]] = {}
@@ -1372,8 +1385,48 @@ class RugbotTuiApp(App[None]):
                 self._start_sniper_daemon(),
                 name="sniper_daemon_start",
             )
-        # Start live observation worker
+        self.run_worker(self._start_tracking(), name="tracked_launch_start")
+        # Historical discovery only. New-launch alerts are WSS-driven.
         self.run_worker(self._poll_observation_worker(), name="observation_worker")
+
+    async def _start_tracking(self) -> None:
+        """Start WSS tracking and render launch alerts left in the TUI outbox."""
+
+        try:
+            await self._core.start()
+            self._refresh_header_counts()
+            await self._drain_tui_outbox()
+        except Exception as error:
+            self.notify(
+                f"Launch tracking failed to start: {type(error).__name__}",
+                severity="error",
+            )
+            raise
+
+    async def _drain_tui_outbox(self) -> None:
+        """Render durable launch alerts created while this TUI was offline."""
+
+        for alert in self._repository.get_undelivered_alerts("tui"):
+            launch = self._repository.get_launch(alert.mint)
+            if launch is None:
+                continue
+            self._on_domain_event(
+                LaunchDetected(
+                    root_funder=launch.root_funder,
+                    wallet=launch.creator_wallet,
+                    timestamp=launch.created_at,
+                    data={
+                        "symbol": launch.symbol,
+                        "name": launch.name,
+                        "mint": launch.mint,
+                        "creator": launch.creator_wallet,
+                        "root_funder": launch.root_funder,
+                        "depth": launch.depth,
+                        "slot": launch.created_slot,
+                        "signature": launch.created_signature,
+                    },
+                )
+            )
 
     async def _start_sniper_daemon(self) -> None:
         """Start recovery and exit management for an injected local daemon."""
@@ -1394,6 +1447,7 @@ class RugbotTuiApp(App[None]):
     async def on_unmount(self) -> None:
         """Release the shared sniper runtime or daemon on application exit."""
 
+        await self._core.stop()
         if self._sniper_runtime is not None:
             await self._sniper_runtime.close()
         elif self._sniper_daemon is not None:
@@ -1737,6 +1791,8 @@ class RugbotTuiApp(App[None]):
             token_name = event.data.get("name", "")
             token_mint = event.data.get("mint", "")
             sig = event.data.get("signature", "")
+            if token_mint:
+                row_id = f"launch_{token_mint}"
         elif isinstance(event, (TransferDetected, WalletFunded)):
             amount = event.data.get("lamports")
             sig = event.data.get("signature", "")
@@ -1760,13 +1816,28 @@ class RugbotTuiApp(App[None]):
             latency_summary=latency_summary,
             signal=event_type,
         )
+        if row_id in self._activity_events:
+            if isinstance(event, LaunchDetected) and token_mint:
+                self._repository.mark_alerts_delivered("tui", (token_mint,))
+            return
         self._activity_events[row_id] = item
 
         # Incremental insert into LiveActivityView
         try:
             self.query_one("#live-activity-view", LiveActivityView).add_event(item)
         except Exception:
-            pass
+            if isinstance(event, LaunchDetected):
+                self._activity_events.pop(row_id, None)
+            raise
+
+        if isinstance(event, LaunchDetected) and token_mint:
+            self._rendered_launch_mints.add(token_mint)
+            self._repository.mark_alerts_delivered("tui", (token_mint,))
+            self.notify(
+                f"New ${token_sym} created by {event.wallet[:8]}…",
+                severity="information",
+                timeout=10,
+            )
 
         self._refresh_tables()
         self._refresh_watching_view()
@@ -1790,6 +1861,23 @@ class RugbotTuiApp(App[None]):
             header.wallets_count = len(funders) + len(non_funder_wallets)
             header.launches_count = len(launches)
             header.execution_mode = self._current_execution_mode()
+            launch_observation = self._core.launch_observation
+            tracking_status = (
+                launch_observation.status.value
+                if launch_observation is not None
+                else "stopped"
+            )
+            header.stream_status = tracking_status
+            tracking_labels = {
+                "pumpportal_live": "ONLINE PUMPPORTAL",
+                "wss_live": "ONLINE WSS",
+                "http_catchup": "DEGRADED HTTP CATCH-UP",
+                "disconnected": "OFFLINE",
+                "stopped": "STOPPED",
+            }
+            self.query_one(
+                "#live-activity-view", LiveActivityView
+            ).update_tracking_status(tracking_labels.get(tracking_status, "CONNECTING"))
             header.active_positions_count = (
                 len(self._sniper_daemon.snapshot().open_positions)
                 if self._sniper_daemon is not None
@@ -3254,8 +3342,9 @@ class RugbotTuiApp(App[None]):
             await asyncio.sleep(self._refresh_seconds)
 
     def _process_wallet_report(self, report: WalletIntelligenceReport) -> None:
-        """Feed observations into deterministic tracker service."""
+        """Feed historical link evidence into the tracker without live alerts."""
         now_ts = int(datetime.now(UTC).timestamp())
+        discovered_wallet = False
         for edge in report.edges:
             sig = (
                 edge.evidence_ids[0]
@@ -3270,19 +3359,28 @@ class RugbotTuiApp(App[None]):
                 recipient=edge.target,
                 lamports=edge.amount_lamports,
             )
-            self._service.handle_transfer(transfer)
-
-        for launch in report.launches:
-            t_launch = TokenLaunch(
-                signature=launch.signature,
-                slot=launch.slot,
-                timestamp=now_ts,
-                creator=launch.creator,
-                mint=launch.mint,
-                symbol=launch.symbol,
-                name=launch.name,
+            discovered_wallet = (
+                bool(self._service.handle_transfer(transfer)) or discovered_wallet
             )
-            self._service.handle_launch(t_launch)
+        for launch in (*report.launches, *report.linked_launches):
+            if launch.created_at is None:
+                continue
+            self._service.record_historical_launch(
+                TokenLaunch(
+                    signature=launch.signature,
+                    slot=launch.slot,
+                    timestamp=launch.created_at,
+                    creator=launch.creator,
+                    mint=launch.mint,
+                    symbol=launch.symbol,
+                    name=launch.name,
+                )
+            )
+        if discovered_wallet:
+            self.run_worker(
+                self._core.refresh_launch_observation(),
+                name="tracked_launch_refresh",
+            )
 
     # --- Settings loading & saving ---
     def _load_settings_complete(self) -> None:

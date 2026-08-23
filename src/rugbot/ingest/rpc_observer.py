@@ -63,7 +63,7 @@ RpcHttpTransport: TypeAlias = Callable[
     [str, bytes], Awaitable[RpcHttpResponse] | RpcHttpResponse
 ]
 RpcObservationResult: TypeAlias = tuple[RawChainObservation, ...] | AbstainResult
-FinalizedTransactionResult: TypeAlias = RawChainObservation | None | AbstainResult
+FinalizedTransactionResult: TypeAlias = RawChainObservation | AbstainResult | None
 
 
 class _InvalidHistoryCursorError(ValueError):
@@ -415,7 +415,7 @@ async def observe_address(  # noqa: C901, PLR0911, PLR0912, PLR0913
 async def observe_finalized_transaction(  # noqa: C901, PLR0911, PLR0913
     signature: str,
     *,
-    expected_slot: int,
+    expected_slot: int | None,
     endpoint: str,
     source_id: str,
     observer_id: str = "rpc-observer",
@@ -427,31 +427,35 @@ async def observe_finalized_transaction(  # noqa: C901, PLR0911, PLR0913
 
     A processed stream notification is only a trigger. The returned
     observation is emitted only after finalized ``getTransaction`` and
-    finalized block ordering agree on the slot and transaction index.
+    finalized block ordering agree on the slot and transaction index. When a
+    provider does not publish the transaction slot, the finalized transaction
+    supplies it instead of accepting an approximate head slot.
 
-    Returns ``None`` while finalization has not reached ``expected_slot`` or
-    when the transaction failed, allowing a stream source to retry or skip.
+    Returns a stale/missing abstention while finalization is unavailable and
+    ``None`` when the finalized transaction failed, allowing the stream source
+    to retry or skip without inventing evidence.
     """
 
     if not _valid_signature(signature):
         return _abstain(
             AbstainReason.UNKNOWN_PROTOCOL_STATE,
             "stream notification contained an invalid signature",
-            as_of_slot=expected_slot,
+            as_of_slot=expected_slot if expected_slot is not None else -1,
         )
-    if not _non_negative_int(expected_slot):
+    if expected_slot is not None and not _non_negative_int(expected_slot):
         return _abstain(
             AbstainReason.UNKNOWN_PROTOCOL_STATE,
             "stream notification contained an invalid slot",
             as_of_slot=-1,
         )
     rpc_transport = transport or AiohttpRpcTransport()
+    request_slot = expected_slot if expected_slot is not None else 0
     finalized_result = await _read_result(
         rpc_transport,
         endpoint=endpoint,
         method="getSlot",
         params=({"commitment": FINALIZED},),
-        as_of_slot=expected_slot,
+        as_of_slot=request_slot,
     )
     if isinstance(finalized_result, AbstainResult):
         return finalized_result
@@ -460,9 +464,9 @@ async def observe_finalized_transaction(  # noqa: C901, PLR0911, PLR0913
         return _abstain(
             AbstainReason.UNKNOWN_PROTOCOL_STATE,
             "getSlot returned an invalid finalized slot",
-            as_of_slot=expected_slot,
+            as_of_slot=request_slot,
         )
-    if finalized_slot < expected_slot:
+    if expected_slot is not None and finalized_slot < expected_slot:
         return _abstain(
             AbstainReason.STALE_STATE,
             "finalized slot has not reached streamed transaction",
@@ -496,13 +500,14 @@ async def observe_finalized_transaction(  # noqa: C901, PLR0911, PLR0913
         return validated_transaction
     if isinstance(validated_transaction, _FailedFinalizedTransaction):
         return None
+    response_body, observed_slot = validated_transaction
 
     block_result = await _read_result(
         rpc_transport,
         endpoint=endpoint,
         method="getBlock",
         params=(
-            expected_slot,
+            observed_slot,
             {
                 "commitment": FINALIZED,
                 "transactionDetails": "full",
@@ -536,7 +541,7 @@ async def observe_finalized_transaction(  # noqa: C901, PLR0911, PLR0913
         observer_id=observer_id,
         boot_id=resolved_boot_id,
         receive_sequence=receive_sequence,
-        slot=expected_slot,
+        slot=observed_slot,
         parent_slot=None,
         blockhash=None,
         signature=_decode_signature(signature),
@@ -1241,7 +1246,7 @@ def _validated_transaction(  # noqa: PLR0911
     result: object,
     *,
     requested_signature: str,
-    expected_slot: int,
+    expected_slot: int | None,
     finalized_slot: int,
     response_body: bytes,
 ) -> tuple[bytes, int] | AbstainResult:
@@ -1266,7 +1271,11 @@ def _validated_transaction(  # noqa: PLR0911
             "getTransaction execution metadata omitted err",
             as_of_slot=finalized_slot,
         )
-    if not _non_negative_int(slot) or slot > finalized_slot or slot != expected_slot:
+    if (
+        not _non_negative_int(slot)
+        or slot > finalized_slot
+        or (expected_slot is not None and slot != expected_slot)
+    ):
         return _abstain(
             AbstainReason.UNKNOWN_PROTOCOL_STATE,
             "getTransaction returned an inconsistent finalized slot",

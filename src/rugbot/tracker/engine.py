@@ -18,14 +18,15 @@ from rugbot.tracker.events import (
 )
 from rugbot.tracker.models import (
     LAMPORTS_PER_SOL,
+    FunderRecord,
     TrackerConfig,
     WalletRecord,
     WalletStatus,
 )
 
 if TYPE_CHECKING:
-    from rugbot.protocol.pump.models import TokenLaunch
-    from rugbot.protocol.solana.models import SolTransfer
+    from rugbot.domain.transfers import SolTransfer
+    from rugbot.ingest.pump.models import TokenLaunch
 
 
 class TrackerEngine:
@@ -78,6 +79,46 @@ class TrackerEngine:
 
     def is_tracked(self, address: str) -> bool:
         return address in self._tracked_wallets
+
+    def is_active_funder(self, address: str) -> bool:
+        """Return whether the address is currently an active root funder."""
+        return address in self._active_funders
+
+    def reconcile_state(
+        self,
+        enabled_funders: tuple[FunderRecord, ...],
+        active_wallets: tuple[WalletRecord, ...],
+    ) -> None:
+        """Reconcile in-memory state to the canonical repository state.
+
+        Resets the engine to exactly the enabled funders and the active,
+        non-expired descendant wallets of those funders. Funders that were
+        disabled and wallets that expired or were removed externally are dropped;
+        descendants of disabled funders are never restored. This is a silent
+        hydration primitive used on cold start and refresh and emits no events.
+        """
+        enabled = {funder.address for funder in enabled_funders}
+        self._active_funders = set(enabled)
+        self._funder_labels = {
+            funder.address: funder.label for funder in enabled_funders
+        }
+
+        rebuilt: dict[str, WalletRecord] = {}
+        for funder in enabled_funders:
+            rebuilt[funder.address] = WalletRecord(
+                address=funder.address,
+                root_funder=funder.address,
+                parent_wallet=None,
+                depth=0,
+                status=WalletStatus.FUNDER,
+                discovered_at=funder.created_at,
+                expires_at=None,
+                last_active_at=funder.last_seen_at,
+            )
+        for wallet in active_wallets:
+            if wallet.root_funder in enabled:
+                rebuilt[wallet.address] = wallet
+        self._tracked_wallets = rebuilt
 
     @property
     def metrics(self) -> dict[str, int]:
@@ -242,15 +283,32 @@ class TrackerEngine:
 
         return events
 
-    def handle_launch(self, launch: TokenLaunch) -> list[TrackerEvent]:
-        """Process one normalized Pump.fun token launch against the active funding tree."""
-        if launch.mint in self._processed_launches:
-            return []
+    def is_launch_eligible(self, launch: TokenLaunch) -> bool:
+        """Return whether a launch can be committed without mutating engine state.
 
+        A launch is eligible when its mint has not already been processed and its
+        creator is a tracked, non-expired wallet. This is a pure check used by the
+        service before persisting; it never mutates state.
+        """
+        if launch.mint in self._processed_launches:
+            return False
         creator_wallet = self._tracked_wallets.get(launch.creator)
         if creator_wallet is None or creator_wallet.status == WalletStatus.EXPIRED:
-            return []
+            return False
+        return True
 
+    def commit_launch(self, launch: TokenLaunch) -> list[TrackerEvent]:
+        """Apply the launch mutation and emit a LaunchDetected event.
+
+        Called by the service only after the launch, its creator-wallet CREATOR
+        update, and its outbox rows have been durably persisted, so the engine
+        mutation is never left dangling on a persistence failure. Re-checks
+        eligibility defensively and returns an empty list when the launch is no
+        longer committable.
+        """
+        if not self.is_launch_eligible(launch):
+            return []
+        creator_wallet = self._tracked_wallets[launch.creator]
         self._processed_launches.add(launch.mint)
         now_dt = self._clock.now()
         now_iso = now_dt.isoformat()

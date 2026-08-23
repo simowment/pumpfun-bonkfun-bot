@@ -17,13 +17,14 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from itertools import pairwise
 
+from rugbot.domain.amounts import PROBABILITY_PPM_DENOMINATOR
 from rugbot.domain.decisions import AbstainReason, AbstainResult
-from rugbot.graph.wallet_behavior import (
+from rugbot.domain.positions import ExitRuleState
+from rugbot.intelligence.wallet_behavior import (
     CanonicalBuyEvidence,
     WalletAssetKind,
 )
 
-PROBABILITY_PPM_DENOMINATOR = 1_000_000
 MAX_DIP_LEVELS = 3
 MAX_SELL_LEVELS = 5
 MAX_BIG_BUY_LEVELS = 3
@@ -150,16 +151,6 @@ class EntryRuleDecision:
 
 
 @dataclass(frozen=True, slots=True)
-class ExitRuleState:
-    """Immutable position-exit state used to make levels one-shot."""
-
-    filled_take_profit_level_indices: tuple[int, ...] = ()
-    filled_stop_loss_level_indices: tuple[int, ...] = ()
-    filled_big_buy_level_indices: tuple[int, ...] = ()
-    exited_fraction_ppm: int = 0
-
-
-@dataclass(frozen=True, slots=True)
 class ExitRuleInput:
     """Point-in-time position evidence used by the exit evaluator."""
 
@@ -221,9 +212,9 @@ def evaluate_entry_rules(
             EntryRuleAction.WAIT,
             evidence,
             state,
-            None,
-            None,
-            ("snipe_delay_active",),
+            quote_size_lamports=None,
+            dip_level_index=None,
+            reason_codes=("snipe_delay_active",),
         )
 
     if evidence.is_copytrade:
@@ -238,9 +229,9 @@ def evaluate_entry_rules(
                 EntryRuleAction.ABSTAIN,
                 evidence,
                 state,
-                None,
-                None,
-                ("buy_only_once_already_bought",),
+                quote_size_lamports=None,
+                dip_level_index=None,
+                reason_codes=("buy_only_once_already_bought",),
             )
 
     market_cap_error = _market_cap_error(rules, evidence, state)
@@ -252,9 +243,9 @@ def evaluate_entry_rules(
             EntryRuleAction.ABSTAIN,
             evidence,
             state,
-            None,
-            None,
-            ("max_consecutive_losses_reached",),
+            quote_size_lamports=None,
+            dip_level_index=None,
+            reason_codes=("max_consecutive_losses_reached",),
         )
 
     if evidence.is_buy_the_dip:
@@ -268,9 +259,9 @@ def evaluate_entry_rules(
         EntryRuleAction.BUY,
         evidence,
         next_state,
-        base_quote_size_lamports,
-        None,
-        _entry_pass_reasons(rules, evidence),
+        quote_size_lamports=base_quote_size_lamports,
+        dip_level_index=None,
+        reason_codes=_entry_pass_reasons(rules, evidence),
     )
 
 
@@ -841,9 +832,9 @@ def _copytrade_age_error(
             EntryRuleAction.ABSTAIN,
             evidence,
             state,
-            None,
-            None,
-            ("max_token_age_exceeded",),
+            quote_size_lamports=None,
+            dip_level_index=None,
+            reason_codes=("max_token_age_exceeded",),
         )
     return None
 
@@ -873,9 +864,9 @@ def _copytrade_cooldown_error(
             EntryRuleAction.ABSTAIN,
             evidence,
             state,
-            None,
-            None,
-            ("copytrade_cooldown_active",),
+            quote_size_lamports=None,
+            dip_level_index=None,
+            reason_codes=("copytrade_cooldown_active",),
         )
     return None
 
@@ -914,9 +905,9 @@ def _market_cap_error(
             EntryRuleAction.ABSTAIN,
             evidence,
             state,
-            None,
-            None,
-            ("market_cap_below_minimum",),
+            quote_size_lamports=None,
+            dip_level_index=None,
+            reason_codes=("market_cap_below_minimum",),
         )
     if (
         rules.max_market_cap_quote_base_units is not None
@@ -926,9 +917,9 @@ def _market_cap_error(
             EntryRuleAction.ABSTAIN,
             evidence,
             state,
-            None,
-            None,
-            ("market_cap_above_maximum",),
+            quote_size_lamports=None,
+            dip_level_index=None,
+            reason_codes=("market_cap_above_maximum",),
         )
     return None
 
@@ -943,9 +934,9 @@ def _evaluate_dip_levels(
             EntryRuleAction.ABSTAIN,
             evidence,
             state,
-            None,
-            None,
-            ("buy_the_dip_not_configured",),
+            quote_size_lamports=None,
+            dip_level_index=None,
+            reason_codes=("buy_the_dip_not_configured",),
         )
     ath = evidence.ath_market_cap_quote_base_units
     current = evidence.current_market_cap_quote_base_units
@@ -976,17 +967,17 @@ def _evaluate_dip_levels(
                 EntryRuleAction.BUY,
                 evidence,
                 next_state,
-                level.quote_size_lamports,
-                index,
-                (f"buy_the_dip_level_{index}_reached",),
+                quote_size_lamports=level.quote_size_lamports,
+                dip_level_index=index,
+                reason_codes=(f"buy_the_dip_level_{index}_reached",),
             )
     return _entry_decision(
         EntryRuleAction.WAIT,
         evidence,
         state,
-        None,
-        None,
-        ("buy_the_dip_level_not_reached",),
+        quote_size_lamports=None,
+        dip_level_index=None,
+        reason_codes=("buy_the_dip_level_not_reached",),
     )
 
 
@@ -1226,6 +1217,7 @@ def _entry_decision(
     action: EntryRuleAction,
     evidence: EntryRuleInput,
     state: EntryRuleState,
+    *,
     quote_size_lamports: int | None,
     dip_level_index: int | None,
     reason_codes: tuple[str, ...],

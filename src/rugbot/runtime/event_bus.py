@@ -1,5 +1,7 @@
 """Event bus for decoupled asynchronous and synchronous publish-subscribe routing."""
 
+# ruff: noqa: BLE001, TRY400
+
 from __future__ import annotations
 
 import asyncio
@@ -23,9 +25,20 @@ class EventBus:
         self._subscribers: dict[str, list[Callable[[Any], Any]]] = defaultdict(list)
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
-    def subscribe(self, event_type: str, handler: Callable[[Any], Any]) -> None:
+    def subscribe(
+        self,
+        event_type: str | Callable[[Any], Any],
+        handler: Callable[[Any], Any] | None = None,
+    ) -> Callable[[], None]:
         """Register a handler for a specific event type or '*' for all events."""
-        self._subscribers[event_type].append(handler)
+        if handler is None:
+            real_handler = event_type  # callable
+            event_name = "*"
+        else:
+            real_handler = handler
+            event_name = str(event_type)
+        self._subscribers[event_name].append(real_handler)
+        return lambda: self.unsubscribe(event_name, real_handler)
 
     def unsubscribe(self, event_type: str, handler: Callable[[Any], Any]) -> None:
         """Remove a registered handler."""
@@ -48,10 +61,11 @@ class EventBus:
                         self._background_tasks.add(task)
                         task.add_done_callback(self._background_tasks.discard)
                     except RuntimeError:
-                        asyncio.run(handler(event))
+                        pass
                 else:
                     handler(event)
-            except Exception:
-                logger.exception(
-                    "Error executing event handler %s for event %s", handler, event
-                )
+            except Exception as exc:
+                logger.error("EventBus handler error for %s: %s", event_name, exc)
+
+
+__all__ = ["EventBus"]

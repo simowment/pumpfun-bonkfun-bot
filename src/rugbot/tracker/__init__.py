@@ -1,5 +1,7 @@
 """Deterministic on-chain funding-tree tracker package."""
 
+from __future__ import annotations
+
 from rugbot.tracker.clock import Clock, FakeClock, SystemClock
 from rugbot.tracker.engine import TrackerEngine
 from rugbot.tracker.events import (
