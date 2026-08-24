@@ -1,9 +1,7 @@
-"""Durable storage for immutable paper position state."""
+"""Strict (de)serialization for durable paper position state."""
 
 from __future__ import annotations
 
-import json
-import os
 from typing import TYPE_CHECKING, cast
 
 from rugbot.decision.playbook_rules import ExitRuleState
@@ -11,8 +9,7 @@ from rugbot.domain.amounts import Slot, TokenBaseUnits
 from rugbot.execution.position_runtime import PaperPositionState
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-    from pathlib import Path
+    from collections.abc import Mapping
 
 _POSITION_FIELDS = frozenset(
     {
@@ -84,104 +81,6 @@ class PaperPositionStoreError(ValueError):
         return cls("duplicate paper position JSON key")
 
 
-class PaperPositionStore:
-    """Strict atomically rewritten store keyed by canonical ``market_id``."""
-
-    def __init__(self, path: Path) -> None:
-        """Initialize a store without loading signing or execution material."""
-
-        self._path = path
-
-    def read_all(self) -> tuple[PaperPositionState, ...]:
-        """Read all immutable paper positions in canonical market order."""
-
-        if not self._path.exists():
-            return ()
-        try:
-            raw = self._path.read_bytes()
-        except OSError as error:
-            raise PaperPositionStoreError.read_failed() from error
-        try:
-            payload = json.loads(
-                raw.decode("utf-8"),
-                object_pairs_hook=_reject_duplicate_keys,
-                parse_constant=_reject_json_constant,
-            )
-            positions = _positions_from_json(payload)
-        except (PaperPositionStoreError, UnicodeError, ValueError) as error:
-            raise PaperPositionStoreError.malformed_state() from error
-        return tuple(sorted(positions, key=lambda state: state.market_id))
-
-    def get(self, market_id: str) -> PaperPositionState | None:
-        """Return the position for one canonical market identity, if present."""
-
-        _validate_market_id(market_id)
-        return next(
-            (state for state in self.read_all() if state.market_id == market_id),
-            None,
-        )
-
-    def save(self, state: PaperPositionState) -> None:
-        """Durably insert or replace one immutable position snapshot."""
-
-        validated = _validate_state(state)
-        positions = {position.market_id: position for position in self.read_all()}
-        positions[validated.market_id] = validated
-        self._rewrite(tuple(positions.values()))
-
-    def remove(self, market_id: str) -> bool:
-        """Durably remove one position by canonical market identity."""
-
-        _validate_market_id(market_id)
-        positions = {position.market_id: position for position in self.read_all()}
-        if positions.pop(market_id, None) is None:
-            return False
-        self._rewrite(tuple(positions.values()))
-        return True
-
-    def _rewrite(self, positions: Sequence[PaperPositionState]) -> None:
-        validated = _validate_positions(positions)
-        encoded = (
-            json.dumps(
-                [_position_to_json(state) for state in validated],
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            + "\n"
-        ).encode("utf-8")
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = self._path.with_name(f".{self._path.name}.tmp")
-        descriptor: int | None = None
-        try:
-            descriptor = os.open(
-                temporary_path,
-                os.O_CREAT | os.O_TRUNC | os.O_WRONLY,
-                0o600,
-            )
-            _write_all(descriptor, encoded)
-            os.fsync(descriptor)
-            os.close(descriptor)
-            descriptor = None
-            temporary_path.replace(self._path)
-            _fsync_directory(self._path.parent)
-        except OSError as error:
-            raise PaperPositionStoreError.write_failed() from error
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-            try:
-                temporary_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-
-def _positions_from_json(payload: object) -> tuple[PaperPositionState, ...]:
-    if type(payload) is not list:
-        raise PaperPositionStoreError.malformed_state()
-    positions = tuple(_position_from_json(item) for item in payload)
-    return _validate_positions(positions)
-
-
 def _position_from_json(payload: object) -> PaperPositionState:
     data = _exact_mapping(payload, _POSITION_FIELDS, "record")
     return _validate_state(
@@ -251,16 +150,6 @@ def _position_to_json(state: PaperPositionState) -> dict[str, object]:
         },
         "emitted_sell_intent_count": state.emitted_sell_intent_count,
     }
-
-
-def _validate_positions(
-    positions: Sequence[PaperPositionState],
-) -> tuple[PaperPositionState, ...]:
-    validated = tuple(_validate_state(state) for state in positions)
-    market_ids = [state.market_id for state in validated]
-    if len(set(market_ids)) != len(market_ids):
-        raise PaperPositionStoreError.duplicate_market()
-    return tuple(sorted(validated, key=lambda state: state.market_id))
 
 
 def _validate_state(state: object) -> PaperPositionState:  # noqa: C901
@@ -437,40 +326,6 @@ def _validate_index_tuple(value: object, field_name: str) -> None:
         raise PaperPositionStoreError.invalid_field(field_name)
 
 
-def _write_all(descriptor: int, data: bytes) -> None:
-    offset = 0
-    while offset < len(data):
-        written = os.write(descriptor, data[offset:])
-        if written <= 0:
-            raise PaperPositionStoreError.write_failed()
-        offset += written
-
-
-def _fsync_directory(path: Path) -> None:
-    if os.name == "nt":
-        return
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _reject_duplicate_keys(
-    pairs: list[tuple[str, object]],
-) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise PaperPositionStoreError.duplicate_key()
-        result[key] = value
-    return result
-
-
-def _reject_json_constant(value: str) -> None:
-    raise PaperPositionStoreError.invalid_field(value)
-
-
 def paper_position_state_from_json(payload: object) -> PaperPositionState:
     """Decode and strictly validate one persisted paper position snapshot."""
 
@@ -490,7 +345,6 @@ def validate_paper_position_state(state: object) -> PaperPositionState:
 
 
 __all__ = [
-    "PaperPositionStore",
     "PaperPositionStoreError",
     "paper_position_state_from_json",
     "paper_position_state_to_json",

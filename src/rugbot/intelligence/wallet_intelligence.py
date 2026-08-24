@@ -1,7 +1,7 @@
 """Bounded read-only wallet intelligence built from finalized RPC evidence."""
 
 # Parsing hostile RPC JSON is intentionally branch-heavy and fail-closed.
-# ruff: noqa: C901, PLR0911, PLR0912, PLR0913, PLR0915, S105, TRY003
+# ruff: noqa: C901, PLR0911, PLR0912, PLR0913, S105, TRY003
 
 from __future__ import annotations
 
@@ -12,6 +12,11 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import base58
+from sol_trade_sdk.solana.provider_pool import (
+    AiohttpRpcTransport,
+    RpcHttpTransport,
+    RpcProviderPool,
+)
 
 from rugbot.decision.rugger_protection import (
     RuggerProtectionSnapshot,
@@ -26,11 +31,7 @@ from rugbot.ingest.pump.pump_create_observation import (
     decode_pump_create_v2_observation,
 )
 from rugbot.ingest.pump.pump_trade_observation import decode_pump_trade_observation
-from rugbot.ingest.rpc_observer import (
-    AiohttpRpcTransport,
-    RpcHttpTransport,
-    observe_address,
-)
+from rugbot.ingest.rpc_observer import observe_address
 from rugbot.intelligence.gmgn_creator_history import (
     GmgnCreatorHistory,
     creator_history_to_json,
@@ -59,8 +60,8 @@ MAX_HISTORY_PAGES = 100
 MAX_LINKED_WALLETS = 20
 MAX_WALLET_HOPS = 3
 FRESH_WALLET_WINDOW_SLOTS = 10_000
-MIN_REPEAT_LAUNCH_EVIDENCE = 2
 MIN_REPEAT_BUNDLER_MINTS = 2
+RPC_MINIMUM_INTERVAL_SECONDS = 0.125
 SPL_TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 SPL_TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 SPL_TRANSFER_TAG = 3
@@ -79,6 +80,7 @@ class WalletLaunch:
     symbol: str
     creator: str
     position_is_zero_or_one: bool
+    bonding_curve: str
     creation_submitter: str | None = None
     fee_payer: str | None = None
     first_buyer: str | None = None
@@ -102,8 +104,9 @@ class WalletPumpTrade:
 
 @dataclass(frozen=True, slots=True)
 class RepeatBundlerEntity:
-    """Creator bought in the creation slot across multiple finalized mints."""
+    """Wallet bought in the creation slot across multiple mints by one creator."""
 
+    bundler_wallet: str
     entity_creator: str
     mints: tuple[str, ...]
     buy_count: int
@@ -224,6 +227,7 @@ async def scan_wallet_intelligence(
     fresh_wallet_window_slots: int = FRESH_WALLET_WINDOW_SLOTS,
     as_of_slot: int | None = None,
     transport: RpcHttpTransport | None = None,
+    fallback_endpoints: tuple[str, ...] = (),
 ) -> WalletIntelligenceResult:
     """Build a bounded wallet history and rugger-protection evidence graph.
 
@@ -245,7 +249,19 @@ async def scan_wallet_intelligence(
     )
     if validation is not None:
         return validation
-    rpc_transport = transport or AiohttpRpcTransport()
+    rpc_transport = (
+        transport
+        if transport is not None
+        else (
+            RpcProviderPool(
+                (endpoint, *fallback_endpoints),
+                minimum_interval_seconds=RPC_MINIMUM_INTERVAL_SECONDS,
+            )
+            if fallback_endpoints
+            else AiohttpRpcTransport()
+        )
+    )
+    uses_provider_pool = isinstance(rpc_transport, RpcProviderPool)
     observations = await observe_address(
         wallet,
         endpoint=endpoint,
@@ -261,6 +277,7 @@ async def scan_wallet_intelligence(
         ),
         end_slot=as_of_slot,
         transport=rpc_transport,
+        standard_history_only=uses_provider_pool,
     )
     if isinstance(observations, AbstainResult):
         return observations
@@ -314,6 +331,7 @@ async def scan_wallet_intelligence(
                 ),
                 end_slot=as_of_slot,
                 transport=rpc_transport,
+                standard_history_only=uses_provider_pool,
             )
             seen_wallets.add(peer)
             if isinstance(peer_observations, AbstainResult):
@@ -339,9 +357,39 @@ async def scan_wallet_intelligence(
         if len(seen_wallets) > max_linked_wallets + 1:
             break
 
+    return await build_wallet_intelligence_report_from_histories(
+        wallet,
+        histories=histories,
+        history_limits=history_limits,
+        endpoint=endpoint,
+        max_hops=max_hops,
+        fresh_wallet_window_slots=fresh_wallet_window_slots,
+        warnings=tuple(warnings),
+        as_of_slot=cutoff,
+    )
+
+
+async def build_wallet_intelligence_report_from_histories(
+    wallet: str,
+    *,
+    histories: dict[str, tuple[RawChainObservation, ...]],
+    history_limits: dict[str, int],
+    endpoint: str,
+    max_hops: int = MAX_WALLET_HOPS,
+    fresh_wallet_window_slots: int = FRESH_WALLET_WINDOW_SLOTS,
+    warnings: tuple[str, ...] = (),
+    as_of_slot: int | None = None,
+) -> WalletIntelligenceResult:
+    """Analyze finalized wallet histories from live or durable observations."""
+
+    wallet_observations = histories.get(wallet, ())
+    if not wallet_observations:
+        return _abstain("wallet has no cached finalized transaction evidence", -1)
+    cutoff = as_of_slot if as_of_slot is not None else _max_slot(wallet_observations)
     all_transfers: dict[tuple[object, ...], CanonicalTransferEvidence] = {}
     launches_by_wallet: dict[str, tuple[WalletLaunch, ...]] = {}
     trades_by_wallet: dict[str, tuple[WalletPumpTrade, ...]] = {}
+    report_warnings = list(warnings)
     for address, address_observations in histories.items():
         parsed_transfers = _transfers_from_observations(
             address_observations,
@@ -350,7 +398,7 @@ async def scan_wallet_intelligence(
         if isinstance(parsed_transfers, AbstainResult):
             if address == wallet:
                 return parsed_transfers
-            warnings.append(f"linked wallet evidence unavailable: {address}")
+            report_warnings.append(f"linked wallet evidence unavailable: {address}")
             continue
         for transfer in parsed_transfers:
             all_transfers[_transfer_key(transfer)] = transfer
@@ -362,18 +410,21 @@ async def scan_wallet_intelligence(
         if isinstance(launches, AbstainResult):
             if address == wallet:
                 return launches
-            warnings.append(f"linked wallet launch evidence unavailable: {address}")
+            report_warnings.append(
+                f"linked wallet launch evidence unavailable: {address}"
+            )
             continue
         launches_by_wallet[address] = launches
         trades = _trades_from_observations(
             address_observations,
-            observed_wallet=address,
             as_of_slot=cutoff,
         )
         if isinstance(trades, AbstainResult):
             if address == wallet:
                 return trades
-            warnings.append(f"linked wallet trade evidence unavailable: {address}")
+            report_warnings.append(
+                f"linked wallet trade evidence unavailable: {address}"
+            )
             continue
         trades_by_wallet[address] = trades
 
@@ -408,8 +459,8 @@ async def scan_wallet_intelligence(
         trades_by_wallet=trades_by_wallet,
         roles=roles,
         protection=protection,
-        history_limit=max_transactions,
-        warnings=tuple(warnings),
+        history_limit=history_limits[wallet],
+        warnings=tuple(report_warnings),
         as_of_slot=cutoff,
     )
     creator_history, repeat_bundler_entities = await asyncio.gather(
@@ -435,6 +486,9 @@ async def scan_wallet_intelligence(
 def report_to_json(report: WalletIntelligenceReport) -> dict[str, object]:
     """Convert a typed wallet report to a UI-friendly JSON object."""
 
+    repeat_bundler_wallets = {
+        entity.bundler_wallet for entity in report.repeat_bundler_entities
+    }
     return {
         "status": "ok",
         "as_of_slot": report.as_of_slot,
@@ -517,6 +571,7 @@ def report_to_json(report: WalletIntelligenceReport) -> dict[str, object]:
         ],
         "repeat_bundler_entities": [
             {
+                "bundler_wallet": entity.bundler_wallet,
                 "entity_creator": entity.entity_creator,
                 "mints": list(entity.mints),
                 "mint_count": len(entity.mints),
@@ -550,7 +605,15 @@ def report_to_json(report: WalletIntelligenceReport) -> dict[str, object]:
                     "launch_count": node.launch_count,
                     "first_seen_slot": node.first_seen_slot,
                     "last_seen_slot": node.last_seen_slot,
-                    "roles": list(node.roles),
+                    "roles": [
+                        *node.roles,
+                        *(
+                            ("REPEAT_BUNDLER",)
+                            if node.address in repeat_bundler_wallets
+                            and "REPEAT_BUNDLER" not in node.roles
+                            else ()
+                        ),
+                    ],
                     "fresh_wallet_status": node.fresh_wallet_status,
                 }
                 for node in report.nodes
@@ -597,46 +660,13 @@ def rug_evidence_summary(report: WalletIntelligenceReport) -> dict[str, object]:
     early_launch_count = sum(
         launch.position_is_zero_or_one for launch in report.launches
     )
-    total_launch_evidence = report.launch_count + report.linked_launch_count
-    if total_launch_evidence >= MIN_REPEAT_LAUNCH_EVIDENCE:
-        operator_history = "repeat_launch_activity_observed"
-    elif total_launch_evidence == 1:
-        operator_history = "single_launch_observed"
-    else:
-        operator_history = "no_launch_observed"
-
-    flags: list[str] = []
-    if early_launch_count:
-        flags.append("early_position_launch")
-    if report.linked_creator_wallet_count:
-        flags.append("linked_creator_wallet")
-    if report.wallet_switch_candidate:
-        flags.append("wallet_switch_candidate")
-    if fresh_wallet_count:
-        flags.append("fresh_wallet_proven")
-    if multi_hop_count:
-        flags.append("multi_hop_transfer_path")
-    if report.direct_linked_wallet_count:
-        flags.append("direct_wallet_links")
-    if report.repeat_bundler_entities:
-        flags.append("repeat_bundler_candidate")
-
     indexed_created_count = (
         report.creator_history.total_created_count
         if report.creator_history is not None
         else None
     )
-    indexed_operator_history = (
-        "repeat_launch_activity_observed"
-        if indexed_created_count is not None
-        and indexed_created_count >= MIN_REPEAT_LAUNCH_EVIDENCE
-        else "unavailable"
-        if indexed_created_count is None
-        else "single_launch_or_less"
-    )
 
     return {
-        "operator_history": operator_history,
         "launch_count": report.launch_count,
         "linked_launch_count": report.linked_launch_count,
         "early_position_launch_count": early_launch_count,
@@ -652,15 +682,8 @@ def rug_evidence_summary(report: WalletIntelligenceReport) -> dict[str, object]:
         ),
         "native_in_lamports": report.native_in_lamports,
         "native_out_lamports": report.native_out_lamports,
-        "flags": flags,
         "history_is_bounded": True,
-        "indexed_creator_history": indexed_operator_history,
         "indexed_created_count": indexed_created_count,
-        "assessment": (
-            "insufficient_repeat_operator_evidence"
-            if total_launch_evidence < MIN_REPEAT_LAUNCH_EVIDENCE
-            else "repeat_operator_activity_requires_review"
-        ),
     }
 
 
@@ -689,6 +712,8 @@ def _launch_to_json(launch: WalletLaunch) -> dict[str, object]:
         "fee_payer": launch.fee_payer,
         "first_buyer": launch.first_buyer,
         "observed_wallet": launch.observed_wallet,
+        "bonding_curve": launch.bonding_curve,
+        "created_at": launch.created_at,
     }
 
 
@@ -725,10 +750,25 @@ def _build_report(
         transfers=transfers,
         as_of_slot=as_of_slot,
     )
+    trades = tuple(
+        sorted(
+            {
+                (trade.signature, trade.outer_instruction_index): trade
+                for address_trades in trades_by_wallet.values()
+                for trade in address_trades
+            }.values(),
+            key=lambda trade: (
+                trade.slot,
+                trade.transaction_index,
+                trade.outer_instruction_index,
+            ),
+        )
+    )
     all_nodes = {wallet}
     all_nodes.update(peer for link in links for peer in (link.source, link.target))
     all_nodes.update(launches_by_wallet)
     all_nodes.update(role.wallet for role in roles)
+    all_nodes.update(trade.wallet for trade in trades)
     linked_addresses = {
         peer
         for link in links
@@ -820,7 +860,7 @@ def _build_report(
             launch.position_is_zero_or_one for launch in linked_launches
         ),
         transfers=_transfer_rows(transfers),
-        trades=trades_by_wallet.get(wallet, ()),
+        trades=trades,
     )
 
 
@@ -1524,6 +1564,7 @@ def _launches_from_observations(
             symbol=decoded.symbol,
             creator=decoded.creator_pubkey,
             position_is_zero_or_one=decoded.transaction_index in {0, 1},
+            bonding_curve=decoded.bonding_curve_pubkey,
             creation_submitter=decoded.user_pubkey,
             fee_payer=decoded.fee_payer_pubkey,
             first_buyer=decoded.first_buyer_pubkey,
@@ -1543,10 +1584,9 @@ def _launches_from_observations(
 def _trades_from_observations(
     observations: tuple[RawChainObservation, ...],
     *,
-    observed_wallet: str,
     as_of_slot: int,
 ) -> tuple[WalletPumpTrade, ...] | AbstainResult:
-    """Decode finalized Pump trades executed by the observed wallet."""
+    """Decode finalized Pump trades present in the observed wallet history."""
 
     trades: dict[tuple[str, int], WalletPumpTrade] = {}
     for observation in observations:
@@ -1578,8 +1618,6 @@ def _trades_from_observations(
                     observation.slot,
                 )
             wallet = account_pubkeys[trade.user_account_index]
-            if wallet != observed_wallet:
-                continue
             signature = base58.b58encode(observation.signature).decode("ascii")
             item = WalletPumpTrade(
                 slot=int(trade.as_of_slot),
@@ -1628,7 +1666,7 @@ async def _repeat_bundler_entities(
             for mint in mints
         )
     )
-    entity_mints: dict[str, set[str]] = {}
+    bundler_mints: dict[tuple[str, str], set[str]] = {}
     creation_signatures: dict[str, str] = {}
     creation_slots: dict[str, int] = {}
     for mint, resolution in zip(mints, resolutions, strict=True):
@@ -1642,22 +1680,28 @@ async def _repeat_bundler_entities(
             )
         ):
             continue
-        entity_mints.setdefault(resolution.target_wallet, set()).add(mint)
+        for buy in matching_buys:
+            if buy.slot == resolution.creation_slot:
+                bundler_mints.setdefault(
+                    (buy.wallet, resolution.target_wallet), set()
+                ).add(mint)
         creation_signatures[mint] = resolution.creation_signature
         creation_slots[mint] = resolution.creation_slot
 
     result: list[RepeatBundlerEntity] = []
-    for entity, attributed_mints in sorted(entity_mints.items()):
+    for (bundler_wallet, entity), attributed_mints in sorted(bundler_mints.items()):
         if len(attributed_mints) < MIN_REPEAT_BUNDLER_MINTS:
             continue
         matching = tuple(
             trade
             for trade in buys
             if trade.mint in attributed_mints
+            and trade.wallet == bundler_wallet
             and trade.slot == creation_slots[trade.mint]
         )
         result.append(
             RepeatBundlerEntity(
+                bundler_wallet=bundler_wallet,
                 entity_creator=entity,
                 mints=tuple(sorted(attributed_mints)),
                 buy_count=len(matching),

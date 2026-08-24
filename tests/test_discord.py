@@ -148,7 +148,7 @@ async def test_event_embed_builders(discord_adapter):
 @pytest.mark.anyio
 async def test_scan_embed_generation(discord_adapter, core_instance):
     """Verify /scan on-chain evaluation embed with TP optimization and Memecoin Bible verdict."""
-    sample_mint = "E9CqsGL5uXPASB853f87ox8nZVgW7ucoeYMC4bN8pump"
+    sample_mint = "Anq6scgnxpMZvQN19XMSEUYQiDYuqNeh6cMZnN3Cpump"
     candidate = core_instance.screener.scan_and_evaluate(sample_mint)
     embed, view = discord_adapter._build_scan_embed(candidate)
 

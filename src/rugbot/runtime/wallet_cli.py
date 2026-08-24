@@ -22,9 +22,10 @@ from rugbot.intelligence.token_resolver import (
 )
 from rugbot.intelligence.wallet_intelligence import (
     WalletIntelligenceReport,
+    abstention_to_json,
     scan_wallet_intelligence,
 )
-from rugbot.runtime.config import resolve_dotenv
+from rugbot.runtime.config import load_provider_settings, resolve_dotenv
 from rugbot.storage.database import DatabaseManager
 from rugbot.storage.tracker import SQLiteTrackerRepository
 from rugbot.tracker.cluster_graph_model import build_cluster_intelligence_model
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 
 resolve_dotenv()
 HIGH_ATH_CONSISTENCY_THRESHOLD: Final[float] = 70.0
+MIN_REPEAT_COORDINATED_LAUNCHES: Final[int] = 2
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -146,11 +148,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     target_input = target_input.strip()
-    endpoint = (
-        os.environ.get("SOLANA_RPC_HTTP")
-        or os.environ.get("SOLANA_NODE_RPC_ENDPOINT")
-        or "https://api.mainnet-beta.solana.com"
-    )
+    providers = load_provider_settings()
+    endpoint = providers.rpc_http
+    if endpoint is None:
+        print("Error: SOLANA_RPC_HTTP is required.", file=sys.stderr)
+        return 1
     db_path = os.environ.get(
         "RUGBOT_DB_PATH",
         r"C:\Users\got\Documents\code\pumpfun-bonkfun-bot\data\tracker.db",
@@ -160,36 +162,67 @@ def main(argv: Sequence[str] | None = None) -> int:
     repo = SQLiteTrackerRepository(db_mgr)
 
     # 1. Resolve Token or Wallet on-chain
-    resolved = resolve_token_or_wallet(target_input, rpc_url=endpoint)
+    resolved = resolve_token_or_wallet(
+        target_input,
+        rpc_url=endpoint,
+        fallback_endpoints=providers.rpc_http_fallbacks,
+    )
     wallet_address = resolved.target_wallet
     root_funder = resolved.root_funder or wallet_address
     now_iso = datetime.now(UTC).isoformat()
     now_ts = int(datetime.now(UTC).timestamp())
 
-    # 2. Save root funder and creator in repository
-    repo.save_funder(
-        FunderRecord(
-            id=None,
-            address=root_funder,
-            label=resolved.default_label,
-            enabled=True,
-            created_at=now_iso,
-            last_seen_at=now_iso,
-        )
-    )
-
-    # 3. Scan On-Chain Wallet Intelligence
+    # 2. Scan finalized on-chain wallet intelligence before mutating tracking.
     scan_target = root_funder if root_funder != wallet_address else wallet_address
     report = asyncio.run(
         scan_wallet_intelligence(
             scan_target,
             endpoint=endpoint,
             max_transactions=args.max_transactions,
+            fallback_endpoints=providers.rpc_http_fallbacks,
         )
     )
+    if not isinstance(report, WalletIntelligenceReport):
+        payload = abstention_to_json(report)
+        payload["enrolled"] = False
+        payload["enrollment_rejection_reason"] = report.message
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"Wallet intelligence abstained: {payload['message']}")
+        return 2
     target_label = resolved.default_label
     if isinstance(report, WalletIntelligenceReport) and report.repeat_bundler_entities:
         target_label = f"Repeat bundler {wallet_address[:6]}..."
+
+    all_launches = (
+        (*report.launches, *report.linked_launches)
+        if isinstance(report, WalletIntelligenceReport)
+        else ()
+    )
+    finalized_launch_mints = {launch.mint for launch in all_launches}
+    repeat_bundler_mints = {
+        mint
+        for entity in (
+            report.repeat_bundler_entities
+            if isinstance(report, WalletIntelligenceReport)
+            else ()
+        )
+        for mint in entity.mints
+    }
+    enrollment_eligible = (
+        len(finalized_launch_mints) >= MIN_REPEAT_COORDINATED_LAUNCHES
+        and len(repeat_bundler_mints) >= MIN_REPEAT_COORDINATED_LAUNCHES
+    )
+    enrolled = args.enroll and enrollment_eligible
+    enrollment_rejection_reason = (
+        None
+        if not args.enroll or enrolled
+        else "Finalized evidence did not prove at least two coordinated launches."
+    )
+
+    # 3. Persist only repeat coordinated operators explicitly requested for tracking.
+    if enrolled:
         repo.save_funder(
             FunderRecord(
                 id=None,
@@ -201,8 +234,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
 
-    # Save discovered transfers & launches
-    if isinstance(report, WalletIntelligenceReport):
+    if enrolled and isinstance(report, WalletIntelligenceReport):
         for row in report.transfers:
             tw = repo.get_wallet(row.target)
             if tw is None:
@@ -235,7 +267,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
 
-        all_launches = (*report.launches, *report.linked_launches)
         for w_launch in all_launches:
             if repo.get_launch(w_launch.mint) is None:
                 repo.save_launch(
@@ -302,7 +333,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
     # 6. Enroll policy if requested
-    if args.enroll:
+    if enrolled:
         optimal_tp_ppm = (
             int((backtest_report.optimal_tp_multiplier - 1.0) * 1_000_000)
             if backtest_report
@@ -312,7 +343,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             TargetExecutionPolicy(
                 funder_address=root_funder,
                 monitoring_enabled=True,
-                execution_mode=TargetExecutionMode.LIVE,
+                execution_mode=TargetExecutionMode.SIMULATED,
                 quote_size_lamports=int(args.size * 1e9),
                 take_profit_pnl_ppm=optimal_tp_ppm,
                 stop_loss_pnl_ppm=-200_000,
@@ -347,7 +378,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "staged_wallets_count": model.staged_wallets_count,
             "next_deployer_candidate": model.next_deployer_candidate,
             "next_deployer_funding_sol": model.next_deployer_funding_sol,
-            "enrolled": args.enroll,
+            "enrolled": enrolled,
+            "enrollment_rejection_reason": enrollment_rejection_reason,
             "finalized_pump_trades": (
                 [
                     {
@@ -364,6 +396,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "repeat_bundler_entities": (
                 [
                     {
+                        "bundler_wallet": entity.bundler_wallet,
                         "entity_creator": entity.entity_creator,
                         "mints": list(entity.mints),
                         "mint_count": len(entity.mints),
@@ -409,7 +442,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
         }
         print(json.dumps(out_dict, indent=2))
-        return 0
+        return 2 if args.enroll and not enrolled else 0
 
     # Pretty Terminal Presentation
     print("\n" + "=" * 78)
@@ -428,7 +461,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("\n 🎯 REPEAT BUNDLER EVIDENCE:")
         for entity in report.repeat_bundler_entities:
             print(
-                f"   • Entity {entity.entity_creator[:10]}...: "
+                f"   • Bundler {entity.bundler_wallet[:10]}... for "
+                f"entity {entity.entity_creator[:10]}...: "
                 f"{len(entity.mints)} mints / {entity.buy_count} finalized buys"
             )
 
@@ -497,14 +531,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(f"   • Total Fees Deducted:  {total_fees:.4f} SOL")
 
-    if args.enroll:
+    if enrolled:
         print("\n" + "=" * 78)
         print("  TARGET AND POLICY ENROLLED IN TRACKER DATABASE")
         print("  Launch `uv run rug_tui` to monitor live.")
         print("=" * 78)
 
+    if enrollment_rejection_reason is not None:
+        print("\n" + "=" * 78)
+        print("  TARGET NOT ENROLLED")
+        print(f"  {enrollment_rejection_reason}")
+        print("=" * 78)
+
     print()
-    return 0
+    return 2 if args.enroll and not enrolled else 0
 
 
 if __name__ == "__main__":

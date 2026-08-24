@@ -19,8 +19,9 @@ from rugbot.runtime.workers.observation_loop import RpcAddressObservationSource
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from sol_trade_sdk.solana.provider_pool import RpcHttpTransport
+
     from rugbot.domain.observations import RawChainObservation
-    from rugbot.ingest.rpc_observer import RpcHttpTransport
     from rugbot.storage.handled_evidence_ledger import HandledEvidenceLedger
 
 # PumpPortal's free global creation feed requires no RPC subscription. The
@@ -357,7 +358,9 @@ async def _get_processed_slot(
     ).encode()
 
     if transport is not None:
-        from rugbot.ingest.rpc_observer import RpcHttpResponse  # noqa: PLC0415
+        from sol_trade_sdk.solana.provider_pool import (  # noqa: PLC0415
+            RpcHttpResponse,
+        )
 
         response = transport(endpoint, body)
         if asyncio.isfuture(response) or asyncio.iscoroutine(response):

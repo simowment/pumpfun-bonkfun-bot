@@ -34,12 +34,20 @@ def test_repeat_bundler_requires_two_finalized_buys_for_one_entity(
     trades = (
         _trade(mint_a, TradeSide.BUY, 10, "sig-a"),
         _trade(mint_b, TradeSide.BUY, 20, "sig-b"),
+        _trade(
+            mint_a,
+            TradeSide.BUY,
+            10,
+            "single-mint-buyer",
+            wallet="6dSTEN8JwVUBQZfypMaQdozxLQVKm3T7nqgGiFjcvvBe",
+        ),
         _trade(unrelated, TradeSide.SELL, 30, "sig-c"),
     )
 
     result = asyncio.run(_repeat_bundler_entities(trades, endpoint="https://rpc"))
 
     assert len(result) == 1
+    assert result[0].bundler_wallet == "43WTM7ddYoHG44cf1rdr3RXLDJUxHh2vNerDgLgTe5uN"
     assert result[0].entity_creator == entity
     assert result[0].mints == (mint_a, mint_b)
     assert result[0].buy_count == 2
@@ -52,6 +60,8 @@ def _trade(
     side: TradeSide,
     slot: int,
     signature: str,
+    *,
+    wallet: str = "43WTM7ddYoHG44cf1rdr3RXLDJUxHh2vNerDgLgTe5uN",
 ) -> WalletPumpTrade:
     return WalletPumpTrade(
         slot=slot,
@@ -60,5 +70,5 @@ def _trade(
         signature=signature,
         mint=mint,
         side=side,
-        wallet="43WTM7ddYoHG44cf1rdr3RXLDJUxHh2vNerDgLgTe5uN",
+        wallet=wallet,
     )

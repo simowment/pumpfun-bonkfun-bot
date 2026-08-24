@@ -26,7 +26,7 @@ from rugbot.ingest.rpc_account_observer import (
 if TYPE_CHECKING:
     from uuid import UUID
 
-    from rugbot.ingest.rpc_observer import RpcHttpTransport
+    from sol_trade_sdk.solana.provider_pool import RpcHttpTransport
 
 
 @dataclass(frozen=True, slots=True)

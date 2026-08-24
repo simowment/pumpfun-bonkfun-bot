@@ -55,7 +55,27 @@ class PumpBondingCurveDecodeRequest:
 
 
 BondingCurveDecodeResult = PumpBondingCurveAccountSnapshot | AbstainResult
+BondingCurveCreatorDecodeResult = bytes | AbstainResult
 PoolReservesAdapterResult = PoolReserves | AbstainResult
+
+
+def decode_pump_bonding_curve_creator(
+    account_state: PumpBondingCurveAccountState,
+) -> BondingCurveCreatorDecodeResult:
+    """Decode the current creator without requiring quote-specific state."""
+
+    provenance_error = _validate_account_state_provenance(account_state)
+    if provenance_error is not None:
+        return provenance_error
+    layout_error = _validate_account_data_layout_from_state(account_state)
+    if layout_error is not None:
+        return layout_error
+    creator = account_state.raw_account_data[49:81]
+    if not any(creator):
+        return _unknown_protocol(
+            "bonding-curve creator is the zero public key", account_state.as_of_slot
+        )
+    return creator
 
 
 def decode_pump_bonding_curve_account(
@@ -145,9 +165,13 @@ def _validate_request(
 
 
 def _validate_account_state_provenance(
-    request: PumpBondingCurveDecodeRequest,
+    request: PumpBondingCurveDecodeRequest | PumpBondingCurveAccountState,
 ) -> AbstainResult | None:
-    state = request.account_state
+    state = (
+        request.account_state
+        if isinstance(request, PumpBondingCurveDecodeRequest)
+        else request
+    )
     if int(state.as_of_slot) < 0:
         return _unsupported("as_of_slot must be non-negative", state.as_of_slot)
     if not state.account_pubkey:
@@ -271,7 +295,12 @@ def _validate_decimal_and_mint_provenance(
 def _validate_account_data_layout(
     request: PumpBondingCurveDecodeRequest,
 ) -> AbstainResult | None:
-    state = request.account_state
+    return _validate_account_data_layout_from_state(request.account_state)
+
+
+def _validate_account_data_layout_from_state(
+    state: PumpBondingCurveAccountState,
+) -> AbstainResult | None:
     data = state.raw_account_data
     if len(data) < CURRENT_LAYOUT_SIZE:
         return _unsupported(

@@ -10,6 +10,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "cytoscape": "^3.30.4",
+    "echarts": "^5.6.0",
+    "highcharts": "^13.0.1",
     "svelte": "^5.56.9"
   },
   "devDependencies": {

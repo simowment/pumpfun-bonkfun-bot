@@ -11,7 +11,6 @@ from decimal import Decimal
 
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 
-DEFAULT_PUBLIC_API_KEY = "gmgn_solbscbaseethmonadtron"
 DEFAULT_TIMEOUT_SECONDS = 20
 MAX_CREATOR_TOKENS = 5_000
 MIN_PUBKEY_LENGTH = 32
@@ -40,11 +39,6 @@ _READ_ONLY_ENV_KEYS = frozenset(
         "GMGN_API_URL",
         "GMGN_BASE_URL",
         "SOLANA_RPC_HTTP",
-        "SOLANA_NODE_RPC_ENDPOINT",
-        "SOLANA_NODE_WSS_ENDPOINT",
-        "HELIUS_API_KEY",
-        "HELIUS_RPC_URL",
-        "HELIUS_RPC_ENDPOINT",
     }
 )
 
@@ -106,15 +100,15 @@ async def fetch_gmgn_creator_history(  # noqa: PLR0911
     """Fetch creator-wide token history through the official read-only CLI.
 
     The CLI owns GMGN authentication and request details. No signing key or
-    transaction capability is loaded. A public testing key is used when the
-    user has not configured ``GMGN_API_KEY``.
+    transaction capability is loaded. Missing authentication produces a typed
+    abstention instead of silently selecting another provider contract.
     """
 
     if not _looks_like_pubkey(creator):
         return _abstain("creator history requires a valid Solana address")
     if type(timeout_seconds) is not int or timeout_seconds <= 0:
         return _abstain("creator history timeout is invalid")
-    api_key = os.environ.get("GMGN_API_KEY", DEFAULT_PUBLIC_API_KEY).strip()
+    api_key = os.environ.get("GMGN_API_KEY", "").strip()
     if not api_key:
         return _abstain("GMGN_API_KEY is empty")
 
@@ -166,7 +160,7 @@ async def fetch_gmgn_dev(  # noqa: PLR0911
     when the CLI is unavailable, the request fails, or the payload lacks a
     usable creator address. The caller owns fail-closed handling.
     """
-    api_key = os.environ.get("GMGN_API_KEY", DEFAULT_PUBLIC_API_KEY).strip()
+    api_key = os.environ.get("GMGN_API_KEY", "").strip()
     if not api_key:
         return None
     try:

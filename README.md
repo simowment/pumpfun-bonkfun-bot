@@ -151,8 +151,8 @@ between Overview, Launches, and Graph, `4` for Settings, `5` for Buy, and `6`
 for Positions. Press `t` to cycle Textual themes and `q` to quit. The initial
 theme can be selected with
 `--theme nord` (or another installed Textual theme). The
-Overview presents the finalized assessment, configured signer wallet, capital flow,
-signal flags, and data-quality warnings before the detailed evidence. Launches
+Overview presents the configured signer wallet, capital flow, observed activity,
+and data-quality warnings before the detailed evidence. Launches
 combines target and linked-wallet creates, with local search and an `early only`
 filter. Graph shows directional native-transfer edges, wallet roles, and
 wallet-switch candidates. The dashboard also shows refresh deltas and the

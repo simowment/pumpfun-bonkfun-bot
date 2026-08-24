@@ -19,14 +19,12 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, TypeAlias
 
 import base58
+from sol_trade_sdk.solana.provider_pool import AiohttpRpcTransport
 
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.ingest.pump.models import TokenLaunch
 from rugbot.ingest.pump.pump_create_observation import decode_pump_create_v2_observation
-from rugbot.ingest.rpc_observer import (
-    AiohttpRpcTransport,
-    observe_finalized_transaction,
-)
+from rugbot.ingest.rpc_observer import observe_finalized_transaction
 from rugbot.integrations.solana_logs_stream import SolanaLogsStream
 from rugbot.runtime.workers.observation_loop import (
     ObservationBatch,
@@ -36,13 +34,14 @@ from rugbot.runtime.workers.observation_loop import (
 from rugbot.utils.logger import get_logger
 
 if TYPE_CHECKING:
+    from sol_trade_sdk.solana.provider_pool import RpcHttpTransport
+
     from rugbot.domain.launches import LaunchCreatedV2
     from rugbot.domain.observations import RawChainObservation
     from rugbot.ingest.pump.pump_stream import (
         PumpPortalLaunchNotification,
         PumpPortalLaunchStream,
     )
-    from rugbot.ingest.rpc_observer import RpcHttpTransport
     from rugbot.storage.tracker import SQLiteTrackerRepository
     from rugbot.tracker.service import TrackerService
 

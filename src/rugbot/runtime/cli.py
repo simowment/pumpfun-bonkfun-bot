@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from time import sleep
 from typing import TYPE_CHECKING
+
+from sol_trade_sdk.solana.provider_pool import RpcProviderPool
 
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.execution.observe import ObserveExecutionPort
@@ -31,6 +32,7 @@ from rugbot.runtime.config import (
     SniperConfigError,
     SniperTarget,
     TargetKind,
+    load_provider_settings,
     load_sniper_config,
     load_wallet_portfolio,
     resolve_config_path,
@@ -61,12 +63,13 @@ from rugbot.storage.sqlite_state_store import SqliteStateStore, SqliteStateStore
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from sol_trade_sdk.solana.provider_pool import RpcHttpTransport
+
     from rugbot.decision.operator_qualification import (
         OperatorQualification,
         WalletEntityEvidence,
     )
     from rugbot.execution.ports import ExecutionPort, ExecutionReceipt
-    from rugbot.ingest.rpc_observer import RpcHttpTransport
 
 MAX_WATCH_TRANSACTIONS = 20
 
@@ -243,6 +246,7 @@ async def run_wallet_intelligence_cycle(  # noqa: PLR0913
     max_hops: int = 3,
     as_of_slot: int | None = None,
     transport: RpcHttpTransport | None = None,
+    fallback_endpoints: tuple[str, ...] = (),
 ) -> WalletIntelligenceReport | AbstainResult:
     """Run the bounded finalized wallet/operator report without execution."""
 
@@ -255,6 +259,7 @@ async def run_wallet_intelligence_cycle(  # noqa: PLR0913
         max_hops=max_hops,
         as_of_slot=as_of_slot,
         transport=transport,
+        fallback_endpoints=fallback_endpoints,
     )
 
 
@@ -327,23 +332,25 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0
 
     args = build_arg_parser().parse_args(argv)
     resolve_dotenv()
-    endpoint = os.environ.get("SOLANA_RPC_HTTP") or os.environ.get(
-        "SOLANA_NODE_RPC_ENDPOINT"
-    )
+    providers = load_provider_settings()
+    endpoint = providers.rpc_http
     if not endpoint:
         print(
             json.dumps(
                 {
                     "status": "abstain",
                     "reason": AbstainReason.MISSING_FEATURE.value,
-                    "message": (
-                        "SOLANA_RPC_HTTP or SOLANA_NODE_RPC_ENDPOINT is required"
-                    ),
+                    "message": ("SOLANA_RPC_HTTP is required"),
                 },
                 sort_keys=True,
             )
         )
         return 1
+    rpc_transport = (
+        RpcProviderPool((endpoint, *providers.rpc_http_fallbacks))
+        if providers.rpc_http_fallbacks
+        else None
+    )
     if args.wallet is not None and args.portfolio is not None:
         _print_json(
             {
@@ -400,6 +407,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0
                     max_linked_wallets=args.max_linked_wallets,
                     max_hops=args.max_hops,
                     as_of_slot=args.as_of_slot,
+                    fallback_endpoints=providers.rpc_http_fallbacks,
                 )
             )
             intelligence_results[wallet] = (
@@ -530,6 +538,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0
                 state_dir=state_dir,
                 max_transactions=args.max_transactions,
                 execution_port=execution_port,
+                transport=rpc_transport,
                 once=args.once,
                 pretty=args.pretty,
             )
@@ -547,6 +556,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0
                     state_dir=wallet_state_dir,
                     max_transactions=args.max_transactions,
                     execution_port=execution_port,
+                    transport=rpc_transport,
                 )
             )
             results[wallet] = _json_result(result)
@@ -581,15 +591,26 @@ def _portfolio_json(results: dict[str, dict[str, object]]) -> dict[str, object]:
     }
 
 
-async def _run_watch_once(
+async def _run_watch_once(  # noqa: PLR0913
     *,
     config: CoreSniperConfig,
     endpoint: str,
     state_dir: Path,
     max_transactions: int,
     execution_port: ExecutionPort,
+    transport: RpcHttpTransport | None = None,
 ) -> WatchCycleResult | AbstainResult:
     """Run one watch cycle and close its read-only market client."""
+
+    if config.execution.mode is ExecutionMode.OBSERVE:
+        return await run_watch_cycle(
+            config,
+            endpoint=endpoint,
+            state_dir=state_dir,
+            max_transactions=max_transactions,
+            execution_port=execution_port,
+            transport=transport,
+        )
 
     market = PumpOnlineMarket(endpoint)
     try:
@@ -600,6 +621,7 @@ async def _run_watch_once(
             max_transactions=max_transactions,
             execution_port=execution_port,
             market=market,
+            transport=transport,
         )
     finally:
         await market.close()
@@ -614,6 +636,7 @@ async def _run_stream_watch(  # noqa: PLR0913
     execution_port: ExecutionPort,
     once: bool,
     pretty: bool,
+    transport: RpcHttpTransport | None = None,
 ) -> int:
     """Run one-wallet stream-triggered watching on the shared handler path."""
 
@@ -644,13 +667,18 @@ async def _run_stream_watch(  # noqa: PLR0913
         raw_observation_path=state_dir / "observations.jsonl",
         handled_ledger=stream_state,
         max_catchup_transactions=max_transactions,
+        transport=transport,
         processed_handler=(
             sniper_runtime.handle_processed_create
             if sniper_runtime is not None
             else None
         ),
     )
-    market = PumpOnlineMarket(endpoint)
+    market = (
+        None
+        if config.execution.mode is ExecutionMode.OBSERVE
+        else PumpOnlineMarket(endpoint)
+    )
     watch_config = (
         replace(
             config,
@@ -681,7 +709,8 @@ async def _run_stream_watch(  # noqa: PLR0913
                 return 0
     finally:
         await source.close()
-        await market.close()
+        if market is not None:
+            await market.close()
         if sniper_runtime is not None:
             await sniper_runtime.close()
         stream_state.close()

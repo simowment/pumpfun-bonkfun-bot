@@ -4,10 +4,16 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from rugbot.tracker.models import LAMPORTS_PER_SOL
+from rugbot.utils.formatters import (
+    format_age,
+    format_amount,
+    format_network_endpoint,
+    format_sol,
+    format_timestamp,
+    short_address,
+)
 
 if TYPE_CHECKING:
     from rugbot.intelligence.wallet_intelligence import (
@@ -15,70 +21,20 @@ if TYPE_CHECKING:
         WalletLaunch,
     )
 
-SHORT_IDENTIFIER_LIMIT = 14
-
-
-def format_age(timestamp: int | None, current_timestamp: int | None = None) -> str:
-    """Format the relative elapsed age dynamically (e.g. '0s', '3s', '45s', '2m', '1h 12m')."""
-    if timestamp is None or timestamp <= 0:
-        return "—"
-    now_ts = (
-        current_timestamp
-        if current_timestamp is not None
-        else int(datetime.now(UTC).timestamp())
-    )
-    elapsed = max(0, now_ts - timestamp)
-
-    if elapsed < 60:
-        return f"{elapsed}s"
-    if elapsed < 3600:
-        mins = elapsed // 60
-        return f"{mins}m"
-    if elapsed < 86400:
-        hours = elapsed // 3600
-        mins = (elapsed % 3600) // 60
-        return f"{hours}h {mins}m" if mins else f"{hours}h"
-    days = elapsed // 86400
-    return f"{days}d"
-
-
-def format_amount(lamports: int | None) -> str:
-    """Format exact integer lamports as an explicit SOL string (e.g. '3.20 SOL' or '—')."""
-    if lamports is None or lamports <= 0:
-        return "—"
-    return f"{format_sol(lamports)} SOL"
-
-
-def format_sol(lamports: int) -> str:
-    """Format exact integer lamports as a readable decimal SOL string."""
-    if type(lamports) is not int or lamports <= 0:
-        return "0"
-    whole = lamports // LAMPORTS_PER_SOL
-    fraction = f"{lamports % LAMPORTS_PER_SOL:09d}".rstrip("0")
-    return f"{whole}.{fraction}" if fraction else str(whole)
-
-
-def short_address(address: str | None) -> str:
-    """Shorten an address or signature for compact table columns."""
-    if address is None:
-        return "--"
-    if len(address) <= SHORT_IDENTIFIER_LIMIT:
-        return address
-    return f"{address[:6]}...{address[-6:]}"
-
-
-def format_timestamp(ts: int | None) -> str:
-    """Format a unix timestamp as HH:MM:SS."""
-    if not ts or ts <= 0:
-        return "--:--:--"
-    return datetime.fromtimestamp(ts, tz=UTC).strftime("%H:%M:%S")
-
-
-def format_network_endpoint(endpoint: str) -> str:
-    """Extract host name from RPC endpoint URL."""
-    without_scheme = endpoint.split("://", 1)[-1]
-    host_and_port = without_scheme.split("/", 1)[0]
-    return host_and_port.split("?", 1)[0]
+__all__ = [
+    "format_age",
+    "format_amount",
+    "format_currency",
+    "format_flow",
+    "format_graph_map",
+    "format_network_endpoint",
+    "format_sol",
+    "format_timestamp",
+    "generate_sparkline",
+    "launch_matches",
+    "report_delta",
+    "short_address",
+]
 
 
 def launch_matches(launch: WalletLaunch, query: str) -> bool:
@@ -131,13 +87,6 @@ def format_graph_map(report: WalletIntelligenceReport) -> str:
             f"  {direction} DIRECT  {short_address(other)} ({format_sol(edge.amount_lamports)} SOL, {edge.transfer_count} txs)"
         )
     return "\n".join(lines)
-
-
-def format_assessment(report: WalletIntelligenceReport) -> str:
-    """Format quick assessment summary."""
-    if report.wallet_switch_candidate:
-        return "QUALIFIED SWITCH CANDIDATE"
-    return "NOT QUALIFIED"
 
 
 SPARK_LEVELS = (" ", "▂", "▃", "▄", "▅", "▆", "▇", "█")

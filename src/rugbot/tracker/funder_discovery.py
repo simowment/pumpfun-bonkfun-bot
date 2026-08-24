@@ -10,6 +10,7 @@ funding sources. Each branch carries its own funder and typed funding evidence.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -20,12 +21,18 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from rugbot.domain.decisions import AbstainResult
+from rugbot.integrations.solscan import (
+    SolscanClient,
+    SolscanFundingCandidate,
+    SolscanProviderError,
+)
 from rugbot.intelligence.gmgn_creator_history import (
     GmgnCreatorToken,
     fetch_gmgn_creator_history,
     fetch_gmgn_dev,
 )
 from rugbot.intelligence.token_resolver import resolve_token_or_wallet
+from rugbot.runtime.config import load_provider_settings
 from rugbot.tracker.models import (
     FunderRecord,
     TransferRecord,
@@ -123,6 +130,7 @@ async def discover_funder(
     *,
     repository: SQLiteTrackerRepository,
     endpoint: str | None = None,
+    fallback_endpoints: tuple[str, ...] | None = None,
     gmgn_api_key: str | None = None,
 ) -> FunderDiscoveryReport:
     """Trace a token mint or wallet seed to its creator, dev, funders, and stats.
@@ -144,14 +152,24 @@ async def discover_funder(
     Returns:
         A synthesized :class:`FunderDiscoveryReport`.
     """
-    endpoint = endpoint or _resolve_endpoint()
+    providers = load_provider_settings()
+    endpoint = endpoint or providers.rpc_http
+    resolved_fallback_endpoints = (
+        providers.rpc_http_fallbacks
+        if fallback_endpoints is None
+        else fallback_endpoints
+    )
     if not endpoint:
-        raise ValueError("SOLANA_RPC_HTTP or SOLANA_NODE_RPC_ENDPOINT is required")
+        raise ValueError("SOLANA_RPC_HTTP is required")
     if gmgn_api_key:
         os.environ["GMGN_API_KEY"] = gmgn_api_key
     warnings: list[str] = []
 
-    resolved = resolve_token_or_wallet(seed, rpc_url=endpoint)
+    resolved = resolve_token_or_wallet(
+        seed,
+        rpc_url=endpoint,
+        fallback_endpoints=resolved_fallback_endpoints,
+    )
     onchain_creator = resolved.target_wallet
     is_token = resolved.is_token
 
@@ -165,14 +183,42 @@ async def discover_funder(
         else:
             gmgn_dev = dev
 
-    creator_funder, creator_evidence, creator_warning = await _trace_funding(
-        onchain_creator, endpoint
+    subjects = (
+        (onchain_creator,)
+        if gmgn_dev == onchain_creator
+        else (
+            onchain_creator,
+            gmgn_dev,
+        )
     )
+    solscan_candidates: dict[str, SolscanFundingCandidate] = {}
+    if providers.solscan_api_key:
+        try:
+            rows = await asyncio.to_thread(
+                SolscanClient(providers.solscan_api_key).funded_by,
+                subjects,
+            )
+            solscan_candidates = {row.address: row for row in rows}
+        except (OSError, ValueError, SolscanProviderError) as error:
+            warnings.append(f"Solscan funding nomination unavailable: {error}")
+
+    funding_results = await asyncio.gather(
+        *(
+            asyncio.to_thread(
+                _trace_funding,
+                subject,
+                endpoint,
+                solscan_candidate=solscan_candidates.get(subject),
+            )
+            for subject in subjects
+        )
+    )
+    creator_funder, creator_evidence, creator_warning = funding_results[0]
     if creator_warning:
         warnings.append(creator_warning)
 
     if gmgn_dev != onchain_creator:
-        dev_funder, dev_evidence, dev_warning = await _trace_funding(gmgn_dev, endpoint)
+        dev_funder, dev_evidence, dev_warning = funding_results[1]
         if dev_warning:
             warnings.append(dev_warning)
     else:
@@ -298,13 +344,6 @@ def _persist_branch(
         repository.save_transfer(evidence)
 
 
-def _resolve_endpoint() -> str | None:
-    """Resolve the Solana RPC HTTP endpoint from the environment."""
-    return os.environ.get("SOLANA_RPC_HTTP") or os.environ.get(
-        "SOLANA_NODE_RPC_ENDPOINT"
-    )
-
-
 def _rpc_call(endpoint: str, method: str, params: list[object]) -> object:
     """Perform a raw JSON-RPC HTTP call with bounded retries.
 
@@ -359,8 +398,11 @@ def _retry_after_seconds(exc: urllib.error.HTTPError) -> float | None:
         return None
 
 
-async def _trace_funding(
-    subject_wallet: str, endpoint: str
+def _trace_funding(
+    subject_wallet: str,
+    endpoint: str,
+    *,
+    solscan_candidate: SolscanFundingCandidate | None = None,
 ) -> tuple[str | None, TransferRecord | None, str | None]:
     """Trace a subject wallet's first successful incoming SOL transfer.
 
@@ -369,10 +411,65 @@ async def _trace_funding(
     ``getSignaturesForAddress`` paging when the method is unsupported or
     malformed. Returns (funder, evidence, warning).
     """
+    candidate_warning: str | None = None
+    if solscan_candidate is not None:
+        candidate_result = _confirm_solscan_funding(
+            subject_wallet,
+            endpoint,
+            solscan_candidate,
+        )
+        if candidate_result is not None:
+            return candidate_result
+        candidate_warning = "Solscan funder candidate failed finalized RPC confirmation"
+
     fast = _trace_funding_via_transactions(subject_wallet, endpoint)
     if fast is not None:
-        return fast
-    return _trace_funding_via_signatures(subject_wallet, endpoint)
+        return _with_warning(fast, candidate_warning)
+    return _with_warning(
+        _trace_funding_via_signatures(subject_wallet, endpoint),
+        candidate_warning,
+    )
+
+
+def _confirm_solscan_funding(
+    subject_wallet: str,
+    endpoint: str,
+    candidate: SolscanFundingCandidate,
+) -> tuple[str, TransferRecord, None] | None:
+    """Confirm one indexed candidate by decoding its finalized RPC transaction."""
+
+    try:
+        transaction = _rpc_call(
+            endpoint,
+            "getTransaction",
+            [
+                candidate.transaction_signature,
+                {
+                    "commitment": "finalized",
+                    "encoding": "jsonParsed",
+                    "maxSupportedTransactionVersion": 0,
+                },
+            ],
+        )
+    except Exception:
+        return None
+    if not isinstance(transaction, dict):
+        return None
+    evidence = _find_incoming_transfer(transaction, subject_wallet)
+    if evidence is None or evidence.source != candidate.funded_by:
+        return None
+    return evidence.source, _evidence_to_transfer(evidence, subject_wallet), None
+
+
+def _with_warning(
+    result: tuple[str | None, TransferRecord | None, str | None],
+    warning: str | None,
+) -> tuple[str | None, TransferRecord | None, str | None]:
+    if warning is None:
+        return result
+    funder, evidence, fallback_warning = result
+    combined = warning if fallback_warning is None else f"{warning}; {fallback_warning}"
+    return funder, evidence, combined
 
 
 def _trace_funding_via_transactions(

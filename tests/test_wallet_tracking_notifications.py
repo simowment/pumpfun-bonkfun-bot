@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import base58
 import pytest
+from sol_trade_sdk.solana.provider_pool import RpcHttpResponse
 from textual.widgets import DataTable, TabbedContent
 from websockets.asyncio.server import serve
 
@@ -21,7 +22,7 @@ from rugbot.ingest.pump.pump_stream import (
     PumpPortalLaunchNotification,
     parse_pumpportal_notification,
 )
-from rugbot.ingest.rpc_observer import JSON_TRANSACTION_FORMAT, RpcHttpResponse
+from rugbot.ingest.rpc_observer import JSON_TRANSACTION_FORMAT
 from rugbot.integrations.solana_logs_stream import SolanaLogsStream
 from rugbot.runtime.app import build_ui_runtime
 from rugbot.runtime.workers.tracked_launch_observation import (
@@ -265,12 +266,11 @@ async def test_pumpportal_trigger_reaches_finalized_tui_history(
         elif method == "getTransaction":
             return RpcHttpResponse(status=200, body=observation.raw_transaction)
         elif method == "getBlock":
+            assert request["params"][1]["transactionDetails"] == "signatures"
             response = {
                 "jsonrpc": "2.0",
                 "id": 1,
-                "result": {
-                    "transactions": [{"transaction": {"signatures": [signature]}}]
-                },
+                "result": {"signatures": [signature]},
             }
         else:
             raise AssertionError(method)

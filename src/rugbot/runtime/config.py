@@ -6,10 +6,12 @@
 
 import os
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import base58
 import yaml
@@ -159,6 +161,91 @@ class WalletPortfolio:
     wallets: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderSettings:
+    """Validated provider roles used by the read-only tracker runtime."""
+
+    rpc_http: str | None
+    rpc_http_fallbacks: tuple[str, ...]
+    rpc_websocket: str | None
+    solscan_api_key: str | None
+    gmgn_api_key: str | None
+
+
+def load_provider_settings(
+    environment: Mapping[str, str] | None = None,
+) -> ProviderSettings:
+    """Load the canonical provider environment without guessing aliases."""
+
+    values = os.environ if environment is None else environment
+    rpc_http = _optional_provider_url(
+        values.get("SOLANA_RPC_HTTP"),
+        "SOLANA_RPC_HTTP",
+        {"http", "https"},
+    )
+    rpc_http_fallbacks = _provider_url_list(
+        values.get("SOLANA_RPC_HTTP_FALLBACKS"),
+        "SOLANA_RPC_HTTP_FALLBACKS",
+    )
+    rpc_websocket = _optional_provider_url(
+        values.get("SOLANA_RPC_WEBSOCKET"),
+        "SOLANA_RPC_WEBSOCKET",
+        {"ws", "wss"},
+    )
+    return ProviderSettings(
+        rpc_http=rpc_http,
+        rpc_http_fallbacks=rpc_http_fallbacks,
+        rpc_websocket=rpc_websocket,
+        solscan_api_key=_optional_secret(values.get("SOLSCAN_API_KEY")),
+        gmgn_api_key=_optional_secret(values.get("GMGN_API_KEY")),
+    )
+
+
+def _provider_url_list(value: str | None, field_name: str) -> tuple[str, ...]:
+    if value is None or not value.strip():
+        return ()
+    entries = value.split(",")
+    if any(not entry.strip() for entry in entries):
+        raise SniperConfigError(f"{field_name} must not contain empty entries")
+    urls: list[str] = []
+    for entry in entries:
+        validated = _optional_provider_url(entry, field_name, {"http", "https"})
+        if validated is None:
+            raise SniperConfigError(f"{field_name} must not contain empty entries")
+        urls.append(validated)
+    return tuple(urls)
+
+
+def _optional_provider_url(
+    value: str | None,
+    field_name: str,
+    schemes: set[str],
+) -> str | None:
+    if value is None or not value.strip():
+        return None
+    cleaned = value.strip()
+    try:
+        parsed = urlsplit(cleaned)
+    except ValueError as error:
+        raise SniperConfigError(f"{field_name} is not a valid URL") from error
+    if (
+        parsed.scheme not in schemes
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        expected = " or ".join(sorted(f"{scheme}://" for scheme in schemes))
+        raise SniperConfigError(f"{field_name} must use {expected}")
+    return cleaned
+
+
+def _optional_secret(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
 class _StrictLoader(yaml.SafeLoader):
     """YAML loader that rejects duplicate mapping keys."""
 
@@ -235,11 +322,10 @@ def resolve_dotenv(*, include_signing: bool = False) -> None:
 
     allowed = {
         "SOLANA_RPC_HTTP",
+        "SOLANA_RPC_HTTP_FALLBACKS",
         "SOLANA_RPC_WEBSOCKET",
-        "SOLANA_NODE_RPC_ENDPOINT",
-        "SOLANA_NODE_WSS_ENDPOINT",
         "GMGN_API_KEY",
-        "HELIUS_API_KEY",
+        "SOLSCAN_API_KEY",
         "DISCORD_TOKEN",
         "DISCORD_CHANNEL_ID",
         "DISCORD_ALLOWED_USER_IDS",

@@ -117,13 +117,71 @@ class TargetRecord:
     perf_metric: str = "—"
 
 
+class EntityRelation(StrEnum):
+    """Normalized relationship edges between entity nodes."""
+
+    FUNDED_BY = "FUNDED_BY"
+    CREATED = "CREATED"
+    BUNDLED_WITH = "BUNDLED_WITH"
+    TRANSFERRED_TO = "TRANSFERRED_TO"
+
+
+class EntityRole(StrEnum):
+    """Functional role of an address within an operator cluster."""
+
+    FUNDER_HUB = "FUNDER_HUB"
+    MASTER_DEPLOYER = "MASTER_DEPLOYER"
+    SUB_DEPLOYER = "SUB_DEPLOYER"
+    SATELLITE_BUNDLER = "SATELLITE_BUNDLER"
+    TREASURY_SWEEP = "TREASURY_SWEEP"
+    FRESH_BURNER = "FRESH_BURNER"
+    TOKEN_MINT = "TOKEN_MINT"  # noqa: S105
+
+
+@dataclass(frozen=True, slots=True)
+class EntityEdge:
+    """Cryptographic or behavioral edge linking two addresses in an operator cluster."""
+
+    source: str
+    target: str
+    relation: EntityRelation
+    amount_sol: float = 0.0
+    slot: int = 0
+    timestamp: int = 0
+    signature: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorStats:
+    """Statistical distribution profile computed across historical entity launches."""
+
+    sample_size: int = 0
+    prob_2x_pct: float = 0.0
+    prob_3x_pct: float = 0.0
+    median_ath: float = 1.0
+    median_time_to_ath_s: float = 0.0
+    median_time_to_first_sell_s: float = 0.0
+    median_time_to_dump_s: float = 0.0
+    max_drawdown_pct: float = 0.0
+    recommended_tp_pct: float = 50.0
+    recommended_sl_pct: float = 30.0
+    recommended_max_hold_s: float = 90.0
+
+
 @dataclass(frozen=True, slots=True)
 class OperatorEntity:
-    """Canonical representation of a tracked serial developer / funder entity."""
+    """Canonical multi-wallet entity representing a serial operator cluster over time."""
 
     address: str
     label: str
     root_funder: str
+    creator_wallets: tuple[str, ...] = field(default_factory=tuple)
+    funders: tuple[str, ...] = field(default_factory=tuple)
+    master_wallets: tuple[str, ...] = field(default_factory=tuple)
+    bundlers: tuple[str, ...] = field(default_factory=tuple)
+    fresh_wallets: tuple[str, ...] = field(default_factory=tuple)
+    edges: tuple[EntityEdge, ...] = field(default_factory=tuple)
+    stats: OperatorStats = field(default_factory=OperatorStats)
     launches_count: int = 0
     winrate_pct: float = 0.0
     avg_ath_multiplier: float = 1.0
@@ -256,6 +314,9 @@ __all__ = [
     "AlertOutboxRecord",
     "DecisionEvent",
     "DecisionKind",
+    "EntityEdge",
+    "EntityRelation",
+    "EntityRole",
     "FunderRecord",
     "FundingEdge",
     "FundingHop",
@@ -265,6 +326,7 @@ __all__ = [
     "LaunchRecord",
     "MintAddress",
     "OperatorEntity",
+    "OperatorStats",
     "Signature",
     "Slot",
     "TargetExecutionMode",

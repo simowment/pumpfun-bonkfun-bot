@@ -10,14 +10,14 @@ from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import base58
-
-from rugbot.domain.decisions import AbstainReason, AbstainResult
-from rugbot.domain.observations import RawChainObservation
-from rugbot.ingest.rpc_observer import (
+from sol_trade_sdk.solana.provider_pool import (
     AiohttpRpcTransport,
     RpcHttpResponse,
     RpcHttpTransport,
 )
+
+from rugbot.domain.decisions import AbstainReason, AbstainResult
+from rugbot.domain.observations import RawChainObservation
 
 FINALIZED = "finalized"
 ACCOUNT_INFO_ENCODING = "base64"

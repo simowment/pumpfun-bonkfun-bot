@@ -24,6 +24,11 @@ from rich import box
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from sol_trade_sdk.solana.provider_pool import (
+    AiohttpRpcTransport,
+    RpcHttpTransport,
+    RpcProviderPool,
+)
 from solders.pubkey import Pubkey
 from textual import events
 from textual.app import App, ComposeResult
@@ -49,10 +54,8 @@ from rugbot.backtest.runners.cluster_optimizer import (
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.transfers import SolTransfer
 from rugbot.ingest.pump.models import TokenLaunch
-from rugbot.ingest.rpc_observer import AiohttpRpcTransport
 from rugbot.intelligence.token_resolver import resolve_token_or_wallet
 from rugbot.intelligence.wallet_intelligence import (
-    MIN_REPEAT_LAUNCH_EVIDENCE,
     WalletIntelligenceReport,
     WalletLaunch,
     WalletLink,
@@ -103,7 +106,6 @@ from rugbot.tui.clipboard import get_system_clipboard
 from rugbot.tui.formatters import (
     format_age,
     format_amount,
-    format_assessment,
     format_flow,
     format_graph_map,
     format_network_endpoint,
@@ -141,7 +143,6 @@ from rugbot.tui.widgets import (
 )
 
 if TYPE_CHECKING:
-    from rugbot.ingest.rpc_observer import RpcHttpTransport
     from rugbot.runtime.app import RugbotApp
     from rugbot.runtime.event_bus import EventBus
     from rugbot.runtime.sniper_runtime import SniperRuntime
@@ -154,7 +155,6 @@ __all__ = [
     "WalletIntelApp",
     "format_age",
     "format_amount",
-    "format_assessment",
     "format_flow",
     "format_graph_map",
     "format_network_endpoint",
@@ -751,6 +751,7 @@ class RugbotTuiApp(App[None]):
         wallet: str | None = None,
         *,
         endpoint: str = "https://api.mainnet-beta.solana.com",
+        fallback_endpoints: tuple[str, ...] = (),
         websocket_endpoint: str | None = None,
         max_transactions: int = 100,
         max_linked_wallets: int = 8,
@@ -768,6 +769,7 @@ class RugbotTuiApp(App[None]):
         super().__init__()
         self._wallet = wallet
         self._endpoint = endpoint
+        self._fallback_endpoints = fallback_endpoints
         self._websocket_endpoint = websocket_endpoint
         self._max_transactions = max_transactions
         self._max_linked_wallets = max_linked_wallets
@@ -783,7 +785,11 @@ class RugbotTuiApp(App[None]):
         self._live_requested = bool(enable_live)
         self._simulation_requested = False
         self._enable_live = False
-        self._transport = transport
+        self._transport = (
+            RpcProviderPool((endpoint, *fallback_endpoints))
+            if transport is None and fallback_endpoints
+            else transport
+        )
         self.theme = theme
 
         # Drive the TUI from the shared RugbotCore facade. When no core is
@@ -2149,7 +2155,11 @@ class RugbotTuiApp(App[None]):
         funder_address = input_address
         if input_address:
             try:
-                resolved = resolve_token_or_wallet(input_address)
+                resolved = resolve_token_or_wallet(
+                    input_address,
+                    rpc_url=self._endpoint,
+                    fallback_endpoints=self._fallback_endpoints,
+                )
                 funder_address = resolved.target_wallet
             except Exception as exc:
                 self.notify(f"Could not resolve target: {exc}", severity="warning")
@@ -3290,6 +3300,7 @@ class RugbotTuiApp(App[None]):
                         res = await scan_wallet_intelligence(
                             funder.address,
                             endpoint=self._endpoint,
+                            fallback_endpoints=self._fallback_endpoints,
                             max_transactions=min(self._max_transactions, 20),
                             transport=self._transport,
                         )
@@ -4166,7 +4177,10 @@ class RugbotTuiApp(App[None]):
         if target_wallet and target_wallet != _SYSTEM_PROGRAM_ID:
             try:
                 resolved = resolve_token_or_wallet(
-                    target_wallet, custom_label=target_alias or None
+                    target_wallet,
+                    custom_label=target_alias or None,
+                    rpc_url=self._endpoint,
+                    fallback_endpoints=self._fallback_endpoints,
                 )
                 target_wallet = resolved.target_wallet
                 dev_label = target_alias or resolved.default_label
@@ -4298,7 +4312,12 @@ class RugbotTuiApp(App[None]):
         if not val:
             return
         try:
-            resolved = resolve_token_or_wallet(val, custom_label=alias_val or None)
+            resolved = resolve_token_or_wallet(
+                val,
+                custom_label=alias_val or None,
+                rpc_url=self._endpoint,
+                fallback_endpoints=self._fallback_endpoints,
+            )
             dev_addr = resolved.target_wallet
             dev_label = alias_val or resolved.default_label
 

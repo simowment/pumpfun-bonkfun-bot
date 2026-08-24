@@ -23,6 +23,8 @@ dependencies = [
     "discord-py>=2.7.1",
     "networkx>=3.0",
     "sol-trade-sdk",
+    "python-fasthtml>=0.12.0",
+    "fastapi>=0.115.0",
 ]
 
 [tool.uv.sources]

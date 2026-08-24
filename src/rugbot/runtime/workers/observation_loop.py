@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Protocol, TypeAlias, runtime_checkable
 from uuid import UUID, uuid4
 
 import base58
+from sol_trade_sdk.solana.provider_pool import RpcProviderPool
 
 from rugbot.domain.amounts import Slot
 from rugbot.domain.decisions import AbstainReason, AbstainResult
@@ -24,8 +25,9 @@ from rugbot.storage.jsonl_observation_store import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from sol_trade_sdk.solana.provider_pool import RpcHttpTransport
+
     from rugbot.ingest.observation_pipeline import DurableObservationIngestor
-    from rugbot.ingest.rpc_observer import RpcHttpTransport
     from rugbot.storage.handled_evidence_ledger import HandledEvidenceLedger
 
 ObservationBatch: TypeAlias = tuple[RawChainObservation, ...]
@@ -139,6 +141,7 @@ class RpcAddressObservationSource:
             max_pages=self.max_pages,
             cursor=self.cursor,
             transport=self.transport,
+            standard_history_only=isinstance(self.transport, RpcProviderPool),
         )
         if isinstance(result, AbstainResult):
             return result

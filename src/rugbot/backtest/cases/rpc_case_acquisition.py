@@ -30,13 +30,14 @@ from rugbot.ingest.pump.pump_swap_event_observation import (
 from rugbot.ingest.rpc_observer import (
     MAX_PAGES,
     MAX_TRANSACTIONS,
-    RpcHttpTransport,
     RpcObservationResult,
     observe_address,
 )
 from rugbot.storage.jsonl_observation_store import observation_identity
 
 if TYPE_CHECKING:
+    from sol_trade_sdk.solana.provider_pool import RpcHttpTransport
+
     from rugbot.backtest.dataset import FinalizedTrade
     from rugbot.domain.amounts import Slot
     from rugbot.domain.launches import LaunchCreatedV2

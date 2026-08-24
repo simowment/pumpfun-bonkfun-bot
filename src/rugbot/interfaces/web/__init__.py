@@ -1,15 +1,11 @@
-"""Web interface dashboard and REST API."""
+"""Svelte web dashboard REST and WebSocket API."""
 
 from __future__ import annotations
 
-from rugbot.interfaces.web.adapter import (
-    WebAdapter,
-    create_web_app,
-    jsonable,
-)
+from rugbot.interfaces.web.adapter import jsonable
+from rugbot.interfaces.web.fastapi_app import create_fastapi_app
 
 __all__ = [
-    "WebAdapter",
-    "create_web_app",
+    "create_fastapi_app",
     "jsonable",
 ]

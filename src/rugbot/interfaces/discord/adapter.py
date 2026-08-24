@@ -370,8 +370,12 @@ class QuickBuyView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         cand = self.core.screener.accept_candidate(self.target, self.core.service)
         if cand is None:
-            cand = self.core.screener.scan_and_evaluate(self.target)
-            self.core.screener.accept_candidate(cand.creator_wallet, self.core.service)
+            await interaction.followup.send(
+                "Target not enrolled: finalized repeat adverse-operator evidence "
+                "is required.",
+                ephemeral=True,
+            )
+            return
         await interaction.followup.send(
             f"✅ **Enrolled Developer** `{cand.creator_wallet[:8]}...`\n"
             f"• Master Funder: `{cand.root_funder[:8]}...`\n"

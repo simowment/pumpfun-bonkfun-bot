@@ -81,10 +81,12 @@ class ScreenerService:
         max_candidates: int = 200,
         tracker_service: TrackerService | None = None,
         endpoint: str | None = None,
+        fallback_endpoints: tuple[str, ...] = (),
     ) -> None:
         self._max_candidates = max_candidates
         self._tracker_service = tracker_service
         self._endpoint = endpoint
+        self._fallback_endpoints = fallback_endpoints
         self._candidates: dict[str, ScreenerCandidate] = {}
         self._lock = threading.Lock()
         self._queue: asyncio.Queue[PumpPortalLaunchNotification] = asyncio.Queue(
@@ -141,7 +143,12 @@ class ScreenerService:
         self, query: str, *, custom_label: str | None = None
     ) -> ScreenerCandidate:
         """Resolve a token or wallet and nominate it without inventing outcomes."""
-        resolved = resolve_token_or_wallet(query, custom_label=custom_label)
+        resolved = resolve_token_or_wallet(
+            query,
+            custom_label=custom_label,
+            rpc_url=self._endpoint,
+            fallback_endpoints=self._fallback_endpoints,
+        )
         dev_wallet = resolved.target_wallet
         root_funder = resolved.root_funder or dev_wallet
         candidate = ScreenerCandidate(
@@ -414,7 +421,11 @@ class ScreenerService:
         """Approve a candidate, enlisting the dev/master funder and configuring execution policy."""
         with self._lock:
             candidate = self._candidates.get(address)
-            if candidate is None:
+            if (
+                candidate is None
+                or candidate.status is not ScreenerCandidateStatus.QUALIFIED
+                or not candidate.is_bible_qualified
+            ):
                 return None
             candidate = replace(candidate, status=ScreenerCandidateStatus.ACCEPTED)
             self._candidates[address] = candidate

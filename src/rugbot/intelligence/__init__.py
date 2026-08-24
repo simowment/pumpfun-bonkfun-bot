@@ -15,11 +15,9 @@ from rugbot.intelligence.operator_profile import (
     build_operator_profile_snapshot,
 )
 from rugbot.intelligence.token_resolver import (
-    DiscoveredTokenLaunch,
     ResolvedTarget,
     fetch_token_metadata,
     resolve_token_or_wallet,
-    scan_helius_cluster_history,
 )
 from rugbot.intelligence.wallet_behavior import (
     CanonicalBuyEvidence,
@@ -42,7 +40,6 @@ __all__ = [
     "CanonicalBuyEvidence",
     "CanonicalSellEvidence",
     "CanonicalTransferEvidence",
-    "DiscoveredTokenLaunch",
     "EntityResolver",
     "OperatorAddressProfile",
     "OperatorEntity",
@@ -64,5 +61,4 @@ __all__ = [
     "build_wallet_behavior_ledger",
     "fetch_token_metadata",
     "resolve_token_or_wallet",
-    "scan_helius_cluster_history",
 ]

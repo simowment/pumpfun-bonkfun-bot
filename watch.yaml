@@ -1,6 +1,6 @@
 target:
   kind: wallet
-  id: 83t4PoByoYJLxcFyxT7Cd3smiYz7JAeHadcrW8LRL8f1
+  id: 5pmCNjMkgYKExvSrG5oXwmgeMppFRH9qgr9GkcTQv8gn
 execution:
   mode: observe
   quote_size_lamports: 25000000

@@ -7,9 +7,11 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from rugbot.tracker.models import (
         AlertOutboxRecord,
+        EntityBackfillRecord,
         FunderRecord,
         LaunchRecord,
         TargetExecutionPolicy,
+        TargetScanRecord,
         TransferRecord,
         WalletRecord,
     )
@@ -41,6 +43,21 @@ class TrackerRepository(Protocol):
         self, funder_address: str
     ) -> TargetExecutionPolicy | None:
         """Fetch the execution policy for one tracked funder."""
+
+    def save_target_scan(self, scan: TargetScanRecord) -> None:
+        """Persist the latest finalized scan summary for one target query."""
+
+    def get_target_scans(self, limit: int = 100) -> tuple[TargetScanRecord, ...]:
+        """Fetch persistent target scan history, newest first."""
+
+    def save_entity_backfill(self, backfill: EntityBackfillRecord) -> None:
+        """Persist one entity backfill checkpoint and cached report."""
+
+    def get_entity_backfill(self, query: str) -> EntityBackfillRecord | None:
+        """Fetch the durable backfill state for one target query."""
+
+    def get_incomplete_entity_backfills(self) -> tuple[EntityBackfillRecord, ...]:
+        """Fetch resumable entity backfills ordered by oldest update first."""
 
     # --- Wallets ---
     def save_wallet(self, wallet: WalletRecord) -> None:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,6 +15,7 @@ from rugbot.runtime.app import build_ui_runtime
 from rugbot.runtime.config import (
     ExecutionMode,
     SniperConfigError,
+    load_provider_settings,
     load_sniper_config,
     resolve_config_path,
     resolve_dotenv,
@@ -82,17 +82,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if wallet is None:
         wallet = config.target.id
 
-    endpoint = (
-        args.rpc_http
-        or os.environ.get("SOLANA_NODE_RPC_ENDPOINT")
-        or os.environ.get("SOLANA_RPC_HTTP")
-        or "https://api.mainnet-beta.solana.com"
-    )
-    websocket_endpoint = (
-        args.rpc_wss
-        or os.environ.get("SOLANA_NODE_WSS_ENDPOINT")
-        or os.environ.get("SOLANA_RPC_WEBSOCKET")
-    )
+    try:
+        providers = load_provider_settings()
+    except SniperConfigError as error:
+        print(f"Invalid provider config: {error}", file=sys.stderr)
+        return 1
+    endpoint = args.rpc_http or providers.rpc_http
+    websocket_endpoint = args.rpc_wss or providers.rpc_websocket
+    if endpoint is None:
+        print("SOLANA_RPC_HTTP is required", file=sys.stderr)
+        return 1
 
     if config.execution.mode is ExecutionMode.LIVE:
         resolve_dotenv(include_signing=True)
@@ -112,11 +111,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         config_path=config_path,
         sniper_runtime=sniper_runtime,
         endpoint=endpoint,
+        fallback_endpoints=providers.rpc_http_fallbacks,
         websocket_endpoint=websocket_endpoint,
     )
     app = RugbotTuiApp(
         wallet,
         endpoint=endpoint,
+        fallback_endpoints=providers.rpc_http_fallbacks,
         websocket_endpoint=websocket_endpoint,
         max_transactions=args.max_transactions,
         max_linked_wallets=args.max_linked_wallets,

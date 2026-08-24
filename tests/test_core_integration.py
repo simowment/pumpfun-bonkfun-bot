@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 
+import base58
 import pytest
 
 from rugbot.backtest.runners.cluster_optimizer import (
@@ -33,36 +34,82 @@ def test_token_and_creator_resolution(monkeypatch: pytest.MonkeyPatch):
     """Verify on-chain token to creator dev resolution via bonding curve PDA."""
     # 1. Direct wallet input
     dev_wallet = "FJz6SLz8CQBmm692kfp6e8s9FZPuqnKX5ZNcr7k5Kadd"
-    wallet_res = resolve_token_or_wallet(dev_wallet, custom_label="Alpha Dev")
+    monkeypatch.setattr(
+        "rugbot.intelligence.token_resolver._rpc_call",
+        lambda *_args: {"value": None},
+    )
+    wallet_res = resolve_token_or_wallet(
+        dev_wallet,
+        custom_label="Alpha Dev",
+        rpc_url="https://recorded.invalid",
+    )
     assert wallet_res.is_token is False
     assert wallet_res.target_wallet == dev_wallet
     assert wallet_res.default_label == "Alpha Dev"
 
     # 2. Token input resolved via bonding curve
-    def mock_rpc_call(rpc_url: str, method: str, params: list[object]):
+    mint = "BVGraUKvZydDXSAHydZvHCTFPATvcUTPoKFkocA8pump"
+    pump_program = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+    accounts = [
+        mint,
+        *[f"Account{index}" for index in range(1, 7)],
+        dev_wallet,
+        *[f"Account{index}" for index in range(8, 14)],
+        pump_program,
+    ]
+
+    def mock_rpc_call(
+        _rpc_url: str,
+        method: str,
+        params: list[object],
+        _transport: object,
+    ):
         if method == "getAccountInfo":
             return {"value": {"data": ["mock_data", "base64"]}}
         if method == "getSignaturesForAddress":
-            return [{"signature": "mock_sig", "slot": 440374992}]
+            return [
+                {"signature": "distractor_sig", "slot": 440374992},
+                {"signature": "create_sig", "slot": 440374992},
+            ]
         if method == "getTransaction":
-            return {
-                "transaction": {
-                    "message": {
-                        "accountKeys": [
-                            dev_wallet,
-                            "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
-                        ]
+            signature = params[0]
+            instructions = []
+            if signature == "create_sig":
+                instructions = [
+                    {
+                        "programIdIndex": 14,
+                        "accounts": list(range(14)),
+                        "data": base58.b58encode(
+                            bytes([24, 30, 200, 40, 5, 28, 7, 119])
+                        ).decode("ascii"),
                     }
-                }
+                ]
+            return {
+                "meta": {"loadedAddresses": {"writable": [], "readonly": []}},
+                "transaction": {
+                    "signatures": [signature],
+                    "message": {
+                        "accountKeys": accounts,
+                        "instructions": instructions,
+                    },
+                },
             }
         return None
 
     monkeypatch.setattr("rugbot.intelligence.token_resolver._rpc_call", mock_rpc_call)
-    mint = "BVGraUKvZydDXSAHydZvHCTFPATvcUTPoKFkocA8pump"
-    resolved = resolve_token_or_wallet(mint, custom_label="Token Alpha")
+    monkeypatch.setattr(
+        "rugbot.intelligence.token_resolver.fetch_token_metadata",
+        lambda _mint: ("Alpha", "ALPHA", 0.0, 1.0),
+    )
+    resolved = resolve_token_or_wallet(
+        mint,
+        custom_label="Token Alpha",
+        rpc_url="https://recorded.invalid",
+    )
     assert resolved.is_token is True
     assert resolved.target_wallet == dev_wallet
     assert resolved.creation_slot == 440374992
+    assert resolved.creation_signature == "create_sig"
 
 
 def test_sqlite_tracker_repository_crud(tmp_path: Path):

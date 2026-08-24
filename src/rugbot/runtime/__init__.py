@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from rugbot.runtime.app import RugbotApp, build_ui_runtime
 from rugbot.runtime.config import (
     CoreSniperConfig,
     SniperConfigError,
@@ -18,9 +17,7 @@ __all__ = [
     "EventBus",
     "ObservationLoop",
     "PositionExitWorker",
-    "RugbotApp",
     "SniperConfigError",
     "SniperDaemonService",
-    "build_ui_runtime",
     "load_sniper_config",
 ]

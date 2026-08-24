@@ -1,20 +1,24 @@
 """Bounded finalized HTTP JSON-RPC observation ingestion."""
 
-import asyncio
 import inspect
 import json
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from time import monotonic_ns, time_ns
 from typing import TypeAlias
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-import aiohttp
 import base58
+from sol_trade_sdk.solana.provider_pool import (
+    AiohttpRpcTransport,
+    RpcHttpResponse,
+    RpcHttpTransport,
+)
 
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.observations import RawChainObservation
+from rugbot.storage.jsonl_observation_store import ObservationStore
 
 DEFAULT_MAX_SIGNATURES = 20
 DEFAULT_MAX_TRANSACTIONS = 5
@@ -22,7 +26,6 @@ DEFAULT_MAX_PAGES = 10
 MAX_SIGNATURES = 1000
 MAX_TRANSACTIONS = 1000
 MAX_PAGES = 100
-MAX_RPC_RETRIES = 2
 HTTP_OK = 200
 HTTP_TOO_MANY_REQUESTS = 429
 FINALIZED = "finalized"
@@ -51,17 +54,6 @@ class _HeliusFullTransaction:
     response_body: bytes
 
 
-@dataclass(frozen=True, slots=True)
-class RpcHttpResponse:
-    """Raw HTTP response returned by an injected RPC transport."""
-
-    status: int
-    body: bytes
-
-
-RpcHttpTransport: TypeAlias = Callable[
-    [str, bytes], Awaitable[RpcHttpResponse] | RpcHttpResponse
-]
 RpcObservationResult: TypeAlias = tuple[RawChainObservation, ...] | AbstainResult
 FinalizedTransactionResult: TypeAlias = RawChainObservation | AbstainResult | None
 
@@ -110,11 +102,6 @@ class AddressHistoryCursor:
             raise _InvalidHistoryCursorError.invalid_sequence()
 
 
-class _InvalidTransportConfigError(ValueError):
-    def __init__(self) -> None:
-        super().__init__("timeout_seconds must be a positive integer")
-
-
 class _DuplicateJsonObjectKeyError(ValueError):
     def __init__(self) -> None:
         super().__init__("duplicate JSON object key")
@@ -124,46 +111,7 @@ class _FailedFinalizedTransaction:
     """Marker for a validated finalized transaction that did not execute."""
 
 
-class AiohttpRpcTransport:
-    """Small HTTP-only transport for read-only JSON-RPC requests."""
-
-    def __init__(self, *, timeout_seconds: int = 10) -> None:
-        """Initialize the transport with a bounded request timeout."""
-
-        if type(timeout_seconds) is not int or timeout_seconds <= 0:
-            raise _InvalidTransportConfigError
-        self._timeout_seconds = timeout_seconds
-
-    async def __call__(self, endpoint: str, body: bytes) -> RpcHttpResponse:
-        """POST one raw JSON-RPC request and return its raw response bytes."""
-
-        timeout = aiohttp.ClientTimeout(total=self._timeout_seconds)
-        for attempt in range(MAX_RPC_RETRIES + 1):
-            try:
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.post(
-                        endpoint,
-                        data=body,
-                        headers={"content-type": "application/json"},
-                    ) as response:
-                        if (
-                            response.status == HTTP_TOO_MANY_REQUESTS
-                            and attempt < MAX_RPC_RETRIES
-                        ):
-                            await asyncio.sleep(0.5 * (attempt + 1))
-                            continue
-                        return RpcHttpResponse(
-                            status=response.status, body=await response.read()
-                        )
-            except Exception:
-                if attempt < MAX_RPC_RETRIES:
-                    await asyncio.sleep(0.5 * (attempt + 1))
-                    continue
-                raise
-        return RpcHttpResponse(status=HTTP_TOO_MANY_REQUESTS, body=b"{}")
-
-
-async def observe_address(  # noqa: C901, PLR0911, PLR0912, PLR0913
+async def observe_address(  # noqa: C901, PLR0911, PLR0912, PLR0913, PLR0915
     address: str,
     *,
     endpoint: str,
@@ -177,7 +125,10 @@ async def observe_address(  # noqa: C901, PLR0911, PLR0912, PLR0913
     start_slot: int | None = None,
     end_slot: int | None = None,
     cursor: AddressHistoryCursor | None = None,
+    before_signature: str | None = None,
     transport: RpcHttpTransport | None = None,
+    observation_store: ObservationStore | None = None,
+    standard_history_only: bool = False,
 ) -> RpcObservationResult:
     """Observe finalized transactions for one address using bounded HTTP RPC.
 
@@ -203,7 +154,10 @@ async def observe_address(  # noqa: C901, PLR0911, PLR0912, PLR0913
         start_slot: Inclusive lower bound for a complete slot-window history.
         end_slot: Inclusive upper bound for a complete slot-window history.
         cursor: Checkpoint from the last fully consumed history batch.
+        before_signature: Exclusive older-history cursor for a staged backfill.
         transport: Optional injected HTTP transport for tests.
+        observation_store: Optional durable sink written after each transaction.
+        standard_history_only: Use only portable Solana RPC history methods.
 
     Returns:
         An immutable tuple of raw observations, or a typed abstention when the
@@ -223,6 +177,7 @@ async def observe_address(  # noqa: C901, PLR0911, PLR0912, PLR0913
         start_slot=start_slot,
         end_slot=end_slot,
         cursor=cursor,
+        before_signature=before_signature,
     )
     if validation is not None:
         return validation
@@ -251,7 +206,12 @@ async def observe_address(  # noqa: C901, PLR0911, PLR0912, PLR0913
     finalized_slot = finalized_slot_result
 
     preloaded_transactions: dict[str, _HeliusFullTransaction] = {}
-    if _is_helius_endpoint(endpoint) and cursor is None:
+    if (
+        _is_helius_endpoint(endpoint)
+        and cursor is None
+        and before_signature is None
+        and not standard_history_only
+    ):
         helius_history = await _read_helius_full_transaction_history(
             rpc_transport,
             endpoint=endpoint,
@@ -278,6 +238,7 @@ async def observe_address(  # noqa: C901, PLR0911, PLR0912, PLR0913
             start_slot=start_slot,
             end_slot=end_slot,
             cursor=cursor,
+            initial_before_signature=before_signature,
         )
     if isinstance(signatures, AbstainResult):
         return signatures
@@ -349,7 +310,7 @@ async def observe_address(  # noqa: C901, PLR0911, PLR0912, PLR0913
                             "commitment": FINALIZED,
                             "maxSupportedTransactionVersion": 0,
                             "rewards": False,
-                            "transactionDetails": "full",
+                            "transactionDetails": "signatures",
                         },
                     ),
                     as_of_slot=finalized_slot,
@@ -373,42 +334,43 @@ async def observe_address(  # noqa: C901, PLR0911, PLR0912, PLR0913
                 )
         received_wall_ns = time_ns()
         received_monotonic_ns = monotonic_ns()
-        observations.append(
-            RawChainObservation(
-                raw_id=uuid4(),
-                source_id=source_id,
-                observer_id=observer_id,
-                boot_id=resolved_boot_id,
-                receive_sequence=sequence,
-                slot=observed_slot,
-                parent_slot=None,
-                blockhash=None,
-                signature=_decode_signature(signature),
-                transaction_index=transaction_index,
-                outer_instruction_index=None,
-                inner_instruction_group_index=None,
-                inner_instruction_index=None,
-                stack_height=None,
-                event_ordinal=None,
-                commitment=FINALIZED,
-                canonical_status="canonical",
-                received_wall_ns=received_wall_ns,
-                received_monotonic_ns=received_monotonic_ns,
-                program_id=None,
-                account_pubkey=None,
-                account_owner_program_id=None,
-                raw_transaction=response_body,
-                raw_transaction_format=JSON_TRANSACTION_FORMAT,
-                raw_account_data=None,
-                account_write_version=None,
-                source_update_kind="transaction",
-                raw_source_status=None,
-                raw_source_payload=response_body,
-                decoder_name=None,
-                decoder_version=None,
-                idl_hash=None,
-            )
+        observation = RawChainObservation(
+            raw_id=uuid4(),
+            source_id=source_id,
+            observer_id=observer_id,
+            boot_id=resolved_boot_id,
+            receive_sequence=sequence,
+            slot=observed_slot,
+            parent_slot=None,
+            blockhash=None,
+            signature=_decode_signature(signature),
+            transaction_index=transaction_index,
+            outer_instruction_index=None,
+            inner_instruction_group_index=None,
+            inner_instruction_index=None,
+            stack_height=None,
+            event_ordinal=None,
+            commitment=FINALIZED,
+            canonical_status="canonical",
+            received_wall_ns=received_wall_ns,
+            received_monotonic_ns=received_monotonic_ns,
+            program_id=None,
+            account_pubkey=None,
+            account_owner_program_id=None,
+            raw_transaction=response_body,
+            raw_transaction_format=JSON_TRANSACTION_FORMAT,
+            raw_account_data=None,
+            account_write_version=None,
+            source_update_kind="transaction",
+            raw_source_status=None,
+            raw_source_payload=response_body,
+            decoder_name=None,
+            decoder_version=None,
+            idl_hash=None,
         )
+        if observation_store is not None:
+            observation_store.append(observation)
+        observations.append(observation)
     return tuple(observations)
 
 
@@ -510,7 +472,7 @@ async def observe_finalized_transaction(  # noqa: C901, PLR0911, PLR0913
             observed_slot,
             {
                 "commitment": FINALIZED,
-                "transactionDetails": "full",
+                "transactionDetails": "signatures",
                 "rewards": False,
                 "maxSupportedTransactionVersion": 0,
             },
@@ -583,10 +545,11 @@ async def _read_signature_history(  # noqa: C901, PLR0911, PLR0912, PLR0913
     start_slot: int | None,
     end_slot: int | None,
     cursor: AddressHistoryCursor | None,
+    initial_before_signature: str | None,
 ) -> tuple[SignatureHistoryEntry, ...] | AbstainResult:
     """Read bounded finalized history without silently skipping evidence."""
 
-    before_signature: str | None = None
+    before_signature = initial_before_signature
     seen_signatures: set[str] = set()
     collected: list[tuple[str, int]] = []
     boundary = cursor.until_signature if cursor is not None else None
@@ -996,7 +959,7 @@ async def _read_helius_signature_history(  # noqa: C901, PLR0911, PLR0912, PLR09
     )
 
 
-async def _read_result(
+async def _read_result(  # noqa: PLR0911
     transport: RpcHttpTransport,
     *,
     endpoint: str,
@@ -1030,6 +993,12 @@ async def _read_result(
         return _abstain(
             AbstainReason.UNKNOWN_PROTOCOL_STATE,
             f"{method} transport returned malformed response",
+            as_of_slot=as_of_slot,
+        )
+    if response.status == HTTP_TOO_MANY_REQUESTS:
+        return _abstain(
+            AbstainReason.MISSING_FEATURE,
+            f"{method} was rate-limited by the available RPC providers",
             as_of_slot=as_of_slot,
         )
     if response.status != HTTP_OK or type(response.body) is not bytes:
@@ -1305,7 +1274,7 @@ def _validated_transaction(  # noqa: PLR0911
     return response_body, slot
 
 
-def _validated_block_transaction_indices(  # noqa: PLR0911
+def _validated_block_transaction_indices(
     result: object,
     *,
     as_of_slot: int,
@@ -1316,50 +1285,32 @@ def _validated_block_transaction_indices(  # noqa: PLR0911
             "getBlock returned no complete finalized block",
             as_of_slot=as_of_slot,
         )
-    transactions = result.get("transactions")
-    if type(transactions) is not list:
+    signatures = result.get("signatures")
+    if type(signatures) is not list:
         return _abstain(
             AbstainReason.MISSING_FEATURE,
             "getBlock returned incomplete transaction ordering evidence",
             as_of_slot=as_of_slot,
         )
     indices: dict[str, int] = {}
-    for transaction_index, entry in enumerate(transactions):
-        if type(entry) is not dict:
-            return _abstain(
-                AbstainReason.UNKNOWN_PROTOCOL_STATE,
-                "getBlock returned malformed transaction ordering evidence",
-                as_of_slot=as_of_slot,
-            )
-        transaction = entry.get("transaction")
-        if type(transaction) is not dict:
-            return _abstain(
-                AbstainReason.UNKNOWN_PROTOCOL_STATE,
-                "getBlock transaction ordering evidence is malformed",
-                as_of_slot=as_of_slot,
-            )
-        signatures = transaction.get("signatures")
-        if type(signatures) is not list or any(
-            type(signature) is not str or not _valid_signature(signature)
-            for signature in signatures
-        ):
+    for transaction_index, signature in enumerate(signatures):
+        if type(signature) is not str or not _valid_signature(signature):
             return _abstain(
                 AbstainReason.UNKNOWN_PROTOCOL_STATE,
                 "getBlock transaction signatures are malformed",
                 as_of_slot=as_of_slot,
             )
-        for signature in signatures:
-            if signature in indices:
-                return _abstain(
-                    AbstainReason.UNKNOWN_PROTOCOL_STATE,
-                    "getBlock contained duplicate transaction signatures",
-                    as_of_slot=as_of_slot,
-                )
-            indices[signature] = transaction_index
+        if signature in indices:
+            return _abstain(
+                AbstainReason.UNKNOWN_PROTOCOL_STATE,
+                "getBlock contained duplicate transaction signatures",
+                as_of_slot=as_of_slot,
+            )
+        indices[signature] = transaction_index
     return indices
 
 
-def _validate_inputs(  # noqa: PLR0911, PLR0913
+def _validate_inputs(  # noqa: C901, PLR0911, PLR0913
     *,
     address: str,
     endpoint: str,
@@ -1373,6 +1324,7 @@ def _validate_inputs(  # noqa: PLR0911, PLR0913
     start_slot: int | None,
     end_slot: int | None,
     cursor: AddressHistoryCursor | None,
+    before_signature: str | None,
 ) -> AbstainResult | None:
     if not _non_blank_str(address) or not _valid_address(address):
         return _abstain(
@@ -1437,6 +1389,18 @@ def _validate_inputs(  # noqa: PLR0911, PLR0913
             "history cursor cannot be combined with a slot window",
             as_of_slot=-1,
         )
+    if before_signature is not None and not _valid_signature(before_signature):
+        return _abstain(
+            AbstainReason.UNKNOWN_PROTOCOL_STATE,
+            "older-history cursor is not a valid Solana signature",
+            as_of_slot=-1,
+        )
+    if before_signature is not None and (cursor is not None or start_slot is not None):
+        return _abstain(
+            AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+            "older-history cursor cannot be combined with another history bound",
+            as_of_slot=-1,
+        )
     if cursor is not None and (
         cursor.address != address or cursor.source_id != source_id
     ):
@@ -1464,7 +1428,7 @@ def _valid_http_endpoint(value: object) -> bool:
         parsed = urlsplit(value)
     except ValueError:
         return False
-    return parsed.scheme == "https" and bool(parsed.netloc)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def _is_helius_endpoint(value: str) -> bool:

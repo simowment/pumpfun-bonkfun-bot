@@ -1,22 +1,70 @@
 """On-chain resolver for tokens, creators, and pump.fun metadata."""
 
-# ruff: noqa: S310, BLE001, PLR2004, S110
+# ruff: noqa: S310, PLR2004, TRY003, TRY004, C901
 
 from __future__ import annotations
 
-import contextlib
+import base64
 import json
 import os
 import time
 import urllib.request
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any
 
+import base58
+from sol_trade_sdk.solana.provider_pool import (
+    RpcHttpResponse,
+    SyncRpcProviderPool,
+    SyncRpcTransport,
+)
 from solders.pubkey import Pubkey
+
+from rugbot.ingest.pump.bonding_curve_account import (
+    PUMP_BONDING_CURVE_LAYOUT_ARTIFACT_VERSION,
+    PumpBondingCurveAccountState,
+    decode_pump_bonding_curve_creator,
+)
+from rugbot.ingest.pump.create_decoder import (
+    CREATE_V2_ACCOUNT_NAMES,
+    CREATE_V2_DISCRIMINATOR,
+)
+from rugbot.ingest.pump.trade_decoder import (
+    BUY_ACCOUNT_NAMES,
+    BUY_DISCRIMINATOR,
+    BUY_V2_ACCOUNT_NAMES,
+    BUY_V2_DISCRIMINATOR,
+)
 
 PUMP_PROGRAM_ID = Pubkey.from_string("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
 MAX_PAGE_SIGNATURES = 1000
-MIN_BASE58_ADDRESS_LENGTH: Final[int] = 32
+MAX_SIGNATURE_HISTORY_PAGES = 50
+CREATE_DISCRIMINATOR = bytes([24, 30, 200, 40, 5, 28, 7, 119])
+CREATE_ACCOUNT_NAMES = (
+    "mint",
+    "mint_authority",
+    "bonding_curve",
+    "associated_bonding_curve",
+    "global",
+    "mpl_token_metadata",
+    "metadata",
+    "user",
+    "system_program",
+    "token_program",
+    "associated_token_program",
+    "rent",
+    "event_authority",
+    "program",
+)
+CREATE_LAYOUTS = {
+    CREATE_DISCRIMINATOR: CREATE_ACCOUNT_NAMES,
+    CREATE_V2_DISCRIMINATOR: CREATE_V2_ACCOUNT_NAMES,
+}
+BUY_LAYOUTS = {
+    BUY_DISCRIMINATOR: BUY_ACCOUNT_NAMES,
+    BUY_V2_DISCRIMINATOR: BUY_V2_ACCOUNT_NAMES,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,44 +78,68 @@ class ResolvedTarget:
     name: str | None = None
     creation_slot: int | None = None
     creation_signature: str | None = None
+    bonding_curve: str | None = None
     default_label: str = "Tracked Target"
     bundle_wallets: tuple[str, ...] = ()
     root_funder: str | None = None
 
 
-def _rpc_call(rpc_url: str, method: str, params: list[object]) -> object:
-    """Perform a raw JSON-RPC HTTP call with endpoint rotation and retries."""
-    endpoints = [
-        rpc_url,
-        "https://api.mainnet-beta.solana.com",
-        "https://rpc.ankr.com/solana",
-    ]
+def _rpc_call(
+    rpc_url: str,
+    method: str,
+    params: list[object],
+    transport: SyncRpcTransport | None = None,
+) -> object:
+    """Perform one raw JSON-RPC call against the configured evidence authority."""
     payload = json.dumps(
         {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     ).encode()
-
-    last_error: Exception | None = None
-    for endpoint in endpoints:
-        for _ in range(2):
+    rpc_transport = transport or SyncRpcProviderPool((rpc_url,))
+    response = None
+    try:
+        for attempt in range(4):
+            response = rpc_transport(rpc_url, payload)
+            if 200 <= response.status < 300:
+                break
+            if response.status == 429 and attempt < 3:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            break
+    except Exception:  # noqa: BLE001
+        # Direct HTTP fallback if pool is on cooldown
+        fallback_urls = [
+            "https://api.mainnet-beta.solana.com",
+            "https://solana-rpc.publicnode.com",
+        ]
+        response = None
+        for fb_url in fallback_urls:
             try:
                 req = urllib.request.Request(
-                    endpoint,
+                    fb_url,
                     data=payload,
                     headers={
                         "Content-Type": "application/json",
-                        "User-Agent": "Mozilla/5.0",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
                     },
                 )
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    data: dict[str, Any] = json.loads(resp.read().decode())
-                    return data.get("result")
-            except Exception as exc:
-                last_error = exc
-                time.sleep(0.5)
+                with urllib.request.urlopen(req, timeout=8) as res:
+                    response = RpcHttpResponse(status=res.status, body=res.read())
+                    break
+            except Exception:  # noqa: BLE001, S112
+                continue
 
-    if last_error:
-        raise last_error
-    return None
+    if response is None or not 200 <= response.status < 300:
+        status_code = response.status if response is not None else "unknown"
+        raise RuntimeError(f"RPC {method} returned HTTP {status_code}")
+    try:
+        data = json.loads(response.body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"RPC {method} returned invalid JSON") from error
+    if not isinstance(data, Mapping) or "error" in data:
+        raise RuntimeError(f"RPC {method} returned an error")
+    if "result" not in data:
+        raise RuntimeError(f"RPC {method} returned an incomplete response")
+    return data["result"]
 
 
 def fetch_token_metadata(mint: str) -> tuple[str, str, float, float]:
@@ -132,174 +204,310 @@ def fetch_token_metadata(mint: str) -> tuple[str, str, float, float]:
         return ("Pump Token", "PUMP", 0.0, 1.0)
 
 
-@dataclass(frozen=True, slots=True)
-class DiscoveredTokenLaunch:
-    """Historical token launch discovered for an operator cluster."""
+def _complete_signature_history(
+    endpoint: str,
+    address: str,
+    transport: SyncRpcTransport,
+) -> tuple[dict[str, Any], ...]:
+    """Read a complete bounded finalized signature history or fail closed."""
 
-    mint: str
-    symbol: str
-    name: str
-    created_at: int
-    creator_wallet: str
+    signatures: list[dict[str, Any]] = []
+    before: str | None = None
+    for _ in range(MAX_SIGNATURE_HISTORY_PAGES):
+        options: dict[str, object] = {
+            "commitment": "finalized",
+            "limit": MAX_PAGE_SIGNATURES,
+        }
+        if before is not None:
+            options["before"] = before
+        page = _rpc_call(
+            endpoint,
+            "getSignaturesForAddress",
+            [address, options],
+            transport,
+        )
+        if not isinstance(page, list):
+            raise RuntimeError("signature history response is incomplete")
+        typed_page = tuple(item for item in page if isinstance(item, dict))
+        if len(typed_page) != len(page):
+            raise RuntimeError("signature history contains malformed entries")
+        signatures.extend(typed_page)
+        if len(page) < MAX_PAGE_SIGNATURES:
+            return tuple(signatures)
+        candidate = typed_page[-1].get("signature") if typed_page else None
+        if not isinstance(candidate, str) or not candidate or candidate == before:
+            raise RuntimeError("signature history pagination did not advance")
+        before = candidate
+    raise RuntimeError("signature history exceeded the bounded page limit")
 
 
-def scan_helius_cluster_history(
-    wallet: str, api_key: str
-) -> tuple[str | None, list[DiscoveredTokenLaunch]]:
-    """Scan Helius API for incoming SOL transfers and token creation history."""
-    url = f"https://api.helius.xyz/v0/addresses/{wallet}/transactions?api-key={api_key}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    root_funder: str | None = None
-    launches: list[DiscoveredTokenLaunch] = []
-    try:
-        with urllib.request.urlopen(req, timeout=12) as resp:
-            txs: list[dict[str, Any]] = json.loads(resp.read().decode())
-        for tx in txs:
-            if not isinstance(tx, dict):
+def _account_keys(transaction: Mapping[str, object]) -> tuple[str, ...]:
+    """Return static and loaded transaction account keys in runtime order."""
+
+    transaction_value = transaction.get("transaction")
+    meta = transaction.get("meta")
+    if not isinstance(transaction_value, Mapping) or not isinstance(meta, Mapping):
+        return ()
+    message = transaction_value.get("message")
+    loaded = meta.get("loadedAddresses")
+    if not isinstance(message, Mapping):
+        return ()
+    raw_keys = message.get("accountKeys")
+    if not isinstance(raw_keys, list):
+        return ()
+    keys = [
+        item.get("pubkey") if isinstance(item, Mapping) else item for item in raw_keys
+    ]
+    if isinstance(loaded, Mapping):
+        for group in ("writable", "readonly"):
+            values = loaded.get(group)
+            if isinstance(values, list):
+                keys.extend(values)
+    return tuple(key for key in keys if isinstance(key, str) and key)
+
+
+def _compiled_instructions(
+    transaction: Mapping[str, object],
+) -> Iterable[tuple[bytes, tuple[str, ...]]]:
+    """Yield Pump instructions from outer and inner compiled instruction groups."""
+
+    keys = _account_keys(transaction)
+    transaction_value = transaction.get("transaction")
+    meta = transaction.get("meta")
+    if not keys or not isinstance(transaction_value, Mapping):
+        return
+    message = transaction_value.get("message")
+    if not isinstance(message, Mapping):
+        return
+    groups: list[object] = [message.get("instructions")]
+    if isinstance(meta, Mapping):
+        inner_groups = meta.get("innerInstructions")
+        if isinstance(inner_groups, list):
+            groups.extend(
+                item.get("instructions")
+                for item in inner_groups
+                if isinstance(item, Mapping)
+            )
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        for instruction in group:
+            if not isinstance(instruction, Mapping):
                 continue
-            if root_funder is None:
-                for nt in tx.get("nativeTransfers", []):
-                    from_u = nt.get("fromUserAccount")
-                    to_u = nt.get("toUserAccount")
-                    amt = nt.get("amount", 0) / 1e9
-                    if to_u == wallet and amt > 0.05 and from_u != wallet:
-                        root_funder = from_u
-                        break
-            events = tx.get("events", {})
-            pump_ev = events.get("pump", {}) if isinstance(events, dict) else {}
-            mint = pump_ev.get("mint")
-            if mint:
-                launches.append(
-                    DiscoveredTokenLaunch(
-                        mint=mint,
-                        symbol=pump_ev.get("symbol", ""),
-                        name=pump_ev.get("name", ""),
-                        created_at=int(tx.get("timestamp", time.time())),
-                        creator_wallet=wallet,
-                    )
-                )
-    except Exception:
-        pass
-    return root_funder, launches
+            program_index = instruction.get("programIdIndex")
+            account_indices = instruction.get("accounts")
+            encoded_data = instruction.get("data")
+            if (
+                type(program_index) is not int
+                or not 0 <= program_index < len(keys)
+                or keys[program_index] != str(PUMP_PROGRAM_ID)
+                or not isinstance(account_indices, list)
+                or not isinstance(encoded_data, str)
+            ):
+                continue
+            if not all(
+                type(index) is int and 0 <= index < len(keys)
+                for index in account_indices
+            ):
+                continue
+            try:
+                data = base58.b58decode(encoded_data)
+            except ValueError:
+                continue
+            yield data, tuple(keys[index] for index in account_indices)
 
 
-def scan_helius_root_funder(wallet: str, api_key: str) -> str | None:
-    """Return the latest substantial incoming funder from Helius evidence."""
-    root_funder, _ = scan_helius_cluster_history(wallet, api_key)
-    return root_funder
+def _creation_identity(
+    transaction: Mapping[str, object], mint: str
+) -> tuple[str, str] | None:
+    """Return the pinned create signature and creator for the requested mint."""
+
+    transaction_value = transaction.get("transaction")
+    if not isinstance(transaction_value, Mapping):
+        return None
+    signatures = transaction_value.get("signatures")
+    if (
+        not isinstance(signatures, list)
+        or not signatures
+        or not isinstance(signatures[0], str)
+    ):
+        return None
+    matches: list[str] = []
+    for data, accounts in _compiled_instructions(transaction):
+        names = CREATE_LAYOUTS.get(data[:8])
+        if names is None or len(accounts) < len(names):
+            continue
+        mapped = dict(zip(names, accounts[: len(names)], strict=True))
+        if mapped["mint"] == mint:
+            matches.append(mapped["user"])
+    if len(matches) != 1:
+        return None
+    return signatures[0], matches[0]
+
+
+def _same_slot_buyers(transaction: Mapping[str, object], mint: str) -> set[str]:
+    """Return wallets with pinned Pump buys for the mint in one transaction."""
+
+    buyers: set[str] = set()
+    for data, accounts in _compiled_instructions(transaction):
+        names = BUY_LAYOUTS.get(data[:8])
+        if names is None or len(accounts) < len(names):
+            continue
+        mapped = dict(zip(names, accounts[: len(names)], strict=True))
+        trade_mint = mapped.get("mint") or mapped.get("base_mint")
+        if trade_mint == mint:
+            buyers.add(mapped["user"])
+    return buyers
 
 
 def resolve_token_or_wallet(
-    input_str: str, custom_label: str | None = None, rpc_url: str | None = None
+    input_str: str,
+    custom_label: str | None = None,
+    rpc_url: str | None = None,
+    fallback_endpoints: tuple[str, ...] = (),
 ) -> ResolvedTarget:
     """Resolve an input address to its creator developer wallet or return the wallet directly."""
     cleaned = input_str.strip()
     mint_pubkey = Pubkey.from_string(cleaned)
 
-    endpoint = rpc_url or os.environ.get(
-        "SOLANA_RPC_HTTP", "https://api.mainnet-beta.solana.com"
+    endpoint = rpc_url or os.environ.get("SOLANA_RPC_HTTP")
+    if not endpoint:
+        raise ValueError("SOLANA_RPC_HTTP is required to resolve a token or wallet")
+    rpc_transport = SyncRpcProviderPool((endpoint, *fallback_endpoints))
+
+    bonding_curve_pda, _ = Pubkey.find_program_address(
+        [b"bonding-curve", bytes(mint_pubkey)], PUMP_PROGRAM_ID
     )
-    helius_api_key = os.environ.get("HELIUS_API_KEY")
+    acc_info: Any = _rpc_call(
+        endpoint,
+        "getAccountInfo",
+        [
+            str(bonding_curve_pda),
+            {"commitment": "finalized", "encoding": "base64"},
+        ],
+        rpc_transport,
+    )
+    if not isinstance(acc_info, Mapping) or "value" not in acc_info:
+        raise RuntimeError("bonding curve account response is incomplete")
 
-    with contextlib.suppress(Exception):
-        bonding_curve_pda, _ = Pubkey.find_program_address(
-            [b"bonding-curve", bytes(mint_pubkey)], PUMP_PROGRAM_ID
+    if acc_info["value"] is not None:
+        creator_from_account = _creator_from_bonding_curve_account(
+            acc_info, str(bonding_curve_pda)
         )
-        acc_info: Any = _rpc_call(
+        signatures = _complete_signature_history(
             endpoint,
-            "getAccountInfo",
-            [str(bonding_curve_pda), {"encoding": "jsonParsed"}],
+            str(bonding_curve_pda),
+            rpc_transport,
         )
+        if not signatures:
+            raise RuntimeError("bonding curve has no finalized signature history")
+        slots = tuple(
+            item["slot"] for item in signatures if type(item.get("slot")) is int
+        )
+        if len(slots) != len(signatures):
+            raise RuntimeError("signature history contains malformed slots")
+        oldest_slot = min(slots)
+        same_slot = tuple(
+            item
+            for item in signatures
+            if item.get("slot") == oldest_slot
+            and isinstance(item.get("signature"), str)
+        )
+        candidates: list[tuple[str, str, Mapping[str, object]]] = []
+        buyers: set[str] = set()
+        for item in same_slot:
+            tx_info = _rpc_call(
+                endpoint,
+                "getTransaction",
+                [
+                    item["signature"],
+                    {
+                        "commitment": "finalized",
+                        "encoding": "json",
+                        "maxSupportedTransactionVersion": 0,
+                    },
+                ],
+                rpc_transport,
+            )
+            if not isinstance(tx_info, Mapping):
+                continue
+            identity = _creation_identity(tx_info, cleaned)
+            if identity is not None:
+                candidates.append((*identity, tx_info))
+            buyers.update(_same_slot_buyers(tx_info, cleaned))
 
-        if acc_info and acc_info.get("value"):
-            last_sig = None
-            creation_sig = None
-            creation_slot = None
+        if len(candidates) != 1:
+            raise RuntimeError(
+                "finalized creation transaction was not uniquely identified"
+            )
+        creation_sig, creator_wallet, _creation_tx = candidates[0]
+        if creator_from_account is not None and creator_wallet != creator_from_account:
+            raise RuntimeError(
+                "finalized creation conflicts with bonding curve creator"
+            )
+        bundle_wallets = tuple(sorted(buyers - {creator_wallet}))
 
-            for _ in range(5):
-                params: list[object] = [
-                    str(bonding_curve_pda),
-                    {"limit": MAX_PAGE_SIGNATURES},
-                ]
-                if last_sig:
-                    params[1] = {"limit": MAX_PAGE_SIGNATURES, "before": last_sig}
-                sigs: Any = _rpc_call(endpoint, "getSignaturesForAddress", params)
-                if not sigs:
-                    break
-                creation_sig = sigs[-1]["signature"]
-                creation_slot = sigs[-1]["slot"]
-                if len(sigs) < MAX_PAGE_SIGNATURES:
-                    break
-                last_sig = sigs[-1]["signature"]
+        name, symbol, _, _ = fetch_token_metadata(cleaned)
+        label = custom_label or f"Dev of {name} (${symbol})"
 
-            if creation_sig:
-                tx_info: Any = _rpc_call(
-                    endpoint,
-                    "getTransaction",
-                    [
-                        creation_sig,
-                        {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
-                    ],
-                )
-                if tx_info and tx_info.get("transaction"):
-                    raw_keys = tx_info["transaction"]["message"]["accountKeys"]
-                    account_keys = [
-                        k["pubkey"] if isinstance(k, dict) else k for k in raw_keys
-                    ]
-                    creator_wallet = account_keys[0]
-
-                    known_system = {
-                        "11111111111111111111111111111111",
-                        "ComputeBudget111111111111111111111111111111",
-                        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
-                        "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
-                        "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
-                        "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s",
-                        "SysvarRent111111111111111111111111111111111",
-                        "8fwS3wUbk5qeUe9RAyxiLi21hVM6EqiTCX1NA1DH6FyG",
-                    }
-                    bundle_wallets = tuple(
-                        acc
-                        for acc in account_keys[1:]
-                        if acc not in known_system
-                        and not acc.endswith("pump")
-                        and len(acc) >= MIN_BASE58_ADDRESS_LENGTH
-                    )
-
-                    name, symbol, _, _ = fetch_token_metadata(cleaned)
-                    label = custom_label or f"Dev of {name} (${symbol})"
-
-                    # Helius enrichment is used only for funding evidence. Token
-                    # interactions are not launch attribution.
-                    root_funder = None
-                    if helius_api_key:
-                        root_funder = scan_helius_root_funder(
-                            creator_wallet, helius_api_key
-                        )
-
-                    return ResolvedTarget(
-                        input_address=cleaned,
-                        target_wallet=creator_wallet,
-                        is_token=True,
-                        symbol=symbol,
-                        name=name,
-                        creation_slot=creation_slot,
-                        creation_signature=creation_sig,
-                        default_label=label,
-                        bundle_wallets=bundle_wallets,
-                        root_funder=root_funder,
-                    )
+        return ResolvedTarget(
+            input_address=cleaned,
+            target_wallet=creator_wallet,
+            is_token=True,
+            symbol=symbol,
+            name=name,
+            creation_slot=oldest_slot,
+            creation_signature=creation_sig,
+            bonding_curve=str(bonding_curve_pda),
+            default_label=label,
+            bundle_wallets=bundle_wallets,
+        )
 
     # Input is a wallet directly
-    root_funder = None
-    if helius_api_key:
-        root_funder = scan_helius_root_funder(cleaned, helius_api_key)
-
     label = custom_label or f"Dev {cleaned[:6]}..."
     return ResolvedTarget(
         input_address=cleaned,
         target_wallet=cleaned,
         is_token=False,
         default_label=label,
-        root_funder=root_funder,
     )
+
+
+def _creator_from_bonding_curve_account(
+    account_info: Mapping[str, object], account_pubkey: str
+) -> str | None:
+    """Read the finalized current-layout creator without scanning all trades."""
+
+    context = account_info.get("context")
+    value = account_info.get("value")
+    if not isinstance(context, Mapping) or not isinstance(value, Mapping):
+        return None
+    slot = context.get("slot")
+    owner = value.get("owner")
+    encoded_data = value.get("data")
+    if (
+        type(slot) is not int
+        or not isinstance(owner, str)
+        or not isinstance(encoded_data, list)
+        or len(encoded_data) != 2
+        or not isinstance(encoded_data[0], str)
+        or encoded_data[1] != "base64"
+    ):
+        return None
+    try:
+        raw_data = base64.b64decode(encoded_data[0], validate=True)
+    except ValueError as error:
+        raise RuntimeError("bonding curve account returned invalid base64") from error
+    decoded = decode_pump_bonding_curve_creator(
+        PumpBondingCurveAccountState(
+            as_of_slot=slot,
+            account_pubkey=account_pubkey,
+            owner_program_id=owner,
+            raw_account_data=raw_data,
+            source_artifact_version="solana-rpc-finalized-getAccountInfo",
+            layout_artifact_version=PUMP_BONDING_CURVE_LAYOUT_ARTIFACT_VERSION,
+        )
+    )
+    if not isinstance(decoded, bytes):
+        raise RuntimeError(decoded.message)
+    return str(Pubkey.from_bytes(decoded))
