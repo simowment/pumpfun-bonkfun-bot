@@ -110,6 +110,19 @@ demonstrate a fully executable, net-profitable exit in paper/backtest mode?
 
 ---
 
+## 14. Operator Target Analysis Mandate: Predictable Snipable Launch & Deployer Prediction
+
+**When the user provides a wallet or mint address, the ONLY operational question is whether this operator exhibits a predictable, repeatable launch pattern that can be profitably and safely sniped.**
+
+Every target analysis MUST systematically extract and report:
+1. **Launch History & Cadence**: Exact frequency and intervals between launches (e.g. 1 launch every 3.5 hours, burst cadence).
+2. **ATH & Exit Profile**: Distribution of historical peak multipliers (median ATH, peak ATH, floor liquidity), and dev holding time before rugging/selling.
+3. **Qualification & Mathematical Net EV (*Memecoin Bible* Acte V)**: Winrate ($\ge 70\%$) on sample size $N \ge 10$, analytical optimal Take-Profit, and net positive EV after all Solana network and Jito tip fees.
+4. **Next Deployer Candidate Prediction**: Exactly WHICH wallet in the cluster is the next launch candidate (fresh burner with 0 prior tokens funded with 0.2 - 3.0 SOL).
+5. **Real-Time Notification & Arming**: Immediate alert if the cluster funds/stages a new clean burner wallet, and automatic arming of the event listener awaiting `pump::create`.
+
+---
+
 Following these practices ensures safe development, prevents accidental trades, and maintains code quality. Always prioritize testing and security when working with trading bots.
 
 

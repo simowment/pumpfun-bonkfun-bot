@@ -1,11 +1,28 @@
 ---
 name: pumpfun-cluster-sniper
-description: Autonomous on-chain target discovery, funding cluster graph reconstruction, deployer candidate prediction, and block-0 sniping playbook for serial Pump.fun operators.
+description: Autonomous on-chain target discovery, funding cluster graph reconstruction, deployer candidate prediction, launch frequency/ATH profiling, and block-0 sniping playbook for serial Pump.fun operators.
 ---
 
 # 🎯 Pump.fun Developer Cluster Sniping Playbook
 
-This skill defines the canonical, deterministic process to reverse-engineer serial Pump.fun ruggers and operators starting from a single token mint or dev address, identify their next staged burner wallets before token creation, optimize execution take-profit thresholds analytically, and execute block-0 snipes.
+## 📜 0. Operator Core Objective
+
+When the user provides a token mint or wallet address, **the ONLY objective is to identify a predictable launch pattern that can be profitably sniped**. Every analysis MUST deliver:
+
+1. **Launch History & Frequency**:
+   - How often does this dev/operator launch? (e.g. 1 launch every 4 hours, burst of 3 daily).
+   - Distribution of historical ATHs (median ATH multiplier, peak ATH, 1s floor liquidity).
+   - Dev exit speed (instant block-0 dump vs 30s-120s pump curve).
+2. **Qualification & Net EV (*Memecoin Bible* Acte V)**:
+   - Sample size $N \ge 10$ launches.
+   - Winrate ($\ge 70\%$) at optimal Take-Profit (e.g. $+50\%$).
+   - Net expected value after fees: $\text{EV} = (W \times \text{TP}) - (L \times \text{SL}) - \text{Fees} > 0$.
+3. **Predicted Next Deployer Wallet**:
+   - Exactly WHICH wallet will he launch from next?
+   - Identified staged burner wallet (0 prior mints, funded with 0.2 - 3.0 SOL from mother/relay).
+4. **Real-Time Burner Staging & Notification**:
+   - Immediate detection and alert when the cluster funds a fresh clean burner wallet.
+   - Automatic listener armed on the predicted deployer awaiting `pump::create`.
 
 ---
 
@@ -48,7 +65,7 @@ Run this single command from any token mint address or wallet:
 uv run rug_wallet <TOKEN_MINT_OR_WALLET> --backtest --enroll
 ```
 
-**Example Output**:
+**Standard Dossier Output**:
 ```text
 ==============================================================================
  🎯 RUGBOT TARGET & CLUSTER SNIPING INTELLIGENCE
@@ -68,12 +85,13 @@ uv run rug_wallet <TOKEN_MINT_OR_WALLET> --backtest --enroll
    • Status:         ● ARMED - Live listener active on creator address
 ------------------------------------------------------------------------------
 
- 📊 ANALYTICAL BACKTEST & TP OPTIMIZER (52 Launches Evaluated):
+ 📊 LAUNCH PATTERN & ATH PROFILE:
+   • Launch Cadence:       1 launch every ~3.5 hours
+   • Median ATH:           2.40x (Peak: 9.18x)
+   • Dev Hold Time:        45s average before full sell
    • Optimal Take-Profit:  +20% (x1.20)
-   • Historical Win Rate:  100.0%
-   • Net Simulated ROI:    +16.5%
-   • Expected Value (EV):  +0.0494 SOL / trade
-   • Total Fees Deducted:  0.0106 SOL
+   • Historical Win Rate:  100.0% (52/52)
+   • Net Expected Value:   +0.0494 SOL / trade
 ```
 
 ### B. Machine-Readable JSON Pipeline (for Autonomous Agents)
@@ -91,7 +109,7 @@ Subagents can execute target resolution and cluster prediction programmatically:
 from rugbot.intelligence.token_resolver import resolve_token_or_wallet
 from rugbot.intelligence.wallet_intelligence import scan_wallet_intelligence
 from rugbot.tracker.cluster_graph_model import build_cluster_intelligence_model
-from rugbot.backtest.runners.cluster_optimizer import run_cluster_tp_grid_search, HistoricalTokenSample
+from rugbot.backtest.runners.cluster_optimizer import run_cluster_tp_grid_search
 from rugbot.storage.tracker import SQLiteTrackerRepository
 from rugbot.storage.database import DatabaseManager
 
@@ -120,5 +138,5 @@ uv run rug_tui
 ```
 
 * **`Tab 1 (Targets & Execution)`**: Monitor live armed targets, assigned execution policies, and pending snipes.
-* **`Tab 4 (Backtest Matrix)`**: Visual grid of analytical Take-Profit thresholds, ROI, and fee breakdowns.
+* **`Tab 4 (Backtest Matrix)`**: Visual grid of analytical Take-Profit thresholds, ROI, launch cadence, and fee breakdowns.
 * **`Tab 5 (Wallet Tracking & Intelligence)`**: 2-pane explorer detailing cluster topology, funding paths, and satellite coordination.
