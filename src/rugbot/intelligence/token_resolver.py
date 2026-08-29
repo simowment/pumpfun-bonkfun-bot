@@ -110,51 +110,53 @@ def _rpc_call(
         {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     ).encode()
     rpc_transport = transport or SyncRpcProviderPool((rpc_url,))
-    response = None
     try:
         for attempt in range(4):
             response = rpc_transport(rpc_url, payload)
             if 200 <= response.status < 300:
-                break
+                data = json.loads(response.body)
+                if (
+                    isinstance(data, Mapping)
+                    and "error" not in data
+                    and "result" in data
+                ):
+                    return data["result"]
             if response.status == 429 and attempt < 3:
-                time.sleep(1.5 * (attempt + 1))
+                time.sleep(1.0 * (attempt + 1))
                 continue
             break
     except Exception:
-        # Direct HTTP fallback if pool is on cooldown
-        fallback_urls = [
-            "https://api.mainnet-beta.solana.com",
-            "https://solana-rpc.publicnode.com",
-        ]
-        response = None
-        for fb_url in fallback_urls:
-            try:
-                req = urllib.request.Request(
-                    fb_url,
-                    data=payload,
-                    headers={
-                        "Content-Type": "application/json",
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                    },
-                )
-                with urllib.request.urlopen(req, timeout=8) as res:
-                    response = RpcHttpResponse(status=res.status, body=res.read())
-                    break
-            except Exception:  # noqa: S112
-                continue
+        pass
 
-    if response is None or not 200 <= response.status < 300:
-        status_code = response.status if response is not None else "unknown"
-        raise RuntimeError(f"RPC {method} returned HTTP {status_code}")
-    try:
-        data = json.loads(response.body)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"RPC {method} returned invalid JSON") from error
-    if not isinstance(data, Mapping) or "error" in data:
-        raise RuntimeError(f"RPC {method} returned an error")
-    if "result" not in data:
-        raise RuntimeError(f"RPC {method} returned an incomplete response")
-    return data["result"]
+    # Direct HTTP fallback if pool is on cooldown or returned error
+    fallback_urls = [
+        "https://solana-rpc.publicnode.com",
+        "https://rpc.ankr.com/solana",
+        "https://api.mainnet-beta.solana.com",
+    ]
+    for fb_url in fallback_urls:
+        try:
+            req = urllib.request.Request(
+                fb_url,
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=8) as res:
+                if 200 <= res.status < 300:
+                    data = json.loads(res.read())
+                    if (
+                        isinstance(data, Mapping)
+                        and "error" not in data
+                        and "result" in data
+                    ):
+                        return data["result"]
+        except Exception:
+            continue
+
+    raise RuntimeError(f"RPC {method} failed across all provider endpoints")
 
 
 def _fetch_current_metadata(mint: str) -> tuple[str, str, float]:
