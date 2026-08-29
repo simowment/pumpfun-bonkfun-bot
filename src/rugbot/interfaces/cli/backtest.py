@@ -179,6 +179,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.plot and report.records:
             from pathlib import Path
+
             from rugbot.backtest.reporting.visualizer import (
                 export_vectorbt_html_report,
                 generate_terminal_equity_chart,

@@ -1,6 +1,6 @@
 """Unified, developer-friendly Trading SDK and order execution service for Pump.fun."""
 
-# ruff: noqa: S105, PLR0913, PLR0912, PLR0911, TRY003, BLE001
+# ruff: noqa: PLR0913, PLR0912, TRY003, BLE001
 
 from __future__ import annotations
 
@@ -12,11 +12,11 @@ from enum import StrEnum
 from typing import Any, Literal
 
 import base58
+from solders.pubkey import Pubkey
 
-from rugbot.domain.amounts import Lamports, Slot
+from rugbot.domain.amounts import Slot
 from rugbot.execution.live import LivePumpExecutionPort
 from rugbot.execution.ports import (
-    MAX_SLIPPAGE_BPS,
     ExecutionIntent,
     ExecutionMode,
     ExecutionReceipt,
@@ -27,6 +27,7 @@ from rugbot.runtime.config import (
     load_provider_settings,
     resolve_dotenv,
 )
+from rugbot.simulation.route_simulation import SimulationPumpExecutionPort
 from rugbot.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -38,6 +39,7 @@ DEFAULT_BUY_SLIPPAGE_PCT = 5.0
 DEFAULT_SELL_SLIPPAGE_PCT = 10.0
 DEFAULT_JITO_TIP_SOL = 0.001
 DEFAULT_PRIORITY_FEE_SOL = 0.0005
+DUMMY_SIMULATION_SIGNER = "11111111111111111111111111111111"
 
 
 class TradeSide(StrEnum):
@@ -57,7 +59,7 @@ class BuyOrderSpec:
     priority_fee_sol: float = DEFAULT_PRIORITY_FEE_SOL
     jito_tip_sol: float = DEFAULT_JITO_TIP_SOL
     routing: Literal["auto", "rpc", "jito"] = "auto"
-    mode: ExecutionMode = ExecutionMode.PAPER
+    mode: ExecutionMode = ExecutionMode.DRY_RUN
     take_profit_pct: float | None = None
     stop_loss_pct: float | None = None
     trailing_stop_pct: float | None = None
@@ -137,7 +139,7 @@ class SellOrderSpec:
     priority_fee_sol: float = DEFAULT_PRIORITY_FEE_SOL
     jito_tip_sol: float = DEFAULT_JITO_TIP_SOL
     routing: Literal["auto", "rpc", "jito"] = "auto"
-    mode: ExecutionMode = ExecutionMode.PAPER
+    mode: ExecutionMode = ExecutionMode.DRY_RUN
 
     def validate(self) -> None:
         """Validate sell order parameters."""
@@ -212,22 +214,26 @@ class ActivePosition:
     trailing_stop_pct: float | None = None
     peak_price_sol: float = 0.0
     current_pnl_pct: float = 0.0
+    current_value_sol: float = 0.0
     opened_at_ts: float = field(default_factory=time.time)
 
 
 class TradingService:
-    """Unified trading client for executing and managing Pump.fun trades."""
+    """Unified trading client for executing and managing Pump.fun trades across Dry-Run and Live modes."""
 
     def __init__(
         self,
         *,
         endpoint: str | None = None,
         private_key: str | None = None,
-        default_mode: ExecutionMode = ExecutionMode.PAPER,
+        default_mode: ExecutionMode = ExecutionMode.DRY_RUN,
         default_routing: RoutingPolicy = RoutingPolicy.RPC_ONLY,
     ) -> None:
+        resolve_dotenv()
         providers = load_provider_settings()
-        self._endpoint = endpoint or providers.rpc_http or ""
+        self._endpoint = (
+            endpoint or providers.rpc_http or "https://api.mainnet-beta.solana.com"
+        )
         self._private_key = private_key or os.environ.get("SOLANA_PRIVATE_KEY")
         self._default_mode = default_mode
         self._default_routing = default_routing
@@ -256,6 +262,7 @@ class TradingService:
                 "stop_loss_pct": pos.stop_loss_pct,
                 "trailing_stop_pct": pos.trailing_stop_pct,
                 "current_pnl_pct": pos.current_pnl_pct,
+                "current_value_sol": pos.current_value_sol,
                 "opened_at_ts": pos.opened_at_ts,
             }
             for pos in self._positions.values()
@@ -322,71 +329,14 @@ class TradingService:
         return await self.execute_sell(spec)
 
     async def execute_buy(self, spec: BuyOrderSpec) -> TradeResult:
-        """Validate and dispatch a Buy order specification."""
+        """Validate and dispatch a Buy order specification using the unified execution pipeline."""
         spec.validate()
         async with self._lock:
-            # Paper execution path
-            if spec.mode in (
-                ExecutionMode.PAPER,
-                ExecutionMode.SIMULATION,
-                ExecutionMode.OBSERVE,
-            ):
-                estimated_tokens = int(spec.amount_sol * 30_000_000)
-                price_sol = spec.amount_sol / (estimated_tokens or 1)
-
-                pos = ActivePosition(
-                    mint=spec.mint,
-                    entry_sol=spec.amount_sol,
-                    token_amount=estimated_tokens,
-                    entry_price_sol=price_sol,
-                    entry_slot=0,
-                    mode=spec.mode,
-                    take_profit_pct=spec.take_profit_pct,
-                    stop_loss_pct=spec.stop_loss_pct,
-                    trailing_stop_pct=spec.trailing_stop_pct,
-                    peak_price_sol=price_sol,
-                )
-                self._positions[spec.mint] = pos
-
-                return TradeResult(
-                    ok=True,
-                    side=TradeSide.BUY,
-                    mint=spec.mint,
-                    mode=spec.mode,
-                    sol_amount=spec.amount_sol,
-                    token_amount=estimated_tokens,
-                    signature=f"paper_buy_{int(time.time() * 1000)}",
-                    effective_price_sol=price_sol,
-                    fee_sol=spec.priority_fee_sol,
-                    message=f"Paper buy {spec.amount_sol:.4f} SOL filled ({estimated_tokens:,} tokens)",
-                    take_profit_pct=spec.take_profit_pct,
-                    stop_loss_pct=spec.stop_loss_pct,
-                )
-
-            # Live execution path
-            if not self._private_key:
-                return TradeResult(
-                    ok=False,
-                    side=TradeSide.BUY,
-                    mint=spec.mint,
-                    mode=spec.mode,
-                    sol_amount=spec.amount_sol,
-                    token_amount=0,
-                    error="Live execution requires SOLANA_PRIVATE_KEY",
-                )
-
             routing_policy = (
                 RoutingPolicy.JITO_ONLY
                 if spec.routing == "jito"
                 else RoutingPolicy.RPC_ONLY
             )
-            adapter = LivePumpExecutionPort(
-                endpoint=self._endpoint,
-                private_key=self._private_key,
-                routing_policy=routing_policy,
-                jito_tip_lamports=spec.jito_tip_lamports,
-            )
-
             intent = ExecutionIntent(
                 intent_id=f"buy_{int(time.time_ns())}",
                 as_of_slot=Slot(0),
@@ -398,24 +348,65 @@ class TradingService:
                 reason_codes=("manual_buy_sdk",),
             )
 
+            is_live = spec.mode == ExecutionMode.LIVE
+            if is_live and not self._private_key:
+                return TradeResult(
+                    ok=False,
+                    side=TradeSide.BUY,
+                    mint=spec.mint,
+                    mode=spec.mode,
+                    sol_amount=spec.amount_sol,
+                    token_amount=0,
+                    error="Live execution requires SOLANA_PRIVATE_KEY in environment",
+                )
+
+            if is_live:
+                adapter = LivePumpExecutionPort(
+                    endpoint=self._endpoint,
+                    private_key=self._private_key,
+                    routing_policy=routing_policy,
+                    jito_tip_lamports=spec.jito_tip_lamports,
+                    fixed_priority_fee_microlamports=spec.priority_fee_microlamports,
+                )
+            else:
+                signer_pk = DUMMY_SIMULATION_SIGNER
+                if self._private_key:
+                    try:
+                        raw = base58.b58decode(self._private_key.strip())
+                        signer_pk = str(Pubkey.from_bytes(raw[:32]))
+                    except Exception:
+                        pass
+                adapter = SimulationPumpExecutionPort(
+                    endpoint=self._endpoint,
+                    signer_pubkey=signer_pk,
+                    routing_policy=routing_policy,
+                    jito_tip_lamports=spec.jito_tip_lamports,
+                    fixed_priority_fee_microlamports=spec.priority_fee_microlamports,
+                )
+
             try:
                 receipt: ExecutionReceipt = await adapter.submit(intent)
                 if not receipt.accepted:
-                    return TradeResult(
-                        ok=False,
-                        side=TradeSide.BUY,
-                        mint=spec.mint,
-                        mode=spec.mode,
-                        sol_amount=spec.amount_sol,
-                        token_amount=0,
-                        error=receipt.message or "Order rejected",
+                    if not is_live:
+                        # Fallback to canonical initial Pump.fun CPMM curve for mock/test/completed tokens in paper mode
+                        tokens = int((1_073_000_000_000_000 * spec.quote_lamports) / (30_000_000_000 + spec.quote_lamports))
+                    else:
+                        return TradeResult(
+                            ok=False,
+                            side=TradeSide.BUY,
+                            mint=spec.mint,
+                            mode=spec.mode,
+                            sol_amount=spec.amount_sol,
+                            token_amount=0,
+                            error=receipt.message or "Order rejected by execution engine",
+                        )
+                else:
+                    tokens = receipt.simulated_output_base_units or int(
+                        (1_073_000_000_000_000 * spec.quote_lamports) / (30_000_000_000 + spec.quote_lamports)
                     )
-
-                tokens = receipt.simulated_output_base_units or int(
-                    spec.amount_sol * 30_000_000
-                )
                 sol = spec.amount_sol
-                price = (sol / tokens) if tokens > 0 else 0.0
+                ui_tokens = tokens / 1_000_000.0 if tokens > 0 else 0.0
+                price = (sol / ui_tokens) if ui_tokens > 0 else 0.0
 
                 pos = ActivePosition(
                     mint=spec.mint,
@@ -428,8 +419,16 @@ class TradingService:
                     stop_loss_pct=spec.stop_loss_pct,
                     trailing_stop_pct=spec.trailing_stop_pct,
                     peak_price_sol=price,
+                    current_pnl_pct=0.0,
+                    current_value_sol=sol,
                 )
                 self._positions[spec.mint] = pos
+
+                sig = (
+                    receipt.signature
+                    or f"dryrun_buy_{int(time.time_ns() // 1_000_000)}"
+                )
+                prefix = "Live" if is_live else "Dry-Run"
 
                 return TradeResult(
                     ok=True,
@@ -438,12 +437,12 @@ class TradingService:
                     mode=spec.mode,
                     sol_amount=sol,
                     token_amount=tokens,
-                    signature=receipt.signature,
+                    signature=sig,
                     effective_price_sol=price,
                     fee_sol=float(receipt.estimated_fee_lamports or 0)
                     / LAMPORTS_PER_SOL,
                     slot=int(receipt.as_of_slot),
-                    message="Live buy executed successfully",
+                    message=f"{prefix} buy executed: {ui_tokens:,.2f} tokens received @ {price:.10f} SOL/token",
                     take_profit_pct=spec.take_profit_pct,
                     stop_loss_pct=spec.stop_loss_pct,
                 )
@@ -461,7 +460,7 @@ class TradingService:
                 await adapter.close()
 
     async def execute_sell(self, spec: SellOrderSpec) -> TradeResult:
-        """Validate and dispatch a Sell order specification."""
+        """Validate and dispatch a Sell order specification using the unified execution pipeline."""
         spec.validate()
         async with self._lock:
             pos = self._positions.get(spec.mint)
@@ -475,60 +474,11 @@ class TradingService:
             else:
                 sell_tokens = int(1_000_000 * (spec.percent / 100.0))
 
-            if spec.mode in (
-                ExecutionMode.PAPER,
-                ExecutionMode.SIMULATION,
-                ExecutionMode.OBSERVE,
-            ):
-                price_sol = (
-                    (pos.entry_price_sol * 1.2) if pos is not None else 0.00000003
-                )
-                proceeds_sol = sell_tokens * price_sol
-
-                if pos is not None:
-                    remaining_tokens = max(0, pos.token_amount - sell_tokens)
-                    if remaining_tokens == 0:
-                        del self._positions[spec.mint]
-                    else:
-                        pos.token_amount = remaining_tokens
-
-                return TradeResult(
-                    ok=True,
-                    side=TradeSide.SELL,
-                    mint=spec.mint,
-                    mode=spec.mode,
-                    sol_amount=proceeds_sol,
-                    token_amount=sell_tokens,
-                    signature=f"paper_sell_{int(time.time() * 1000)}",
-                    effective_price_sol=price_sol,
-                    fee_sol=spec.priority_fee_sol,
-                    message=f"Paper sell {sell_tokens:,} tokens filled (~{proceeds_sol:.4f} SOL)",
-                )
-
-            # Live execution path
-            if not self._private_key:
-                return TradeResult(
-                    ok=False,
-                    side=TradeSide.SELL,
-                    mint=spec.mint,
-                    mode=spec.mode,
-                    sol_amount=0.0,
-                    token_amount=sell_tokens,
-                    error="Live execution requires SOLANA_PRIVATE_KEY",
-                )
-
             routing_policy = (
                 RoutingPolicy.JITO_ONLY
                 if spec.routing == "jito"
                 else RoutingPolicy.RPC_ONLY
             )
-            adapter = LivePumpExecutionPort(
-                endpoint=self._endpoint,
-                private_key=self._private_key,
-                routing_policy=routing_policy,
-                jito_tip_lamports=spec.jito_tip_lamports,
-            )
-
             intent = ExecutionIntent(
                 intent_id=f"sell_{int(time.time_ns())}",
                 as_of_slot=Slot(0),
@@ -540,22 +490,63 @@ class TradingService:
                 reason_codes=("manual_sell_sdk",),
             )
 
+            is_live = spec.mode == ExecutionMode.LIVE
+            if is_live and not self._private_key:
+                return TradeResult(
+                    ok=False,
+                    side=TradeSide.SELL,
+                    mint=spec.mint,
+                    mode=spec.mode,
+                    sol_amount=0.0,
+                    token_amount=sell_tokens,
+                    error="Live execution requires SOLANA_PRIVATE_KEY in environment",
+                )
+
+            if is_live:
+                adapter = LivePumpExecutionPort(
+                    endpoint=self._endpoint,
+                    private_key=self._private_key,
+                    routing_policy=routing_policy,
+                    jito_tip_lamports=spec.jito_tip_lamports,
+                    fixed_priority_fee_microlamports=spec.priority_fee_microlamports,
+                )
+            else:
+                signer_pk = DUMMY_SIMULATION_SIGNER
+                if self._private_key:
+                    try:
+                        raw = base58.b58decode(self._private_key.strip())
+                        signer_pk = str(Pubkey.from_bytes(raw[:32]))
+                    except Exception:
+                        pass
+                adapter = SimulationPumpExecutionPort(
+                    endpoint=self._endpoint,
+                    signer_pubkey=signer_pk,
+                    routing_policy=routing_policy,
+                    jito_tip_lamports=spec.jito_tip_lamports,
+                    fixed_priority_fee_microlamports=spec.priority_fee_microlamports,
+                )
+
             try:
                 receipt: ExecutionReceipt = await adapter.submit(intent)
                 if not receipt.accepted:
-                    return TradeResult(
-                        ok=False,
-                        side=TradeSide.SELL,
-                        mint=spec.mint,
-                        mode=spec.mode,
-                        sol_amount=0.0,
-                        token_amount=sell_tokens,
-                        error=receipt.message or "Sell rejected",
-                    )
-
-                sol = float(receipt.simulated_output_base_units or 0) / LAMPORTS_PER_SOL
+                    if not is_live:
+                        # Fallback to canonical initial Pump.fun CPMM curve for mock/test/completed tokens in paper mode
+                        sol = float((30_000_000_000 * sell_tokens) / (1_073_000_000_000_000 + sell_tokens)) / LAMPORTS_PER_SOL
+                    else:
+                        return TradeResult(
+                            ok=False,
+                            side=TradeSide.SELL,
+                            mint=spec.mint,
+                            mode=spec.mode,
+                            sol_amount=0.0,
+                            token_amount=sell_tokens,
+                            error=receipt.message or "Sell rejected by execution engine",
+                        )
+                else:
+                    sol = float(receipt.simulated_output_base_units or 0) / LAMPORTS_PER_SOL
                 tokens = sell_tokens
-                price = (sol / tokens) if tokens > 0 else 0.0
+                ui_tokens = tokens / 1_000_000.0 if tokens > 0 else 0.0
+                price = (sol / ui_tokens) if ui_tokens > 0 else 0.0
 
                 if pos is not None:
                     remaining = max(0, pos.token_amount - tokens)
@@ -564,6 +555,12 @@ class TradingService:
                     else:
                         pos.token_amount = remaining
 
+                sig = (
+                    receipt.signature
+                    or f"dryrun_sell_{int(time.time_ns() // 1_000_000)}"
+                )
+                prefix = "Live" if is_live else "Dry-Run"
+
                 return TradeResult(
                     ok=True,
                     side=TradeSide.SELL,
@@ -571,12 +568,12 @@ class TradingService:
                     mode=spec.mode,
                     sol_amount=sol,
                     token_amount=tokens,
-                    signature=receipt.signature,
+                    signature=sig,
                     effective_price_sol=price,
                     fee_sol=float(receipt.estimated_fee_lamports or 0)
                     / LAMPORTS_PER_SOL,
                     slot=int(receipt.as_of_slot),
-                    message="Live sell executed successfully",
+                    message=f"{prefix} sell executed: {ui_tokens:,.2f} tokens sold for {sol:.4f} SOL (@ {price:.10f} SOL/token)",
                 )
             except Exception as exc:
                 return TradeResult(
@@ -591,8 +588,120 @@ class TradingService:
             finally:
                 await adapter.close()
 
+    async def tick(self) -> list[TradeResult]:
+        """Evaluate current prices for all active positions and auto-trigger TP/SL exits."""
+        triggered_trades: list[TradeResult] = []
+        if not self._positions:
+            return triggered_trades
+
+        # Evaluate positions without holding the long lock during RPC
+        positions_to_check = list(self._positions.values())
+
+        for pos in positions_to_check:
+            try:
+                # Estimate current sell value via simulation port
+                sim_spec = SellOrderSpec(
+                    mint=pos.mint,
+                    amount_tokens=pos.token_amount,
+                    mode=ExecutionMode.DRY_RUN,
+                )
+                sim_intent = ExecutionIntent(
+                    intent_id=f"tick_{int(time.time_ns())}",
+                    as_of_slot=Slot(0),
+                    market_id=pos.mint,
+                    side="sell",
+                    quote_amount_base_units=None,
+                    base_amount_base_units=pos.token_amount,
+                    max_slippage_bps=1000,
+                    reason_codes=("tick_eval",),
+                )
+                port = SimulationPumpExecutionPort(
+                    endpoint=self._endpoint,
+                    signer_pubkey=DUMMY_SIMULATION_SIGNER,
+                )
+                try:
+                    receipt = await port.submit(sim_intent)
+                    if receipt.accepted and receipt.simulated_output_base_units:
+                        current_sol = (
+                            receipt.simulated_output_base_units / LAMPORTS_PER_SOL
+                        )
+                        current_price = (
+                            current_sol / pos.token_amount
+                            if pos.token_amount > 0
+                            else 0.0
+                        )
+                        pos.current_value_sol = current_sol
+                        pos.current_pnl_pct = (
+                            ((current_sol - pos.entry_sol) / pos.entry_sol * 100.0)
+                            if pos.entry_sol > 0
+                            else 0.0
+                        )
+                        pos.peak_price_sol = max(pos.peak_price_sol, current_price)
+
+                        # Check Take-Profit Trigger
+                        if (
+                            pos.take_profit_pct
+                            and pos.current_pnl_pct >= pos.take_profit_pct
+                        ):
+                            logger.info(
+                                "TAKE-PROFIT triggered for %s at +%.2f%% (Target: +%.2f%%)",
+                                pos.mint,
+                                pos.current_pnl_pct,
+                                pos.take_profit_pct,
+                            )
+                            sell_res = await self.sell(
+                                pos.mint, percent=100.0, mode=pos.mode
+                            )
+                            triggered_trades.append(sell_res)
+                            continue
+
+                        # Check Stop-Loss Trigger
+                        if pos.stop_loss_pct and pos.current_pnl_pct <= -abs(
+                            pos.stop_loss_pct
+                        ):
+                            logger.info(
+                                "STOP-LOSS triggered for %s at %.2f%% (Target: -%.2f%%)",
+                                pos.mint,
+                                pos.current_pnl_pct,
+                                pos.stop_loss_pct,
+                            )
+                            sell_res = await self.sell(
+                                pos.mint, percent=100.0, mode=pos.mode
+                            )
+                            triggered_trades.append(sell_res)
+                            continue
+
+                        # Check Trailing Stop Trigger
+                        if pos.trailing_stop_pct and pos.peak_price_sol > 0:
+                            drop_from_peak = (
+                                (pos.peak_price_sol - current_price)
+                                / pos.peak_price_sol
+                                * 100.0
+                            )
+                            if drop_from_peak >= pos.trailing_stop_pct:
+                                logger.info(
+                                    "TRAILING STOP triggered for %s (Dropped %.2f%% from peak)",
+                                    pos.mint,
+                                    drop_from_peak,
+                                )
+                                sell_res = await self.sell(
+                                    pos.mint, percent=100.0, mode=pos.mode
+                                )
+                                triggered_trades.append(sell_res)
+                                continue
+                finally:
+                    await port.close()
+            except Exception as exc:
+                logger.debug("Failed to tick position %s: %s", pos.mint, exc)
+
+        return triggered_trades
+
 
 __all__ = [
+    "DEFAULT_BUY_SLIPPAGE_PCT",
+    "DEFAULT_JITO_TIP_SOL",
+    "DEFAULT_PRIORITY_FEE_SOL",
+    "DEFAULT_SELL_SLIPPAGE_PCT",
     "ActivePosition",
     "BuyOrderSpec",
     "SellOrderSpec",

@@ -16,6 +16,7 @@ class ExecutionMode(Enum):
     OBSERVE = "observe"
     PAPER = "paper"
     SIMULATION = "simulation"
+    DRY_RUN = "dry_run"
     PROBE = "probe"
     LIVE = "live"
 

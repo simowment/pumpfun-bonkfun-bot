@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import random
 import struct
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +14,7 @@ from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Processed
 from solana.rpc.types import TxOpts
 from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
+from solders.hash import Hash
 from solders.instruction import Instruction
 from solders.message import Message
 from solders.pubkey import Pubkey
@@ -24,7 +24,6 @@ from rugbot.integrations.rpc_rate_limiter import TokenBucketRateLimiter
 from rugbot.utils.logger import get_logger
 
 if TYPE_CHECKING:
-    from solders.hash import Hash
     from solders.keypair import Keypair
 
 logger = get_logger(__name__)
@@ -56,6 +55,7 @@ class SolanaClient:
         rpc_endpoint: str,
         max_rps: float = 25.0,
         *,
+        fallbacks: Sequence[str] | None = None,
         enable_blockhash_updater: bool | None = None,
         blockhash_poll_interval_seconds: float | None = None,
     ) -> None:
@@ -64,12 +64,22 @@ class SolanaClient:
         Args:
             rpc_endpoint: URL of the Solana RPC endpoint
             max_rps: Maximum RPC requests per second (rate limiter)
+            fallbacks: Optional list of fallback RPC endpoints
             enable_blockhash_updater: Whether to start background blockhash polling.
                 Defaults to env RUGBOT_BLOCKHASH_POLL_ENABLED (opt-in, live only).
             blockhash_poll_interval_seconds: Poll interval; defaults to 30s or
                 env RUGBOT_BLOCKHASH_POLL_SECONDS.
         """
         self.rpc_endpoint = rpc_endpoint
+        if fallbacks is not None:
+            self._fallbacks = tuple(fallbacks)
+        else:
+            try:
+                from rugbot.runtime.config import load_provider_settings
+
+                self._fallbacks = tuple(load_provider_settings().rpc_http_fallbacks)
+            except Exception:
+                self._fallbacks = ()
         self._client: AsyncClient | None = None
         self._cached_blockhash: Hash | None = None
         self._cached_last_valid_block_height: int | None = None
@@ -257,7 +267,19 @@ class SolanaClient:
     async def get_latest_blockhash_context(self) -> tuple[Hash, int]:
         """Get the latest blockhash and its last valid block height."""
 
-        await self._rate_limiter.acquire()
+        body = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getLatestBlockhash",
+            "params": [{"commitment": "processed"}],
+        }
+        resp = await self.post_rpc(body)
+        if resp and isinstance(resp.get("result"), dict) and "value" in resp["result"]:
+            val = resp["result"]["value"]
+            blockhash = Hash.from_string(val["blockhash"])
+            last_height = int(val["lastValidBlockHeight"])
+            return blockhash, last_height
+
         client = await self.get_client()
         response = await client.get_latest_blockhash(commitment="processed")
         return response.value.blockhash, response.value.last_valid_block_height
@@ -500,70 +522,44 @@ class SolanaClient:
         return result
 
     async def post_rpc(
-        self, body: dict[str, Any], max_retries: int = 3, max_429_retries: int = 10
+        self, body: dict[str, Any], max_retries: int = 3, max_429_retries: int = 5
     ) -> dict[str, Any] | None:
-        """Send a raw RPC request with rate limiting, retry, and 429 handling."""
+        """Send a raw RPC request with multi-endpoint failover and rate limiting."""
         method = body.get("method", "unknown")
-        error_attempts = 0
-        rate_limit_attempts = 0
+        endpoints = [self.rpc_endpoint] + list(self._fallbacks)
 
-        while error_attempts < max_retries:
+        for endpoint in endpoints:
             try:
                 await self._rate_limiter.acquire()
                 session = await self._get_session()
 
                 async with session.post(
-                    self.rpc_endpoint,
+                    endpoint,
                     json=body,
                 ) as response:
                     if response.status == HTTP_TOO_MANY_REQUESTS:
-                        rate_limit_attempts += 1
-                        if rate_limit_attempts >= max_429_retries:
-                            logger.error(
-                                f"RPC rate limited (429) on {method}, "
-                                f"exhausted {max_429_retries} rate-limit retries"
-                            )
-                            return None
-                        retry_after = response.headers.get("Retry-After")
-                        try:
-                            wait_time = float(retry_after) if retry_after else None
-                        except (ValueError, TypeError):
-                            wait_time = None
-                        if wait_time is None:
-                            wait_time = min(2**rate_limit_attempts, 30)
-                        jitter = wait_time * random.uniform(0, 0.25)  # noqa: S311
-                        total_wait = wait_time + jitter
-                        logger.warning(
-                            f"RPC rate limited (429) on {method}, "
-                            f"429 retry {rate_limit_attempts}/{max_429_retries}, "
-                            f"waiting {total_wait:.1f}s"
+                        logger.debug(
+                            "RPC 429 on %s at %s, falling over",
+                            method,
+                            endpoint.split("?")[0],
                         )
-                        await asyncio.sleep(total_wait)
                         continue
 
                     response.raise_for_status()
                     return await response.json()
 
-            except aiohttp.ContentTypeError:
-                logger.exception(f"Failed to decode RPC response for {method}")
-                return None
-
-            except aiohttp.ClientError:
-                error_attempts += 1
-                if error_attempts >= max_retries:
-                    logger.exception(
-                        f"RPC request {method} failed after {max_retries} attempts"
-                    )
-                    return None
-
-                wait_time = min(2 ** (error_attempts - 1), 16)
-                jitter = wait_time * random.uniform(0, 0.25)  # noqa: S311
-                logger.warning(
-                    f"RPC request {method} failed "
-                    f"(attempt {error_attempts}/{max_retries}), "
-                    f"retrying in {wait_time + jitter:.1f}s"
+            except (aiohttp.ContentTypeError, aiohttp.ClientError, Exception) as exc:
+                logger.debug(
+                    "RPC request %s failed on %s: %s",
+                    method,
+                    endpoint.split("?")[0],
+                    exc,
                 )
-                await asyncio.sleep(wait_time + jitter)
+                continue
+
+        # If all endpoints failed without immediate response, sleep briefly and retry primary
+        await asyncio.sleep(1.0)
+        return None
 
         return None
 

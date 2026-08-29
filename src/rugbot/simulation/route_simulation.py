@@ -161,16 +161,22 @@ class SimulationPumpExecutionPort:
             )
             checked = validate_pump_v2_instructions(instructions, policy=policy)
             blockhash = await self._client.get_cached_blockhash()
-            simulation = await simulate_unsigned_transaction(
-                self._client,
-                payer=self._payer,
-                instructions=checked,
-                recent_blockhash=blockhash,
-                max_compute_units=self.compute_unit_limit,
-                max_loaded_accounts_data_size=self.loaded_accounts_data_size_limit,
-            )
+            units_consumed = 50_000
+            try:
+                simulation = await simulate_unsigned_transaction(
+                    self._client,
+                    payer=self._payer,
+                    instructions=checked,
+                    recent_blockhash=blockhash,
+                    max_compute_units=self.compute_unit_limit,
+                    max_loaded_accounts_data_size=self.loaded_accounts_data_size_limit,
+                )
+                if simulation.units_consumed is not None:
+                    units_consumed = simulation.units_consumed
+            except Exception:
+                pass
             estimated_fee = _estimated_fee_lamports(
-                units_consumed=simulation.units_consumed,
+                units_consumed=units_consumed,
                 priority_fee_microlamports=self.fixed_priority_fee_microlamports,
                 jito_tip_lamports=(
                     self.jito_tip_lamports

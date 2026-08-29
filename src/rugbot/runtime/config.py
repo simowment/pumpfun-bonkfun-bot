@@ -59,6 +59,7 @@ class ExecutionMode(StrEnum):
     OBSERVE = "observe"
     PAPER = "paper"
     SIMULATION = "simulation"
+    DRY_RUN = "dry_run"
     LIVE = "live"
 
 
@@ -310,7 +311,7 @@ def resolve_dotenv(*, include_signing: bool = False) -> None:
         if not env_path.exists():
             continue
         for key, value in dotenv_values(env_path).items():
-            if key in allowed and value is not None and key not in os.environ:
+            if key in allowed and value is not None:
                 os.environ[key] = value
 
 

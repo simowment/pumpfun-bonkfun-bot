@@ -26,19 +26,35 @@ class PumpBondingCurveAccountSnapshot:
     """Decoded on-chain point-in-time bonding-curve snapshot."""
 
     as_of_slot: Slot
-    mint_pubkey: str
-    bonding_curve_pubkey: str
     virtual_token_reserves: TokenBaseUnits
     virtual_sol_reserves: QuoteBaseUnits
     real_token_reserves: TokenBaseUnits
     real_sol_reserves: QuoteBaseUnits
     token_total_supply: TokenBaseUnits
     complete: bool
+    mint_pubkey: str = ""
+    bonding_curve_pubkey: str = ""
+    account_pubkey: str = ""
+    owner_program_id: str = ""
+    creator: bytes | None = None
     creator_pubkey: str | None = None
     quote_mint_pubkey: str | None = None
     token_program_pubkey: str | None = None
     is_mayhem_mode: bool = False
     is_cashback_enabled: bool = False
+    is_cashback_coin: bool = False
+    base_decimals: int = 6
+    quote_decimals: int = 9
+    base_mint: str = ""
+    quote_mint: str = ""
+    raw_account_data_sha256: str = ""
+    account_data_length: int = 0
+    trailing_zero_padding_length: int = 0
+    decoder_version: str = ""
+    idl_hash: str = ""
+    program_config_version: str = ""
+    layout_artifact_version: str = ""
+    source_artifact_version: str = ""
 
 
 @dataclass(frozen=True, slots=True)

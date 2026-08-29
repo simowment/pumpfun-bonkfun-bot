@@ -6,10 +6,8 @@ import pytest
 
 from rugbot.execution.ports import ExecutionMode
 from rugbot.execution.trade_service import (
-    ActivePosition,
     BuyOrderSpec,
     SellOrderSpec,
-    TradeResult,
     TradeSide,
     TradingService,
 )

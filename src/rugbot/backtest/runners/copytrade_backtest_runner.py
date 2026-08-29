@@ -296,11 +296,9 @@ def run_copytrade_tp_sl_grid_search(
                     losses += 1
 
                 equity += net
-                if equity > peak_equity:
-                    peak_equity = equity
+                peak_equity = max(peak_equity, equity)
                 dd = peak_equity - equity
-                if dd > max_dd:
-                    max_dd = dd
+                max_dd = max(max_dd, dd)
 
             n = len(samples)
             wr = (wins / n * 100.0) if n else 0.0
@@ -383,8 +381,7 @@ def run_copytrade_tp_sl_grid_search(
             s, opt_tp, opt_sl, config
         )
         cum_eq += net
-        if cum_eq > peak_eq:
-            peak_eq = cum_eq
+        peak_eq = max(peak_eq, cum_eq)
         dd = ((peak_eq - cum_eq) / peak_eq * 100.0) if peak_eq > 0 else 0.0
         impact_drag = config.quote_size_sol * (market_impact_pct / 100.0)
         total_impact_drag += impact_drag
@@ -431,6 +428,7 @@ def _fetch_onchain_copytrade_samples(wallet: str) -> tuple[CopytradeSample, ...]
     import json
     import os
     import urllib.request
+
     from rugbot.runtime.config import load_provider_settings, resolve_dotenv
 
     resolve_dotenv()

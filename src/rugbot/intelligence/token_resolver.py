@@ -15,7 +15,6 @@ from typing import Any
 
 import base58
 from sol_trade_sdk.solana.provider_pool import (
-    RpcHttpResponse,
     SyncRpcProviderPool,
     SyncRpcTransport,
 )

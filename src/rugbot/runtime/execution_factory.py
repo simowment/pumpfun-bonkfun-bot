@@ -35,16 +35,15 @@ def build_execution_port(
         return ObserveExecutionPort()
     if mode is ExecutionMode.PAPER:
         return PaperExecutionPort()
-    if mode is ExecutionMode.SIMULATION:
+    if mode in (ExecutionMode.SIMULATION, ExecutionMode.DRY_RUN):
         settings = execution or SniperExecution(
-            mode=ExecutionMode.SIMULATION,
+            mode=mode,
             quote_size_lamports=1,
         )
-        if expected_signer_pubkey is None:
-            raise ValueError("execution.signer_pubkey is required for route simulation")
+        signer = expected_signer_pubkey or "11111111111111111111111111111111"
         return SimulationPumpExecutionPort(
             endpoint=endpoint,
-            signer_pubkey=expected_signer_pubkey,
+            signer_pubkey=signer,
             fixed_priority_fee_microlamports=settings.priority_fee_microlamports,
             jito_tip_lamports=settings.jito_tip_lamports,
             compute_unit_limit=settings.compute_unit_limit,
