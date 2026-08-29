@@ -116,7 +116,8 @@ def _eval_tp(  # noqa: PLR0913
     current_drawdown = max_drawdown = 0.0
 
     for token in samples:
-        if token.ath_multiplier >= tp:
+        token_ath = token.ath_multiplier if token.ath_multiplier is not None else 1.0
+        if token_ath >= tp:
             gross_gain = buy_size_sol * (tp - 1.0)
             exit_fee = buy_size_sol * tp * PUMP_SWAP_FEE_PCT + gas_fee_sol
             trade_net = gross_gain - entry_fee - exit_fee
@@ -216,7 +217,12 @@ def run_cluster_tp_grid_search(  # noqa: PLR0913
     }
 
     # Step 1: Find the exact optimal TP at ATH breakpoints
-    ath_candidates = sorted({s.ath_multiplier for s in samples})
+    valid_candidates = {
+        s.ath_multiplier
+        for s in samples
+        if s.ath_multiplier is not None and s.ath_multiplier > 0
+    }
+    ath_candidates = sorted(valid_candidates) if valid_candidates else [1.0]
     best_ev = -float("inf")
     best_tp = ath_candidates[0]
     for tp in ath_candidates:
@@ -226,7 +232,9 @@ def run_cluster_tp_grid_search(  # noqa: PLR0913
             best_tp = tp
 
     # Step 2: Build display table — ATH breakpoints merged with optional display grid
-    display_tps = sorted(set(ath_candidates) | set(tp_grid or []))
+    display_tps = sorted(
+        set(ath_candidates) | {x for x in (tp_grid or []) if x is not None and x > 0}
+    )
     evaluations = [
         _eval_tp(tp, samples, is_optimal=(tp == best_tp and best_ev > 0), **eval_kwargs)
         for tp in display_tps
@@ -283,9 +291,9 @@ def run_cluster_tp_grid_search(  # noqa: PLR0913
     )
 
     # Operator Timing & Consistency Statistics
-    aths = [s.ath_multiplier for s in samples]
-    avg_ath = float(statistics.mean(aths))
-    median_ath = float(statistics.median(aths))
+    aths = [s.ath_multiplier for s in samples if s.ath_multiplier is not None]
+    avg_ath = float(statistics.mean(aths)) if aths else 1.0
+    median_ath = float(statistics.median(aths)) if aths else 1.0
     ath_std = (
         float(statistics.stdev(aths)) if len(aths) >= MIN_SAMPLE_COUNT_FOR_STD else 0.0
     )
@@ -295,7 +303,7 @@ def run_cluster_tp_grid_search(  # noqa: PLR0913
         else 100.0
     )
 
-    peak_mcs = [s.peak_mc_usd for s in samples]
+    peak_mcs = [s.peak_mc_usd for s in samples if s.peak_mc_usd is not None]
     avg_peak_mc = float(statistics.mean(peak_mcs)) if peak_mcs else 0.0
 
     rug_delays = [
