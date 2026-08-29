@@ -1082,17 +1082,17 @@ def main(argv: list[str] | None = None) -> int:
     # One-liner
     if no_copy:
         print(
-            f"✗ {mint} (${sym}) · slot {slot} txIdx {creator_tx} · creator {creator_short} · NO COPY ABORTED — {why}"
+            f"[-] {mint} (${sym}) | slot {slot} txIdx {creator_tx} | creator {creator_short} | NO COPY ABORTED - {why}"
         )
     else:
-        pick_short = _short(pick.wallet) if pick else "—"  # type: ignore[union-attr]
-        star = "★ RECOMMENDED"
+        pick_short = _short(pick.wallet) if pick else "-"  # type: ignore[union-attr]
+        star = "[*] RECOMMENDED"
         rugged_tag = rugged if dex_ok else "rugged N/A fail-closed"
         print(
-            f"✓ {mint} (${sym}) · slot {slot} txIdx {creator_tx} · creator {creator_short} · "
-            f"bundle {len(buys)} buys B0×{b0} B1×{b1} total {_format_sol(total_sol)}"
-            f" · 1s MC proxy {mc_proxy} · {rugged_tag} · "
-            f"{star} {pick_short} — {why}"
+            f"[+] {mint} (${sym}) | slot {slot} txIdx {creator_tx} | creator {creator_short} | "
+            f"bundle {len(buys)} buys B0x{b0} B1x{b1} total {_format_sol(total_sol)}"
+            f" | 1s MC proxy {mc_proxy} | {rugged_tag} | "
+            f"{star} {pick_short} - {why}"
         )
 
     # Detailed table
@@ -1158,7 +1158,7 @@ def main(argv: list[str] | None = None) -> int:
             # second hop: those that funded relays
             upstream = {r["from"] for r in funding_rows if r["to"] in relay_addrs}
             print(
-                f"    {'hop':>3}  {'amount':>10}  {'from → to':<38}  {'slot':>10}  {'sig':<14}  role"
+                f"    {'hop':>3}  {'amount':>10}  {'from -> to':<38}  {'slot':>10}  {'sig':<14}  role"
             )
             for idx, r in enumerate(
                 sorted(funding_rows, key=lambda x: int(x["slot"])), start=1
@@ -1169,7 +1169,7 @@ def main(argv: list[str] | None = None) -> int:
                     amt_str += "*"
                 from_s = _short(r["from"])
                 to_s = _short(r["to"])
-                flow = f"{from_s} → {to_s}"
+                flow = f"{from_s} -> {to_s}"
                 sig_s = _short_sig(r["sig"])
                 slot_s = str(r["slot"])
                 # role classification
@@ -1199,16 +1199,16 @@ def main(argv: list[str] | None = None) -> int:
                                 for y in funding_rows
                             )
                             role = (
-                                "Sous-Mère"
+                                "Sous-Mere"
                                 if has_mother_upstream
-                                else "Sous-Mère"
+                                else "Sous-Mere"
                                 if r["lamports"] < 20 * _LAMPORTS_PER_SOL
                                 and amt_counts[r["lamports"]] >= 2
                                 else "CEX"
                             )
                             # simplify: if amount small recurrent -> CEX/Sous-Mère
                             if role == "CEX" and amt_counts[r["lamports"]] >= 2:
-                                role = "Sous-Mère"
+                                role = "Sous-Mere"
                         else:
                             role = (
                                 "CEX"
@@ -1217,7 +1217,7 @@ def main(argv: list[str] | None = None) -> int:
                                 else "Funder"
                             )
                     # burner target marker
-                    role = role + "/Burner→" if False else role
+                    role = role + "/Burner->" if False else role
                     # final mapping: keep concise
                     if r["to"] in burner_set:
                         # target is burner, source role as above
@@ -1226,9 +1226,9 @@ def main(argv: list[str] | None = None) -> int:
                     role = "Master"
                 elif r["to"] in relay_addrs:
                     role = (
-                        "Master→Sous-Mère"
+                        "Master->Sous-Mere"
                         if r["lamports"] >= 50 * _LAMPORTS_PER_SOL
-                        else "Sous-Mère"
+                        else "Sous-Mere"
                     )
                 else:
                     role = "CEX" if r["lamports"] < 10 * _LAMPORTS_PER_SOL else "Funder"
@@ -1236,13 +1236,13 @@ def main(argv: list[str] | None = None) -> int:
                 if r["lamports"] >= _MOTHER_THRESHOLD_LAMPORTS:
                     role = "Master"
                 elif r["from"] in mother_addrs:
-                    role = "Sous-Mère"
+                    role = "Sous-Mere"
                 print(
                     f"    {idx:>3}  {amt_str:>10}  {flow:<38}  {slot_s:>10}  {sig_s:<14}  {role}"
                 )
             if funding_summary:
-                print(f"    signature montants réutilisables: {funding_summary}")
-            # chain lines like "CEX 2.495 SOL → Fresh Wallet → Create"
+                print(f"    signature montants reutilisables: {funding_summary}")
+            # chain lines like "CEX 2.495 SOL -> Fresh Wallet -> Create"
             for target in [resolved.target_wallet, *list(resolved.bundle_wallets[:3])]:
                 chain = [r for r in funding_rows if r["to"] == target]
                 if chain:
@@ -1251,7 +1251,7 @@ def main(argv: list[str] | None = None) -> int:
                     src_short = _short(c["from"])
                     tgt_short = _short(c["to"])
                     print(
-                        f"    chain: {src_short} {amt:.3f} SOL → {tgt_short} → Create (slot {c['slot']} sig {_short_sig(c['sig'])})"
+                        f"    chain: {src_short} {amt:.3f} SOL -> {tgt_short} -> Create (slot {c['slot']} sig {_short_sig(c['sig'])})"
                     )
     if score_result is not None:
         print("  score (--score) operator last 10 launches:")
@@ -1275,7 +1275,7 @@ def main(argv: list[str] | None = None) -> int:
             robust = score_result.get("robust_zone", [])
             robust_s = ",".join(f"+{x}%" for x in robust) if robust else f"+{tp}%"
             print(
-                f"    Winrate {wins}/10 ({wr:.0f}%) · Net EV {net_ev:+.0f}% (bible: 7W+700-3*40=+580%) · TP optimal +{tp}% (robustesse zone {robust_s})"
+                f"    Winrate {wins}/10 ({wr:.0f}%) | Net EV {net_ev:+.0f}% (bible: 7W+700-3*40=+580%) | TP optimal +{tp}% (robustesse zone {robust_s})"
             )
     # --- install-tracker wizard human output (reuses precomputed install_info) ---
     if install_info is not None:
@@ -1287,10 +1287,10 @@ def main(argv: list[str] | None = None) -> int:
         _gate_reason = str(install_info["gate_reason"])
         if not as_json:
             if _abstained:
-                print(f"  install-tracker [{_mode}] ABSTAINED — {_gate_reason}")
+                print(f"  install-tracker [{_mode}] ABSTAINED - {_gate_reason}")
                 print(f"  candidate: {_addr} ({_hint})")
                 print(
-                    "  Après ta validation: relance avec --force pour poser le tracker"
+                    "  Apres ta validation: relance avec --force pour poser le tracker"
                 )
                 print(f"  snippet (not applied):\n{_snippet}")
             else:
@@ -1300,19 +1300,19 @@ def main(argv: list[str] | None = None) -> int:
                     and not bool(getattr(args, "force", False))
                 ):
                     print(
-                        f"  install-tracker [{_mode}] — Après ta validation ✓ (winrate {float(score_result['winrate_pct']):.0f}% ≥ {_INSTALL_MIN_WINRATE_PCT:.0f}%)"
+                        f"  install-tracker [{_mode}] - Apres ta validation [OK] (winrate {float(score_result['winrate_pct']):.0f}% >= {_INSTALL_MIN_WINRATE_PCT:.0f}%)"
                     )
                 elif bool(getattr(args, "force", False)):
                     print(
-                        f"  install-tracker [{_mode}] — Après ta validation (forcé --force) ✓"
+                        f"  install-tracker [{_mode}] - Apres ta validation (force --force) [OK]"
                     )
                 else:
                     print(
-                        f"  install-tracker [{_mode}] — sans --score (validation manuelle requise) — Après ta validation"
+                        f"  install-tracker [{_mode}] - sans --score (validation manuelle requise) - Apres ta validation"
                     )
                 if _mode == "method1":
                     print(
-                        "  Method1 = sniper via funding chain (mother wallet + B0) — use mother wallet above"
+                        "  Method1 = sniper via funding chain (mother wallet + B0) - use mother wallet above"
                     )
                 else:
                     print(
@@ -1334,7 +1334,7 @@ def main(argv: list[str] | None = None) -> int:
             if bool(getattr(args, "apply", False)):
                 if _abstained:
                     print(
-                        "  --apply refusé (fail-closed): validation insuffisante, ajoutez --force après validation",
+                        "  --apply refuse (fail-closed): validation insuffisante, ajoutez --force apres validation",
                         file=sys.stderr,
                     )
                 else:
@@ -1402,7 +1402,9 @@ def main(argv: list[str] | None = None) -> int:
                                 "minimum_wallet_reserve_lamports": 15000000,
                             }
                         set_config_db(state_dir, "sniper", doc)
-                        print(f"  ✓ DB sniper config written → {state_dir}/rugbot.db")
+                        print(
+                            f"  [OK] DB sniper config written -> {state_dir}/rugbot.db"
+                        )
                     except Exception as exc:  # noqa: BLE001
                         print(f"  --apply failed (fail-closed): {exc}", file=sys.stderr)
     print("  live: rug_watch --stream  |  rug_live  |  rug_web")
