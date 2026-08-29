@@ -558,8 +558,8 @@ def _resolve_tracked_poll_interval(
 ) -> float:
     """Resolve poll interval: explicit > env RUGBOT_TRACKED_POLL_SECONDS > default."""
     if explicit is not None:
-        if explicit < MIN_POLL_SECONDS:
-            raise ValueError("poll_interval_seconds must be >= 5.0")  # noqa: TRY003
+        if explicit <= 0.0:
+            raise ValueError("poll_interval_seconds must be > 0")  # noqa: TRY003
         return explicit
     env_value = os.environ.get("RUGBOT_TRACKED_POLL_SECONDS", "").strip()
     if env_value:

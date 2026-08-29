@@ -1075,6 +1075,37 @@ class RugbotApp:
         """Return persistent target scan summaries, newest first."""
         return list(self._repository.get_target_scans())
 
+    def target_scan_history(
+        self, address: str, limit: int = 100
+    ) -> list[TargetScanRecord]:
+        """Return persistent target scan events for an entity address."""
+        return list(self._repository.get_target_scans_for_entity(address, limit=limit))
+
+    async def wallet_balance(self, requested_address: str) -> CommandResult:
+        """Query finalized SOL balance for the requested address."""
+        from rugbot.integrations.solana_rpc import query_finalized_balance_with_slot
+        from rugbot.runtime.config import load_provider_settings
+
+        endpoint = self._endpoint or load_provider_settings().endpoint
+        try:
+            balance_lamports, slot = await query_finalized_balance_with_slot(
+                endpoint, requested_address
+            )
+            return CommandResult(
+                ok=True,
+                message="finalized SOL balance loaded",
+                data={
+                    "address": requested_address,
+                    "balance_lamports": balance_lamports,
+                    "slot": slot,
+                },
+            )
+        except Exception as exc:
+            return CommandResult(
+                ok=False,
+                message=f"failed to load finalized balance: {exc}",
+            )
+
     def cached_entity_report(self, query: str) -> CommandResult:
         """Return the latest durable entity report without provider access."""
 

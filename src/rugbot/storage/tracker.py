@@ -561,11 +561,11 @@ class SQLiteTrackerRepository:
         )
 
     def get_entity_backfill(self, query: str) -> EntityBackfillRecord | None:
-        """Fetch one entity backfill by its original query."""
+        """Fetch one entity backfill by its original query or resolved wallet."""
 
         row = self._db.connection.execute(
-            "SELECT * FROM tracker_entity_backfills WHERE query = ?",
-            (query,),
+            "SELECT * FROM tracker_entity_backfills WHERE query = ? OR wallet = ? ORDER BY updated_at DESC LIMIT 1",
+            (query, query),
         ).fetchone()
         return _entity_backfill_from_row(row) if row is not None else None
 
