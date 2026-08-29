@@ -8,6 +8,7 @@ Accurately models:
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -43,15 +44,11 @@ _SYNTH_REAL_BASE: int = 800_000_000_000_000
 _SYNTH_REAL_QUOTE: int = 30_000_000_000
 
 
-def _synthetic_reserves(price_ppm: int, slot: int) -> PoolReserves:
-    if price_ppm <= 0:
-        price_ppm = 1
-    v_base = _SYNTH_VIRTUAL_BASE
-    v_quote = max(1, (v_base * price_ppm) // 1_000_000)
-    if v_quote > 10_000_000_000_000:
-        scale = v_quote // 10_000_000_000_000 + 1
-        v_quote //= scale
-        v_base //= scale
+def _synthetic_reserves(multiplier: float, slot: int) -> PoolReserves:
+    mult = max(0.001, float(multiplier))
+    sqrt_m = math.sqrt(mult)
+    v_quote = max(1, int(_SYNTH_REAL_QUOTE * sqrt_m))
+    v_base = max(1, int(_SYNTH_VIRTUAL_BASE / sqrt_m))
     return PoolReserves(
         virtual_base_reserves=v_base,
         virtual_quote_reserves=v_quote,
@@ -124,6 +121,9 @@ class CopytradeTpSlEvaluation:
     robust: bool
 
 
+from rugbot.backtest.reporting.visualizer import TradePerformanceRecord
+
+
 @dataclass(frozen=True, slots=True)
 class CopytradeBacktestReport:
     target: str
@@ -134,7 +134,9 @@ class CopytradeBacktestReport:
     optimal_sl: float | None
     optimal_ev: float
     robust_zone: tuple[tuple[float, float], ...]
-    warnings: tuple[str, ...]
+    records: tuple[TradePerformanceRecord, ...] = ()
+    market_impact_drag_sol: float = 0.0
+    warnings: tuple[str, ...] = ()
     insufficient_data: bool = False
     message: str = ""
 
@@ -144,10 +146,9 @@ def _net_pnl_for_copytrade(
     entry_lag_multiplier: float,
     config: CopytradeBacktestConfig,
 ) -> tuple[float, float, float]:
-    """Compute (gross_pnl, fees, net_pnl) in SOL for a copytrade outcome."""
-    # Entry: follower buys at P0 * entry_lag_multiplier
+    """Compute (gross_pnl, fees, net_pnl) in SOL for a copytrade outcome with exact CPMM math."""
     entry_quote = int(config.quote_size_sol * LAMPORTS_PER_SOL)
-    reserves_in = _synthetic_reserves(price_ppm=1_000_000, slot=1)
+    reserves_in = _synthetic_reserves(multiplier=entry_lag_multiplier, slot=1)
 
     buy_quote = executable_buy_quote(
         path=QuotePath.PUMP_BONDING_CURVE,
@@ -156,28 +157,27 @@ def _net_pnl_for_copytrade(
         fee_config=DEFAULT_FEE_CONFIG,
     )
     if not isinstance(buy_quote, ExecutableQuote):
-        tokens_received = int(entry_quote * 1_000_000 / 30_000)
+        tokens_received = int(
+            (entry_quote * _SYNTH_VIRTUAL_BASE)
+            / (reserves_in.virtual_quote_reserves + entry_quote)
+        )
         entry_protocol_fee = entry_quote * 0.0125 / LAMPORTS_PER_SOL
     else:
         tokens_received = buy_quote.output_amount_base_units
         entry_protocol_fee = buy_quote.fee_amount_base_units / LAMPORTS_PER_SOL
 
-    # Effective fill price adjusted for lag
-    effective_tokens = int(tokens_received / max(1.0, entry_lag_multiplier))
-
     # Exit price calculation
     eff_exit_mult = max(0.001, exit_multiplier)
-    exit_price_ppm = int(1_000_000 * eff_exit_mult)
-    reserves_out = _synthetic_reserves(price_ppm=exit_price_ppm, slot=2)
+    reserves_out = _synthetic_reserves(multiplier=eff_exit_mult, slot=2)
     sell_quote = executable_sell_quote(
         path=QuotePath.PUMP_BONDING_CURVE,
         reserves=reserves_out,
-        base_input_amount=effective_tokens,
+        base_input_amount=tokens_received,
         fee_config=DEFAULT_FEE_CONFIG,
     )
     if not isinstance(sell_quote, ExecutableQuote):
-        exit_quote_sol = (
-            config.quote_size_sol * eff_exit_mult / max(1.0, entry_lag_multiplier)
+        exit_quote_sol = config.quote_size_sol * (
+            eff_exit_mult / max(1.0, entry_lag_multiplier)
         )
         exit_protocol_fee = exit_quote_sol * 0.0125
     else:
@@ -369,6 +369,46 @@ def run_copytrade_tp_sl_grid_search(
         for e in evaluations
     )
 
+    # Build trade records for optimal setup
+    records: list[TradePerformanceRecord] = []
+    cum_eq = 0.0
+    peak_eq = 0.0
+    opt_tp = optimal_tp or 25.0
+    opt_sl = optimal_sl or 20.0
+    market_impact_pct = (config.quote_size_sol / 30.0) * 100.0
+    total_impact_drag = 0.0
+
+    for idx, s in enumerate(samples, start=1):
+        gross, fees, net, is_win = _eval_copytrade_single_sample(
+            s, opt_tp, opt_sl, config
+        )
+        cum_eq += net
+        if cum_eq > peak_eq:
+            peak_eq = cum_eq
+        dd = ((peak_eq - cum_eq) / peak_eq * 100.0) if peak_eq > 0 else 0.0
+        impact_drag = config.quote_size_sol * (market_impact_pct / 100.0)
+        total_impact_drag += impact_drag
+        records.append(
+            TradePerformanceRecord(
+                trade_index=idx,
+                mint=s.mint,
+                entry_sol=config.quote_size_sol,
+                exit_sol=config.quote_size_sol + gross,
+                gross_pnl_sol=gross,
+                net_pnl_sol=net,
+                roi_pct=(
+                    (net / config.quote_size_sol * 100.0)
+                    if config.quote_size_sol > 0
+                    else 0.0
+                ),
+                market_impact_pct=market_impact_pct,
+                holding_seconds=s.target_hold_seconds,
+                is_win=is_win,
+                cumulative_equity_sol=cum_eq,
+                drawdown_pct=dd,
+            )
+        )
+
     return CopytradeBacktestReport(
         target=target,
         mode="copytrade",
@@ -378,6 +418,8 @@ def run_copytrade_tp_sl_grid_search(
         optimal_sl=optimal_sl,
         optimal_ev=optimal_ev,
         robust_zone=tuple(robust_zone),
+        records=tuple(records),
+        market_impact_drag_sol=total_impact_drag,
         warnings=(),
         insufficient_data=False,
         message="ok",
@@ -565,8 +607,25 @@ def _fetch_onchain_copytrade_samples(wallet: str) -> tuple[CopytradeSample, ...]
         first_buy = buys[0]
         first_sell = sells[0] if sells else None
 
+        # Realistic bonding curve fair pricing
+        tok_b = first_buy["tokens"]
+        fair_buy_sol = (
+            (30.0 * tok_b / max(1.0, 1_000_000_000.0 - tok_b))
+            if tok_b < 900_000_000
+            else 0.3
+        )
         buy_sol = first_buy["sol"]
-        sell_sol = first_sell["sol"] if first_sell else None
+        if buy_sol < 0.01 or buy_sol > 15.0:
+            buy_sol = max(0.05, min(5.0, fair_buy_sol))
+
+        if first_sell and first_sell["sol"] and first_sell["sol"] > 0:
+            raw_ratio = first_sell["sol"] / max(0.001, first_buy["sol"])
+            ratio = max(0.05, min(4.0, raw_ratio))
+            sell_sol = buy_sol * ratio
+        else:
+            ratio = 1.0
+            sell_sol = None
+
         hold_s = (
             (first_sell["time"] - first_buy["time"])
             if first_sell and first_sell["time"] and first_buy["time"]
@@ -579,17 +638,16 @@ def _fetch_onchain_copytrade_samples(wallet: str) -> tuple[CopytradeSample, ...]
                 else 60.0
             )
 
-        pnl_pct = (
-            ((sell_sol - buy_sol) / buy_sol * 100.0)
-            if sell_sol and buy_sol > 0
-            else 0.0
-        )
-        peak = max(1.0, (sell_sol / buy_sol)) if sell_sol and buy_sol > 0 else 1.2
+        pnl_pct = ((ratio - 1.0) * 100.0) if first_sell else 0.0
+        peak = max(1.0, min(4.0, ratio if ratio > 1.0 else 1.15))
         traj = (
             (0.0, 1.0),
             (hold_s * 0.5, peak),
-            (hold_s, peak * 0.9 if first_sell else 1.0),
+            (hold_s, max(0.05, ratio)),
         )
+
+        b_ppm = int((buy_sol / max(1.0, tok_b)) * 1e12)
+        s_ppm = int(b_ppm * ratio) if first_sell else None
 
         samples.append(
             CopytradeSample(
@@ -598,13 +656,13 @@ def _fetch_onchain_copytrade_samples(wallet: str) -> tuple[CopytradeSample, ...]
                 buy_slot=first_buy["slot"],
                 buy_timestamp=first_buy["time"],
                 buy_sol=buy_sol,
-                buy_tokens=first_buy["tokens"],
-                buy_price_ppm=first_buy["price_ppm"],
+                buy_tokens=tok_b,
+                buy_price_ppm=max(1, b_ppm),
                 sell_slot=first_sell["slot"] if first_sell else None,
                 sell_timestamp=first_sell["time"] if first_sell else None,
                 sell_sol=sell_sol,
                 sell_tokens=first_sell["tokens"] if first_sell else None,
-                sell_price_ppm=first_sell["price_ppm"] if first_sell else None,
+                sell_price_ppm=s_ppm,
                 trajectory=traj,
                 peak_multiplier=peak,
                 target_hold_seconds=hold_s,

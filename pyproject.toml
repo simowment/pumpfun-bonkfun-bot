@@ -25,6 +25,7 @@ dependencies = [
     "sol-trade-sdk",
     "python-fasthtml>=0.12.0",
     "fastapi>=0.115.0",
+    "plotly>=7.0.0",
 ]
 
 [tool.uv.sources]

@@ -68,6 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="do not mirror target wallet sells; rely strictly on follower TP/SL",
     )
     p.add_argument("--json", action="store_true", help="machine JSON output")
+    p.add_argument(
+        "--plot",
+        action="store_true",
+        help="display VectorBT terminal equity curve and export interactive HTML report",
+    )
     return p
 
 
@@ -114,6 +119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "optimal_sl": report.optimal_sl,
                 "optimal_ev": report.optimal_ev,
                 "robust_zone": [list(x) for x in report.robust_zone],
+                "market_impact_drag_sol": report.market_impact_drag_sol,
                 "evaluations": [
                     {
                         "tp_pct": e.tp_pct,
@@ -170,6 +176,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"Optimal (TP,SL) = +{report.optimal_tp}% / -{report.optimal_sl}% | EV {report.optimal_ev:+.4f} SOL | zone robuste {list(report.robust_zone)}"
         )
+
+        if args.plot and report.records:
+            from pathlib import Path
+            from rugbot.backtest.reporting.visualizer import (
+                export_vectorbt_html_report,
+                generate_terminal_equity_chart,
+            )
+
+            print("\n" + generate_terminal_equity_chart(list(report.records)))
+            total_fees = sum(
+                e.fees_sol
+                for e in report.evaluations
+                if e.tp_pct == report.optimal_tp and e.sl_pct == report.optimal_sl
+            )
+            html_out = Path(".state") / f"backtest_{report.target[:8]}.html"
+            export_vectorbt_html_report(
+                target=report.target,
+                mode=report.mode,
+                records=list(report.records),
+                total_fees_sol=total_fees,
+                market_impact_drag_sol=report.market_impact_drag_sol,
+                output_path=html_out,
+            )
+            print(f"\n[+] Interactive VectorBT HTML Report saved to: {html_out}")
         return 0
 
     # Default: Dev Creation / Entity Mode
