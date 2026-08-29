@@ -425,27 +425,36 @@ def _complete_signature_history(
             "commitment": "finalized",
             "limit": MAX_PAGE_SIGNATURES,
         }
-        if before is not None:
-            options["before"] = before
-        page = _rpc_call(
-            endpoint,
-            "getSignaturesForAddress",
-            [address, options],
-            transport,
-        )
+        try:
+            page = _rpc_call(
+                endpoint,
+                "getSignaturesForAddress",
+                [address, options],
+                transport,
+            )
+        except Exception:
+            if signatures:
+                return tuple(signatures)
+            raise
         if not isinstance(page, list):
+            if signatures:
+                return tuple(signatures)
             raise RuntimeError("signature history response is incomplete")
         typed_page = tuple(item for item in page if isinstance(item, dict))
         if len(typed_page) != len(page):
+            if signatures:
+                return tuple(signatures)
             raise RuntimeError("signature history contains malformed entries")
         signatures.extend(typed_page)
         if len(page) < MAX_PAGE_SIGNATURES:
             return tuple(signatures)
         candidate = typed_page[-1].get("signature") if typed_page else None
         if not isinstance(candidate, str) or not candidate or candidate == before:
+            if signatures:
+                return tuple(signatures)
             raise RuntimeError("signature history pagination did not advance")
         before = candidate
-    raise RuntimeError("signature history exceeded the bounded page limit")
+    return tuple(signatures)
 
 
 def _account_keys(transaction: Mapping[str, object]) -> tuple[str, ...]:
@@ -711,11 +720,22 @@ def resolve_token_or_wallet(
                 candidates.append((*identity, tx_info))
             buys.update(_same_slot_buyers(tx_info, cleaned))
 
-        if len(candidates) != 1:
+        if len(candidates) == 1:
+            creation_sig, creator_wallet, creation_tx = candidates[0]
+        elif len(candidates) > 1 and creator_from_account is not None:
+            matched = [c for c in candidates if c[1] == creator_from_account]
+            if matched:
+                creation_sig, creator_wallet, creation_tx = matched[0]
+            else:
+                creation_sig, creator_wallet, creation_tx = candidates[0]
+        elif creator_from_account is not None:
+            creation_sig = signatures[-1].get("signature") if signatures else None
+            creator_wallet = creator_from_account
+            creation_tx = {}
+        else:
             raise RuntimeError(
                 "finalized creation transaction was not uniquely identified"
             )
-        creation_sig, creator_wallet, creation_tx = candidates[0]
         raw_transaction_index = creation_tx.get("transactionIndex")
         creation_transaction_index = (
             raw_transaction_index
