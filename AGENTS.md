@@ -110,16 +110,31 @@ demonstrate a fully executable, net-profitable exit in paper/backtest mode?
 
 ---
 
-## 14. Operator Target Analysis Mandate: Predictable Snipable Launch & Deployer Prediction
+## 14. Operator Target Analysis Mandate: Predictable Snipable Launch & Archetype Classification
 
 **When the user provides a wallet or mint address, the ONLY operational question is whether this operator exhibits a predictable, repeatable launch pattern that can be profitably and safely sniped.**
 
+### 🏛️ The Two Rugger Archetypes (*Memecoin Bible* Acte V)
+Every target MUST be classified immediately into one of two distinct operational archetypes:
+
+1. **Type 1: Serial Same-Wallet Deployers (PRIMARY FOCUS)**:
+   - **Definition**: The operator creates multiple tokens from the **exact same wallet address** ($N \ge 2$, often dozens).
+   - **Why it is prioritized**: Full launch history (Winrate, ATH distribution, dev dump speed, launch cadence) is directly attached to the public address. It is the most reliable and actionable target for manual users and automated snipers.
+   - **Operational Strategy**: Score historical winrate and EV directly from the wallet's signatures. Arm an event listener directly on this known wallet address awaiting the next `pump::create`.
+
+2. **Type 2: Disposable Burner-per-Launch Operators (Cluster Tracking)**:
+   - **Definition**: The operator creates a brand new, clean disposable burner wallet for each individual token (1 token per wallet, 0 prior history on the deployer itself).
+   - **Operational Strategy**: The deployer address cannot be predicted beforehand; the system MUST watch upstream funding nodes (mother / relay / CEX) in real-time to detect the staging transfer (0.2 - 3.0 SOL) and dynamically arm the listener on the newly funded burner before `pump::create`.
+
+### 📋 Systematic Target Reporting Contract
 Every target analysis MUST systematically extract and report:
-1. **Launch History & Cadence**: Exact frequency and intervals between launches (e.g. 1 launch every 3.5 hours, burst cadence).
-2. **ATH & Exit Profile**: Distribution of historical peak multipliers (median ATH, peak ATH, floor liquidity), and dev holding time before rugging/selling.
-3. **Qualification & Mathematical Net EV (*Memecoin Bible* Acte V)**: Winrate ($\ge 70\%$) on sample size $N \ge 10$, analytical optimal Take-Profit, and net positive EV after all Solana network and Jito tip fees.
-4. **Next Deployer Candidate Prediction**: Exactly WHICH wallet in the cluster is the next launch candidate (fresh burner with 0 prior tokens funded with 0.2 - 3.0 SOL).
-5. **Real-Time Notification & Arming**: Immediate alert if the cluster funds/stages a new clean burner wallet, and automatic arming of the event listener awaiting `pump::create`.
+1. **Archetype Sorting**: Explicitly declare whether the target is **Type 1 (Same-Wallet Serial Dev)** or **Type 2 (Burner-per-Launch Cluster)**.
+2. **Launch History & Cadence**: Exact frequency and intervals between launches (e.g. 1 launch every 3.5 hours, burst cadence).
+3. **ATH & Exit Profile**: Distribution of historical peak multipliers (median ATH, peak ATH, floor liquidity), and dev holding time before rugging/selling.
+4. **Qualification & Mathematical Net EV (*Memecoin Bible* Acte V)**: Winrate ($\ge 70\%$) on sample size $N \ge 10$, analytical optimal Take-Profit, and net positive EV after all Solana network and Jito tip fees.
+5. **Next Target / Arming Action**:
+   - For Type 1: Re-arm listener directly on the known dev wallet address.
+   - For Type 2: Identify the staged burner wallet or arm on upstream funder.
 
 ---
 

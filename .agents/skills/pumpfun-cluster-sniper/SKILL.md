@@ -5,28 +5,43 @@ description: Autonomous on-chain target discovery, funding cluster graph reconst
 
 # 🎯 Pump.fun Developer Cluster Sniping Playbook
 
-## 📜 0. Operator Core Objective
+## 📜 0. Operator Core Objective & Archetype Classification
 
-When the user provides a token mint or wallet address, **the ONLY objective is to identify a predictable launch pattern that can be profitably sniped**. Every analysis MUST deliver:
+When the user provides a token mint or wallet address, **the ONLY objective is to identify a predictable launch pattern that can be profitably sniped**.
 
-1. **Launch History & Frequency**:
-   - How often does this dev/operator launch? (e.g. 1 launch every 4 hours, burst of 3 daily).
-   - Distribution of historical ATHs (median ATH multiplier, peak ATH, 1s floor liquidity).
-   - Dev exit speed (instant block-0 dump vs 30s-120s pump curve).
-2. **Qualification & Net EV (*Memecoin Bible* Acte V)**:
-   - Sample size $N \ge 10$ launches.
-   - Winrate ($\ge 70\%$) at optimal Take-Profit (e.g. $+50\%$).
-   - Net expected value after fees: $\text{EV} = (W \times \text{TP}) - (L \times \text{SL}) - \text{Fees} > 0$.
-3. **Predicted Next Deployer Wallet**:
-   - Exactly WHICH wallet will he launch from next?
-   - Identified staged burner wallet (0 prior mints, funded with 0.2 - 3.0 SOL from mother/relay).
-4. **Real-Time Burner Staging & Notification**:
-   - Immediate detection and alert when the cluster funds a fresh clean burner wallet.
-   - Automatic listener armed on the predicted deployer awaiting `pump::create`.
+### 🏛️ The Two Rugger Archetypes (*Memecoin Bible* Acte V)
+
+1. **Type 1: Serial Same-Wallet Deployers (PRIMARY FOCUS)**:
+   - **Definition**: The operator creates multiple tokens from the **exact same wallet address** ($N \ge 2$, often dozens).
+   - **Why it is prioritized**: Full launch history (Winrate, ATH distribution, dev dump speed, launch cadence) is directly attached to the public address. It is the most reliable, actionable, and predictable target for manual users and automated snipers.
+   - **Operational Strategy**: Score historical winrate and EV directly from the wallet's signatures. Arm an event listener directly on this known wallet address awaiting the next `pump::create`.
+
+2. **Type 2: Disposable Burner-per-Launch Operators (Cluster Tracking)**:
+   - **Definition**: The operator creates a brand new, clean disposable burner wallet for each individual token (1 token per wallet, 0 prior history on the deployer itself).
+   - **Operational Strategy**: The deployer address cannot be predicted beforehand; the system MUST watch upstream funding nodes (mother / relay / CEX) in real-time to detect the staging transfer (0.2 - 3.0 SOL) and dynamically arm the listener on the newly funded burner before `pump::create`.
 
 ---
 
-## 🏗️ 1. Architecture & On-Chain Operator Lifecycle
+## 📋 1. Systematic Target Reporting Contract
+
+Every analysis MUST deliver:
+
+1. **Archetype Sorting**: Explicitly declare whether the target is **Type 1 (Same-Wallet Serial Dev)** or **Type 2 (Burner-per-Launch Cluster)**.
+2. **Launch History & Frequency**:
+   - How often does this dev/operator launch? (e.g. 1 launch every 4 hours, burst of 3 daily).
+   - Distribution of historical ATHs (median ATH multiplier, peak ATH, 1s floor liquidity).
+   - Dev exit speed (instant block-0 dump vs 30s-120s pump curve).
+3. **Qualification & Net EV (*Memecoin Bible* Acte V)**:
+   - Sample size $N \ge 10$ launches.
+   - Winrate ($\ge 70\%$) at optimal Take-Profit (e.g. $+50\%$).
+   - Net expected value after fees: $\text{EV} = (W \times \text{TP}) - (L \times \text{SL}) - \text{Fees} > 0$.
+4. **Target Arming & Notification Action**:
+   - For Type 1: Re-arm persistent listener directly on the known dev wallet address.
+   - For Type 2: Identify the staged burner wallet or arm on upstream funder.
+
+---
+
+## 🏗️ 2. Architecture & On-Chain Operator Lifecycle
 
 Serial Pump.fun developers follow a strict, repeatable 5-phase lifecycle:
 
@@ -42,7 +57,7 @@ flowchart TD
 
 ---
 
-## 🏷️ 2. Deterministic Wallet Classification Heuristics
+## 🏷️ 3. Deterministic Wallet Classification Heuristics
 
 To prevent confusing treasury sweepers with deployers, all cluster nodes are strictly classified using deterministic on-chain invariants:
 
@@ -56,7 +71,7 @@ To prevent confusing treasury sweepers with deployers, all cluster nodes are str
 
 ---
 
-## ⚡ 3. Unified One-Liner CLI Commands
+## ⚡ 4. Unified One-Liner CLI Commands
 
 ### A. Full Target Resolution, Cluster Graph & Analytical Backtest
 Run this single command from any token mint address or wallet:
@@ -73,16 +88,15 @@ uv run rug_wallet <TOKEN_MINT_OR_WALLET> --backtest --enroll
  Input Target:          E9CqsGL5uXPASB853f87ox8nZVgW7ucoeYMC4bN8pump
  Resolved Token:        Gustopher the Gator ($Gustopher)
  Creator Wallet:        2r2HuRi1vLzVxXnWAffWfsAMDkQpfG1c23KPDgR4wp5p
+ Archetype:             Type 1: Serial Same-Wallet Deployer (52 tokens)
  Root Funding Auth:     61mbw2ts9hzNGRN5PjZfBP15yxw6BGbHwkHhB1fkB8N3
  Connected Wallets:     86
  Cluster Token Mints:   52
- Staged Clean Wallets:  2
 
 ------------------------------------------------------------------------------
- 🔥 PREDICTED NEXT DEPLOYER / SNIPER TARGET:
+ 🎯 ARMED TARGET:
    • Address:        2r2HuRi1vLzVxXnWAffWfsAMDkQpfG1c23KPDgR4wp5p
-   • Staged Balance: 0.446 SOL (Awaiting pump::create)
-   • Status:         ● ARMED - Live listener active on creator address
+   • Status:         ● ARMED - Persistent listener active on dev address
 ------------------------------------------------------------------------------
 
  📊 LAUNCH PATTERN & ATH PROFILE:
@@ -101,7 +115,7 @@ uv run rug_wallet <TOKEN_MINT_OR_WALLET> --json
 
 ---
 
-## 🐍 4. Python SDK Usage for AI Agents
+## 🐍 5. Python SDK Usage for AI Agents
 
 Subagents can execute target resolution and cluster prediction programmatically:
 
@@ -129,7 +143,7 @@ if model.next_deployer_candidate:
 
 ---
 
-## 🖥️ 5. Visual TUI Operator Monitoring
+## 🖥️ 6. Visual TUI Operator Monitoring
 
 To inspect the cluster in real-time with full interactive 2-pane dossiers:
 
