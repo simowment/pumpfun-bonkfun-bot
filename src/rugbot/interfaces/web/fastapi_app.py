@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from rugbot.execution.ports import ExecutionMode
 from rugbot.interfaces.web.adapter import JsonValue, jsonable
 from rugbot.utils.logger import get_logger
 
@@ -42,6 +43,34 @@ class TrackEntityRequest(BaseModel):
 
     address: str = Field(min_length=32, max_length=64)
     label: str = Field(default="Tracked entity", max_length=120)
+
+
+class TradeBuyRequest(BaseModel):
+    """Validated request for buying a token."""
+
+    mint: str = Field(min_length=32, max_length=64)
+    amount_sol: float = Field(gt=0)
+    slippage_pct: float = Field(default=5.0, ge=0.0, le=100.0)
+    priority_fee_sol: float = Field(default=0.0005, ge=0.0)
+    jito_tip_sol: float = Field(default=0.001, ge=0.0)
+    routing: Literal["auto", "rpc", "jito"] = "auto"
+    mode: str = Field(default="paper")
+    take_profit_pct: float | None = Field(default=None, gt=0)
+    stop_loss_pct: float | None = Field(default=None, gt=0)
+    trailing_stop_pct: float | None = Field(default=None, gt=0)
+
+
+class TradeSellRequest(BaseModel):
+    """Validated request for selling a token."""
+
+    mint: str = Field(min_length=32, max_length=64)
+    percent: float = Field(default=100.0, gt=0, le=100.0)
+    amount_tokens: int | None = Field(default=None, gt=0)
+    slippage_pct: float = Field(default=10.0, ge=0.0, le=100.0)
+    priority_fee_sol: float = Field(default=0.0005, ge=0.0)
+    jito_tip_sol: float = Field(default=0.001, ge=0.0)
+    routing: Literal["auto", "rpc", "jito"] = "auto"
+    mode: str = Field(default="paper")
 
 
 def create_fastapi_app(  # noqa: C901, PLR0915
@@ -191,6 +220,103 @@ def create_fastapi_app(  # noqa: C901, PLR0915
                 "a backtest would be fabricated"
             ),
         )
+
+    @app.post("/api/trade/buy")
+    async def api_trade_buy(payload: TradeBuyRequest) -> dict[str, object]:
+        """Execute a buy order with slippage, fees, and optional TP/SL brackets."""
+        mode_val = payload.mode.lower().strip()
+        execution_mode = (
+            ExecutionMode.LIVE if mode_val == "live" else ExecutionMode.PAPER
+        )
+        result = await core.trade_service.buy(
+            mint=payload.mint,
+            amount_sol=payload.amount_sol,
+            slippage_pct=payload.slippage_pct,
+            priority_fee_sol=payload.priority_fee_sol,
+            jito_tip_sol=payload.jito_tip_sol,
+            routing=payload.routing,
+            mode=execution_mode,
+            take_profit_pct=payload.take_profit_pct,
+            stop_loss_pct=payload.stop_loss_pct,
+            trailing_stop_pct=payload.trailing_stop_pct,
+        )
+        if not result.ok:
+            raise HTTPException(
+                status_code=400, detail=result.error or "Buy order failed"
+            )
+        return {
+            "ok": True,
+            "side": result.side.value,
+            "mint": result.mint,
+            "mode": result.mode.value,
+            "sol_amount": result.sol_amount,
+            "token_amount": result.token_amount,
+            "signature": result.signature,
+            "effective_price_sol": result.effective_price_sol,
+            "fee_sol": result.fee_sol,
+            "take_profit_pct": result.take_profit_pct,
+            "stop_loss_pct": result.stop_loss_pct,
+            "message": result.message,
+        }
+
+    @app.post("/api/trade/sell")
+    async def api_trade_sell(payload: TradeSellRequest) -> dict[str, object]:
+        """Execute a sell order with slippage and priority fees."""
+        mode_val = payload.mode.lower().strip()
+        execution_mode = (
+            ExecutionMode.LIVE if mode_val == "live" else ExecutionMode.PAPER
+        )
+        result = await core.trade_service.sell(
+            mint=payload.mint,
+            percent=payload.percent,
+            amount_tokens=payload.amount_tokens,
+            slippage_pct=payload.slippage_pct,
+            priority_fee_sol=payload.priority_fee_sol,
+            jito_tip_sol=payload.jito_tip_sol,
+            routing=payload.routing,
+            mode=execution_mode,
+        )
+        if not result.ok:
+            raise HTTPException(
+                status_code=400, detail=result.error or "Sell order failed"
+            )
+        return {
+            "ok": True,
+            "side": result.side.value,
+            "mint": result.mint,
+            "mode": result.mode.value,
+            "sol_amount": result.sol_amount,
+            "token_amount": result.token_amount,
+            "signature": result.signature,
+            "effective_price_sol": result.effective_price_sol,
+            "fee_sol": result.fee_sol,
+            "message": result.message,
+        }
+
+    @app.get("/api/trade/positions")
+    async def api_trade_positions() -> dict[str, object]:
+        """List all currently active open positions with TP/SL levels."""
+        positions = core.trade_service.get_positions()
+        return {
+            "ok": True,
+            "positions": positions,
+            "total_open": len(positions),
+        }
+
+    @app.delete("/api/trade/positions/{mint}")
+    async def api_trade_close_position(mint: str) -> dict[str, object]:
+        """Market sell and close 100% of an open position."""
+        normalized_mint = mint.strip()
+        result = await core.trade_service.sell(mint=normalized_mint, percent=100.0)
+        if not result.ok:
+            raise HTTPException(
+                status_code=400, detail=result.error or "Failed to close position"
+            )
+        return {
+            "ok": True,
+            "message": f"Closed position for {normalized_mint}",
+            "result": jsonable(result),
+        }
 
     @app.websocket("/api/events")
     async def ws_events(websocket: WebSocket) -> None:

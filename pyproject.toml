@@ -52,6 +52,7 @@ rug_scalp = "rugbot.cli.scalper_cli:main"
 rug_config = "rugbot.cli.config_cli:main"
 rug_cluster = "rugbot.interfaces.cli.cluster:main"
 rug_backtest = "rugbot.interfaces.cli.backtest:main"
+rug_trade = "rugbot.interfaces.cli.trade:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]

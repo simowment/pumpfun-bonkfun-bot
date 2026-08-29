@@ -20,6 +20,7 @@ from rugbot.application.commands import COMMAND_REGISTRY, BotCommand, CommandRes
 from rugbot.domain.decisions import AbstainResult
 from rugbot.domain.entities import TargetRecord
 from rugbot.domain.observations import RawChainObservation
+from rugbot.execution.trade_service import TradingService
 from rugbot.ingest.pump.pump_create_observation import (
     decode_pump_create_v2_observation,
 )
@@ -128,9 +129,15 @@ class RugbotApp:
         self._fallback_endpoints = fallback_endpoints
         self._solscan_api_key = solscan_api_key
         self._state_dir = state_dir
+        self._trade_service = TradingService(endpoint=endpoint)
         self._backfill_tasks: dict[str, asyncio.Task[None]] = {}
         self._backfill_locks: dict[str, asyncio.Lock] = {}
         self._closed = False
+
+    @property
+    def trade_service(self) -> TradingService:
+        """Return the unified trading SDK service."""
+        return self._trade_service
 
     @property
     def screener(self) -> ScreenerService:
