@@ -628,6 +628,27 @@ def resolve_token_or_wallet(
             rpc_transport,
         )
         if not signatures:
+            signatures = _complete_signature_history(
+                endpoint,
+                str(mint_pubkey),
+                rpc_transport,
+            )
+        if not signatures and creator_from_account:
+            return ResolvedTarget(
+                is_token=True,
+                target_wallet=creator_from_account,
+                creation_signature=None,
+                creation_slot=None,
+                creation_block_time=None,
+                symbol=token_symbol,
+                name=token_name,
+                market_cap=usd_market_cap,
+                bonding_curve=str(bonding_curve_pda),
+                associated_bonding_curve=str(associated_bonding_curve_pda),
+                bundle_wallets=(),
+                bundle_buys=(),
+            )
+        if not signatures:
             raise RuntimeError("bonding curve has no finalized signature history")
         slots = tuple(
             item["slot"] for item in signatures if type(item.get("slot")) is int

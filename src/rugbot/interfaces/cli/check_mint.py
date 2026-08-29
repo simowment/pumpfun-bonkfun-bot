@@ -1115,28 +1115,28 @@ def main(argv: list[str] | None = None) -> int:
         mig_s = " MIGRATED" if market_hist.migrated else ""
         src_s = ",".join(market_hist.sources.keys()) if market_hist.sources else "—"
         unav_s = ",".join(market_hist.unavailable) if market_hist.unavailable else "—"
-        ath_s = f"{ath_mult:.2f}x" if ath_mult else "—"
+        ath_s = f"{ath_mult:.2f}x" if ath_mult else "-"
         print(
-            f"  market: entry Mc {entry_mc_s} peak Mc {peak_mc_s} ath×{ath_s}{mig_s} sources={src_s} unavailable={unav_s}"
+            f"  market: entry Mc {entry_mc_s} peak Mc {peak_mc_s} ath x {ath_s}{mig_s} sources={src_s} unavailable={unav_s}"
         )
     if dex_ok:
         print(
-            f"  dex: {dex_name} (${dex_symbol}) mcap ${mcap:,.0f} ath×{ath_mult} rugged={rugged}"
+            f"  dex: {dex_name} (${dex_symbol}) mcap ${mcap:,.0f} ath x {ath_mult} rugged={rugged}"
         )
     else:
         print(f"  dex: unavailable (fail-closed) rugged={rugged}")
-    print(f"  bundle: {len(buys)} buys total {_format_sol(total_sol)} B0×{b0} B1×{b1}")
+    print(f"  bundle: {len(buys)} buys total {_format_sol(total_sol)} B0x{b0} B1x{b1}")
     for b in buys:
         block = _entry_block_label(b.transaction_index, creator_tx)
-        mark = " ★" if pick and b.wallet == pick.wallet else ""
+        mark = " [*]" if pick and b.wallet == pick.wallet else ""
         print(
             f"    - {block} txIdx {b.transaction_index}  {_short(b.wallet)}  "
             f"{_format_sol(b.max_sol_cost_lamports)}  tokens {b.token_amount}{mark}"
         )
     if pick:
-        print(f"  ★ RECOMMENDED copytrade: {pick.wallet} — {why}")
+        print(f"  [*] RECOMMENDED copytrade: {pick.wallet} - {why}")
     else:
-        print(f"  NO COPY ABORTED — {why}")
+        print(f"  NO COPY ABORTED - {why}")
     if bool(getattr(args, "trace_funding", False)):
         print("  funding chain (--trace-funding):")
         if funding_error:
