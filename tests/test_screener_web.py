@@ -27,6 +27,11 @@ def test_screener_service_direct(core_instance) -> None:
         ScreenerCandidateStatus.QUALIFIED,
         ScreenerCandidateStatus.PENDING_REVIEW,
     }
+    history = core_instance.target_scan_history(candidate.creator_wallet)
+    assert len(history) == 1
+    assert history[0].tracking_address == candidate.creator_wallet
+    assert history[0].query == sample_mint
+    assert history[0].scan_ok is False
     accepted = core_instance.screener.accept_candidate(
         candidate.creator_wallet, core_instance.service
     )

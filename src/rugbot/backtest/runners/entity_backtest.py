@@ -49,91 +49,6 @@ class EntityBacktestResult:
     optimal_max_hold_s: float
 
 
-# Golden verified launch metrics for the active 5SW7p56x... cluster
-VERIFIED_CLUSTER_LAUNCHES: tuple[LaunchMetric, ...] = (
-    LaunchMetric(
-        mint="4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf",
-        symbol="PUMP4W",
-        ath_multiplier=1.73,
-        seconds_to_ath=48.0,
-        seconds_to_first_entity_sell=65.0,
-        seconds_to_dump=72.0,
-        max_drawdown=0.92,
-        creator_wallet="uxtoRPdPjRekYmxs1uUqVRZWh38iqonc9KgPuZXPeSY",
-    ),
-    LaunchMetric(
-        mint="HvhnVs7xDQfKTfCmAyUHmBQ5pUV7syMHZGVjzLN1pump",
-        symbol="HVHN",
-        ath_multiplier=2.60,
-        seconds_to_ath=62.0,
-        seconds_to_first_entity_sell=80.0,
-        seconds_to_dump=90.0,
-        max_drawdown=0.95,
-        creator_wallet="uxtoRPdPjRekYmxs1uUqVRZWh38iqonc9KgPuZXPeSY",
-    ),
-    LaunchMetric(
-        mint="5kDgvcE9JjKEBgpEAbAFtSuhVo2EYNgBQKH5CGDzpump",
-        symbol="5KDG",
-        ath_multiplier=1.60,
-        seconds_to_ath=38.0,
-        seconds_to_first_entity_sell=52.0,
-        seconds_to_dump=58.0,
-        max_drawdown=0.88,
-        creator_wallet="uxtoRPdPjRekYmxs1uUqVRZWh38iqonc9KgPuZXPeSY",
-    ),
-    LaunchMetric(
-        mint="27vEi2mxfiCCTnYcdmP9WAedn8W6digbhYAQN1B6pump",
-        symbol="27VEI",
-        ath_multiplier=2.10,
-        seconds_to_ath=55.0,
-        seconds_to_first_entity_sell=70.0,
-        seconds_to_dump=78.0,
-        max_drawdown=0.90,
-        creator_wallet="HKm7PxgpUW72su2ZguJ7Azw3AFibzubiW8vhchQFoZTB",
-    ),
-    LaunchMetric(
-        mint="7EpwXyNocbX7E9Qe9Hj9DZbL6BvhwH8gR5T3V8z1pump",
-        symbol="7EPW",
-        ath_multiplier=1.30,
-        seconds_to_ath=25.0,
-        seconds_to_first_entity_sell=35.0,
-        seconds_to_dump=42.0,
-        max_drawdown=0.85,
-        creator_wallet="uxtoRPdPjRekYmxs1uUqVRZWh38iqonc9KgPuZXPeSY",
-    ),
-    LaunchMetric(
-        mint="9YqZi8KcXp3D9mF4L2vE8bA1jN7cW5qT9rS3kV1mpump",
-        symbol="9YQZ",
-        ath_multiplier=1.90,
-        seconds_to_ath=52.0,
-        seconds_to_first_entity_sell=68.0,
-        seconds_to_dump=75.0,
-        max_drawdown=0.91,
-        creator_wallet="uxtoRPdPjRekYmxs1uUqVRZWh38iqonc9KgPuZXPeSY",
-    ),
-    LaunchMetric(
-        mint="DF4JTnoKhP1R9yN3vC7eB8mA5jL2wQ4tZ8sK1v9mpump",
-        symbol="DF4J",
-        ath_multiplier=1.10,
-        seconds_to_ath=15.0,
-        seconds_to_first_entity_sell=20.0,
-        seconds_to_dump=25.0,
-        max_drawdown=0.98,
-        creator_wallet="HKm7PxgpUW72su2ZguJ7Azw3AFibzubiW8vhchQFoZTB",
-    ),
-    LaunchMetric(
-        mint="4MhfyxhL9qE3jV5vA8rK2wB7cN1pT9sD3kL5v8z1pump",
-        symbol="4MHF",
-        ath_multiplier=2.30,
-        seconds_to_ath=68.0,
-        seconds_to_first_entity_sell=85.0,
-        seconds_to_dump=92.0,
-        max_drawdown=0.94,
-        creator_wallet="uxtoRPdPjRekYmxs1uUqVRZWh38iqonc9KgPuZXPeSY",
-    ),
-)
-
-
 def compute_operator_stats(
     launches: list[LaunchMetric] | tuple[LaunchMetric, ...],
 ) -> OperatorStats:
@@ -185,14 +100,16 @@ def compute_operator_stats(
 
 def backtest_operator_entity(  # noqa: PLR0913
     entity_id: str,
-    launches: list[LaunchMetric] | tuple[LaunchMetric, ...] | None = None,
+    launches: list[LaunchMetric] | tuple[LaunchMetric, ...],
     quote_size_sol: float = 0.50,
     slippage_pct: float = 1.5,
     gas_fee_sol: float = 0.0010,
     pump_fee_pct: float = 1.0,
 ) -> EntityBacktestResult:
     """Execute realistic backtest across entity launches using statistical distribution optimization."""
-    launch_list = tuple(launches) if launches is not None else VERIFIED_CLUSTER_LAUNCHES
+    if not launches:
+        raise ValueError("No launch metrics provided for backtest evaluation")  # noqa: TRY003
+    launch_list = tuple(launches)
     stats = compute_operator_stats(launch_list)
 
     total_pnl = 0.0
@@ -272,7 +189,6 @@ def backtest_operator_entity(  # noqa: PLR0913
 
 
 __all__ = [
-    "VERIFIED_CLUSTER_LAUNCHES",
     "EntityBacktestResult",
     "LaunchMetric",
     "backtest_operator_entity",

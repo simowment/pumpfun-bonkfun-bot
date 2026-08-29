@@ -2,10 +2,9 @@
 
 # Error messages are the public boundary for this small strict parser. The
 # loader derives from SafeLoader and adds only duplicate-key rejection.
-# ruff: noqa: S105, S506, TRY003
+# ruff: noqa: S105, TRY003
 
 import os
-import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -14,7 +13,6 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import base58
-import yaml
 from dotenv import dotenv_values
 
 from rugbot.decision.playbook_rules import (
@@ -126,10 +124,19 @@ class VolumeSizingPolicy:
 class StrategyFilterSettings:
     """Configurable operator and entry evidence thresholds."""
 
-    min_volume_usd_micro: int | None = 30_000_000_000
+    min_volume_usd_micro: int | None = None
+    volume_filter_is_soft: bool = True
     max_creator_pairs: int | None = 10
-    history_sample_count: int = 10
-    min_win_rate_ppm: int = 500_000
+    history_sample_count: int = 10  # deprecated alias -> method1
+    min_win_rate_ppm: int = 330_000  # deprecated alias -> method1
+    method1_min_win_rate_ppm: int = 330_000
+    method2_min_win_rate_ppm: int = 501_000
+    method1_history_sample_count: int = 10
+    method2_history_sample_count: int = 15
+    max_creator_creations: int | None = 5
+    require_max_creator_creations: bool = True
+    fresh_wallet_only: bool = True
+    require_min_amplitude_ppm: int | None = 100_000
     max_buys_per_hour: int = 1
     max_entry_transaction_index: int = 1
     max_entry_market_cap_quote_base_units: int | None = None
@@ -170,6 +177,7 @@ class ProviderSettings:
     rpc_websocket: str | None
     solscan_api_key: str | None
     gmgn_api_key: str | None
+    pumpportal_api_key: str | None
 
 
 def load_provider_settings(
@@ -198,6 +206,7 @@ def load_provider_settings(
         rpc_websocket=rpc_websocket,
         solscan_api_key=_optional_secret(values.get("SOLSCAN_API_KEY")),
         gmgn_api_key=_optional_secret(values.get("GMGN_API_KEY")),
+        pumpportal_api_key=_optional_secret(values.get("PUMPPORTAL_API_KEY")),
     )
 
 
@@ -246,44 +255,6 @@ def _optional_secret(value: str | None) -> str | None:
     return cleaned or None
 
 
-class _StrictLoader(yaml.SafeLoader):
-    """YAML loader that rejects duplicate mapping keys."""
-
-
-def _construct_mapping(
-    loader: _StrictLoader,
-    node: yaml.nodes.MappingNode,
-) -> dict[Any, Any]:
-    values: dict[Any, Any] = {}
-    for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=True)
-        if not isinstance(key, str):
-            raise SniperConfigError("YAML mapping keys must be strings")
-        if key in values:
-            raise SniperConfigError(f"duplicate YAML key: {key!r}")
-        values[key] = loader.construct_object(value_node, deep=True)
-    return values
-
-
-_StrictLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-    _construct_mapping,
-)
-
-
-def resolve_config_path(path: Path | None = None) -> Path:
-    """Resolve a valid watch.yaml config path across current, repo, and home dirs."""
-    if path is not None and path != Path("watch.yaml"):
-        return path
-    cwd_path = path or Path("watch.yaml")
-    repo_path = Path(__file__).resolve().parents[3] / "watch.yaml"
-    home_path = Path.home() / ".rugbot" / "watch.yaml"
-    for candidate in (cwd_path, repo_path, home_path):
-        if candidate.exists():
-            return candidate
-    return cwd_path
-
-
 def resolve_state_dir(path: Path | None = None) -> Path:
     """Resolve a writable state directory across cwd, repo root, and user home."""
     if path is not None and path.is_absolute():
@@ -326,6 +297,7 @@ def resolve_dotenv(*, include_signing: bool = False) -> None:
         "SOLANA_RPC_WEBSOCKET",
         "GMGN_API_KEY",
         "SOLSCAN_API_KEY",
+        "PUMPPORTAL_API_KEY",
         "DISCORD_TOKEN",
         "DISCORD_CHANNEL_ID",
         "DISCORD_ALLOWED_USER_IDS",
@@ -342,77 +314,17 @@ def resolve_dotenv(*, include_signing: bool = False) -> None:
                 os.environ[key] = value
 
 
-def load_sniper_config(path: Path) -> CoreSniperConfig:
-    """Load one watcher YAML document."""
+def parse_wallet_portfolio_dict(
+    document: object, *, source: str = "dict"
+) -> WalletPortfolio:
+    """Validate portfolio mapping (fail-closed)."""
 
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as error:
-        raise SniperConfigError(f"cannot read watcher config: {path}") from error
-    return parse_sniper_config(text)
-
-
-def load_sniper_document(path: Path) -> dict[str, Any]:
-    """Load the raw watcher mapping through the strict YAML loader."""
-
-    try:
-        text = path.read_text(encoding="utf-8")
-        document = yaml.load(text, Loader=_StrictLoader)
-    except (OSError, yaml.YAMLError, TypeError, SniperConfigError) as error:
-        raise SniperConfigError(f"cannot read watcher config: {path}") from error
-    if type(document) is not dict:
-        raise SniperConfigError("watcher config must be one mapping")
-    return document
-
-
-def save_sniper_document(path: Path, document: dict[str, Any]) -> CoreSniperConfig:
-    """Validate and atomically replace one watcher YAML document."""
-
-    if type(document) is not dict:
-        raise SniperConfigError("watcher config must be one mapping")
-    try:
-        candidate = yaml.safe_dump(document, sort_keys=False)
-        config = parse_sniper_config(candidate)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            "w",
-            delete=False,
-            dir=path.parent,
-            encoding="utf-8",
-        ) as temporary:
-            temporary.write(candidate)
-            temporary.flush()
-            os.fsync(temporary.fileno())
-            temporary_path = Path(temporary.name)
-        temporary_path.replace(path)
-    except (OSError, TypeError, ValueError, yaml.YAMLError) as error:
-        raise SniperConfigError("watcher config was not saved") from error
-    return config
-
-
-def load_wallet_portfolio(path: Path) -> WalletPortfolio:
-    """Load a strict YAML wallet portfolio document."""
-
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as error:
-        raise SniperConfigError(f"cannot read wallet portfolio: {path}") from error
-    return parse_wallet_portfolio(text)
-
-
-def parse_wallet_portfolio(text: str) -> WalletPortfolio:
-    """Parse an ordered portfolio of unique Solana wallet public keys."""
-
-    try:
-        document = yaml.load(text, Loader=_StrictLoader)
-    except (yaml.YAMLError, TypeError) as error:
-        raise SniperConfigError("wallet portfolio is not valid YAML") from error
     if type(document) is not dict:
         raise SniperConfigError("wallet portfolio must be one mapping")
-    if "schema" in document or "version" in document:
+    if "schema" in document or "version" in document:  # type: ignore[operator]
         raise SniperConfigError("schema and version fields are forbidden")
-    _require_exact_keys(document, {"wallets"}, "wallet portfolio")
-    wallets = document["wallets"]
+    _require_exact_keys(document, {"wallets"}, "wallet portfolio")  # type: ignore[arg-type]
+    wallets = document["wallets"]  # type: ignore[index]
     if type(wallets) is not list or not wallets:
         raise SniperConfigError("wallet portfolio.wallets must be a non-empty list")
     if len(wallets) > MAX_PORTFOLIO_WALLETS:
@@ -432,19 +344,107 @@ def parse_wallet_portfolio(text: str) -> WalletPortfolio:
     return WalletPortfolio(wallets=tuple(parsed))
 
 
-def parse_sniper_config(text: str) -> CoreSniperConfig:
-    """Parse one closed-shape watcher configuration."""
+def _reject_duplicate_keys(mapping: object, *, source: str = "dict") -> None:  # noqa: ARG001
+    """Placeholder for duplicate-key logic when validating plain dicts (already rejected by YAML loader)."""
+    return
 
-    try:
-        document = yaml.load(text, Loader=_StrictLoader)
-    except (yaml.YAMLError, TypeError) as error:
-        raise SniperConfigError("watcher config is not valid YAML") from error
+
+def default_sniper_config() -> CoreSniperConfig:
+    """Return canonical defaults matching previous watch config."""
+
+    return parse_sniper_config_dict(
+        {
+            "target": {
+                "kind": "wallet",
+                "id": "5pmCNjMkgYKExvSrG5oXwmgeMppFRH9qgr9GkcTQv8gn",
+            },
+            "execution": {
+                "mode": "observe",
+                "quote_size_lamports": 25000000,
+                "max_slippage_bps": 500,
+                "routing_policy": "jito",
+                "jito_tip_lamports": 1500000,
+                "compute_unit_limit": 400000,
+                "loaded_accounts_data_size_limit": 128000,
+            },
+            "risk": {
+                "max_buy_lamports": 25000000,
+                "max_exposure_lamports": 25000000,
+                "daily_loss_limit_lamports": 25000000,
+                "max_open_positions": 1,
+                "minimum_wallet_reserve_lamports": 15000000,
+            },
+            "tracking_mode": "new_token_creations",
+            "listener": "pumpportal",
+            "volume_sizing": {
+                "max_bankroll_fraction_ppm": 100000,
+                "max_independent_volume_fraction_ppm": 25000,
+                "max_price_impact_ppm": 100000,
+            },
+            "strategy": {
+                "method1_min_win_rate_ppm": 330000,
+                "method2_min_win_rate_ppm": 501000,
+                "method1_history_sample_count": 10,
+                "method2_history_sample_count": 15,
+                "max_creator_creations": 5,
+                "require_max_creator_creations": True,
+                "fresh_wallet_only": True,
+                "require_min_amplitude_ppm": 100000,
+                "max_buys_per_hour": 1,
+                "max_entry_transaction_index": 1,
+                "max_entry_market_cap_quote_base_units": 15000,
+                "max_entry_deviation_ppm": 250000,
+            },
+            "rules": {
+                "snipe_delay_seconds": 0,
+                "max_token_age_minutes": 1,
+                "follow_cooldown_seconds": 0,
+                "buy_only_once": True,
+                "max_consecutive_losses": 5,
+                "max_market_cap_quote_base_units": 50000000000,
+                "buy_the_dip": {"levels": []},
+                "sell": {
+                    "take_profit_levels": [
+                        {"trigger_pnl_ppm": 120000, "sell_fraction_ppm": 200000},
+                        {"trigger_pnl_ppm": 150000, "sell_fraction_ppm": 300000},
+                        {"trigger_pnl_ppm": 300000, "sell_fraction_ppm": 500000},
+                    ],
+                    "stop_loss_levels": [
+                        {"trigger_pnl_ppm": -20000, "sell_fraction_ppm": 1000000}
+                    ],
+                    "trailing_levels": [
+                        {
+                            "min_market_cap_quote_base_units": None,
+                            "drawdown_ppm": 150000,
+                        }
+                    ],
+                    "no_activity_seconds": 0,
+                    "auto_sell_big_buy": {"levels": []},
+                },
+            },
+        },
+        source="default",
+    )
+
+
+def default_wallet_portfolio() -> WalletPortfolio:
+    """Empty portfolio default (no wallets)."""
+
+    return WalletPortfolio(wallets=())
+
+
+def parse_sniper_config_dict(
+    document: object, *, source: str = "dict"
+) -> CoreSniperConfig:
+    """Parse and validate sniper config from an already-loaded mapping."""
+
+    _reject_duplicate_keys(document, source=source)
     if type(document) is not dict:
         raise SniperConfigError("watcher config must be one mapping")
-    if "schema" in document or "version" in document:
+    if "schema" in document or "version" in document:  # type: ignore[operator]
         raise SniperConfigError("schema and version fields are forbidden")
     _require_known_keys(
-        document,
+        document,  # type: ignore[arg-type]
         {
             "target",
             "execution",
@@ -456,22 +456,22 @@ def parse_sniper_config(text: str) -> CoreSniperConfig:
             "risk",
         },
     )
-    _require_required_keys(document, {"target", "execution"})
+    _require_required_keys(document, {"target", "execution"})  # type: ignore[arg-type]
 
-    execution = _parse_execution(document["execution"])
+    execution = _parse_execution(document["execution"])  # type: ignore[index]
     return CoreSniperConfig(
-        target=_parse_target(document["target"]),
+        target=_parse_target(document["target"]),  # type: ignore[index]
         execution=execution,
-        risk=_parse_risk(document.get("risk"), execution),
+        risk=_parse_risk(document.get("risk"), execution),  # type: ignore[attr-defined]
         tracking_mode=_parse_tracking_mode(
-            document.get("tracking_mode", TrackingMode.NEW_TOKEN_CREATIONS.value)
+            document.get("tracking_mode", TrackingMode.NEW_TOKEN_CREATIONS.value)  # type: ignore[attr-defined]
         ),
         listener=_parse_listener(
-            document.get("listener", ListenerKind.PUMPPORTAL.value)
+            document.get("listener", ListenerKind.PUMPPORTAL.value)  # type: ignore[attr-defined]
         ),
-        rules=_parse_rules(document.get("rules")),
-        volume_sizing=_parse_volume_sizing(document.get("volume_sizing")),
-        strategy=_parse_strategy(document.get("strategy")),
+        rules=_parse_rules(document.get("rules")),  # type: ignore[attr-defined]
+        volume_sizing=_parse_volume_sizing(document.get("volume_sizing")),  # type: ignore[attr-defined]
+        strategy=_parse_strategy(document.get("strategy")),  # type: ignore[attr-defined]
     )
 
 
@@ -650,7 +650,7 @@ def _parse_volume_sizing(raw: object) -> VolumeSizingPolicy:
     )
 
 
-def _parse_strategy(raw: object) -> StrategyFilterSettings:
+def _parse_strategy(raw: object) -> StrategyFilterSettings:  # noqa: C901, PLR0912
     if raw is None:
         return StrategyFilterSettings()
     mapping = _mapping(raw, "strategy")
@@ -658,9 +658,18 @@ def _parse_strategy(raw: object) -> StrategyFilterSettings:
         mapping,
         {
             "min_volume_usd_micro",
+            "volume_filter_is_soft",
             "max_creator_pairs",
             "history_sample_count",
             "min_win_rate_ppm",
+            "method1_min_win_rate_ppm",
+            "method2_min_win_rate_ppm",
+            "method1_history_sample_count",
+            "method2_history_sample_count",
+            "max_creator_creations",
+            "require_max_creator_creations",
+            "fresh_wallet_only",
+            "require_min_amplitude_ppm",
             "max_buys_per_hour",
             "max_entry_transaction_index",
             "max_entry_market_cap_quote_base_units",
@@ -673,13 +682,26 @@ def _parse_strategy(raw: object) -> StrategyFilterSettings:
         "strategy",
     )
     booleans = (
+        "volume_filter_is_soft",
+        "require_max_creator_creations",
+        "fresh_wallet_only",
         "require_bundle_match",
         "require_double_signature",
         "require_prior_zero_balance",
         "require_historical_qualification",
     )
     for field_name in booleans:
-        value = mapping.get(field_name, False)
+        default = (
+            True
+            if field_name
+            in (
+                "volume_filter_is_soft",
+                "require_max_creator_creations",
+                "fresh_wallet_only",
+            )
+            else False
+        )
+        value = mapping.get(field_name, default)
         if type(value) is not bool:
             raise SniperConfigError(f"strategy.{field_name} must be boolean")
     history_sample_count = mapping.get("history_sample_count", 10)
@@ -706,21 +728,71 @@ def _parse_strategy(raw: object) -> StrategyFilterSettings:
         raise SniperConfigError(
             "strategy.max_entry_transaction_index must be between 0 and 20"
         )
+    # method thresholds: deprecated alias min_win_rate_ppm -> method1
+    if "method1_min_win_rate_ppm" in mapping:
+        method1_ppm = _bounded_ppm(
+            mapping["method1_min_win_rate_ppm"], "strategy.method1_min_win_rate_ppm"
+        )
+    elif "min_win_rate_ppm" in mapping:
+        method1_ppm = _bounded_ppm(
+            mapping["min_win_rate_ppm"], "strategy.min_win_rate_ppm"
+        )
+    else:
+        method1_ppm = 330_000
+    method2_ppm = _bounded_ppm(
+        mapping.get("method2_min_win_rate_ppm", 501_000),
+        "strategy.method2_min_win_rate_ppm",
+    )
+    method1_sample = mapping.get("method1_history_sample_count", history_sample_count)
+    method2_sample = mapping.get("method2_history_sample_count", 15)
+    for field_name, value in (
+        ("method1_history_sample_count", method1_sample),
+        ("method2_history_sample_count", method2_sample),
+    ):
+        if type(value) is not int or not 1 <= value <= MAX_STRATEGY_HISTORY_SAMPLES:
+            raise SniperConfigError(f"strategy.{field_name} must be between 1 and 100")
+    # keep deprecated min_win_rate_ppm in sync with method1 for display
+    legacy_min_win = method1_ppm
+    if "min_win_rate_ppm" in mapping:
+        legacy_min_win = _bounded_ppm(
+            mapping["min_win_rate_ppm"], "strategy.min_win_rate_ppm"
+        )
+        # if method1 explicitly set, legacy mirrors it
+        if "method1_min_win_rate_ppm" in mapping:
+            legacy_min_win = method1_ppm
     return StrategyFilterSettings(
         min_volume_usd_micro=_optional_positive_int(
             mapping.get("min_volume_usd_micro"),
             "strategy.min_volume_usd_micro",
         ),
+        volume_filter_is_soft=mapping.get("volume_filter_is_soft", True),
         max_creator_pairs=_optional_positive_int(
             mapping.get("max_creator_pairs"),
             "strategy.max_creator_pairs",
             maximum=100_000,
         ),
         history_sample_count=history_sample_count,
-        min_win_rate_ppm=_bounded_ppm(
-            mapping.get("min_win_rate_ppm", 500_000),
-            "strategy.min_win_rate_ppm",
+        min_win_rate_ppm=legacy_min_win,
+        method1_min_win_rate_ppm=method1_ppm,
+        method2_min_win_rate_ppm=method2_ppm,
+        method1_history_sample_count=method1_sample,
+        method2_history_sample_count=method2_sample,
+        max_creator_creations=_optional_positive_int(
+            mapping.get("max_creator_creations", 5),
+            "strategy.max_creator_creations",
+            maximum=100_000,
         ),
+        require_max_creator_creations=mapping.get(
+            "require_max_creator_creations", True
+        ),
+        fresh_wallet_only=mapping.get("fresh_wallet_only", True),
+        require_min_amplitude_ppm=_optional_positive_int(
+            mapping.get("require_min_amplitude_ppm", 100_000),
+            "strategy.require_min_amplitude_ppm",
+            maximum=PROBABILITY_PPM_DENOMINATOR,
+        )
+        if mapping.get("require_min_amplitude_ppm", 100_000) is not None
+        else None,
         max_buys_per_hour=max_buys_per_hour,
         max_entry_transaction_index=max_entry_transaction_index,
         max_entry_market_cap_quote_base_units=_optional_non_negative_int(

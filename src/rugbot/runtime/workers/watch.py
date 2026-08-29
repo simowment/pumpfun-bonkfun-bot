@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     from rugbot.tracker.wallet_churn import OperatorWalletChurnSnapshot
 
 WATCH_MAX_SLIPPAGE_BPS = 500
-WATCH_DEFAULT_MAX_CONSECUTIVE_LOSSES = 3
+WATCH_DEFAULT_MAX_CONSECUTIVE_LOSSES = 5
 WATCH_DEFAULT_BUY_COOLDOWN_SLOTS = 1
 SLOTS_PER_HOUR = 9000
 
@@ -863,7 +863,7 @@ def _candidate_with_entry_size(
     )
 
 
-def build_watch_snipe_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0913
+def build_watch_snipe_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0913, PLR0915
     *,
     config: CoreSniperConfig,
     launch: object,
@@ -916,11 +916,79 @@ def build_watch_snipe_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0913
     if match is False:
         return None
     block_transaction_index = launch.transaction_index
-    if block_transaction_index > config.strategy.max_entry_transaction_index:
+    if (
+        block_transaction_index is None
+        or block_transaction_index > config.strategy.max_entry_transaction_index
+    ):
         return None
     if config.strategy.require_bundle_match and block_transaction_index != 0:
         return None
+    # F5 spam-creator gate (live) — fail-closed when creations exceed limit
+    creator_creations = getattr(launch, "creator_creations_count", None)
+    if creator_creations is None:
+        creator_creations = getattr(observation, "creator_creations_count", None)
+    if (
+        config.strategy.require_max_creator_creations
+        and config.strategy.max_creator_creations is not None
+        and creator_creations is not None
+        and creator_creations > config.strategy.max_creator_creations
+    ):
+        return _abstain(
+            AbstainReason.MISSING_FEATURE,
+            "SPAM_CREATOR_EXCEEDED:creator creations exceed limit",
+            as_of_slot=observation.slot,
+        )
+    # Fresh wallet only (method1 CEX) — if fresh_wallet_only and prior balance evidence shows non-zero, reject
+    prior_zero = getattr(launch, "prior_balance_was_zero", None)
+    if prior_zero is None:
+        prior_zero = getattr(observation, "prior_balance_was_zero", None)
+    # also check qualification prior_balance_was_zero if available
+    if prior_zero is None and qualification is not None:
+        prior_zero = getattr(qualification, "prior_balance_was_zero", None)
+    if config.strategy.fresh_wallet_only and prior_zero is False:
+        return _abstain(
+            AbstainReason.MISSING_FEATURE,
+            "FRESH_WALLET_REQUIRED",
+            as_of_slot=observation.slot,
+        )
+    # Amplitude +100% gate — consume upstream ATH evidence, fail-closed if missing
+    if config.strategy.require_min_amplitude_ppm is not None:
+        ath_ppm = getattr(launch, "ath_multiplier_ppm", None)
+        if ath_ppm is None:
+            ath_ppm = getattr(launch, "ath_multiplier", None)
+        if ath_ppm is None:
+            ath_ppm = getattr(observation, "ath_multiplier_ppm", None)
+        # also check qualification-provided evidence
+        if ath_ppm is None and qualification is not None:
+            ath_ppm = getattr(qualification, "ath_multiplier_ppm", None)
+        if ath_ppm is None:
+            return _abstain(
+                AbstainReason.MISSING_FEATURE,
+                "AMPLITUDE_EVIDENCE_MISSING",
+                as_of_slot=observation.slot,
+            )
+        # if ath_multiplier is float (2.0 =100%), convert to ppm diff
+        if isinstance(ath_ppm, float):
+            ath_ppm = (
+                int((ath_ppm - 1.0) * 1_000_000) if ath_ppm >= 1.0 else int(ath_ppm)
+            )
+        if type(ath_ppm) is int and ath_ppm < config.strategy.require_min_amplitude_ppm:
+            return _abstain(
+                AbstainReason.MISSING_FEATURE,
+                "AMPLITUDE_BELOW_THRESHOLD",
+                as_of_slot=observation.slot,
+            )
     if config.strategy.require_historical_qualification and qualification is not None:
+        # use method-specific thresholds if qualification carries method
+        expected_win = config.strategy.method1_min_win_rate_ppm
+        expected_sample = config.strategy.method1_history_sample_count
+        q_method = getattr(qualification, "method", None)
+        # heuristic: if qualification reason indicates bundler, use method2
+        # fallback to method1 for sniper-dev
+        q_method_str = str(q_method) if q_method is not None else ""
+        if "method2" in q_method_str or "bundler" in q_method_str.lower():
+            expected_win = config.strategy.method2_min_win_rate_ppm
+            expected_sample = config.strategy.method2_history_sample_count
         if (
             config.strategy.max_creator_pairs is not None
             and getattr(qualification, "matched_wallet_count", 0)
@@ -928,24 +996,28 @@ def build_watch_snipe_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0913
         ):
             return None
         if (
-            config.strategy.history_sample_count > 0
-            and getattr(qualification, "sample_count", 0)
-            < config.strategy.history_sample_count
+            expected_sample > 0
+            and getattr(qualification, "sample_count", 0) < expected_sample
         ):
             return None
         if (
-            config.strategy.min_win_rate_ppm > 0
+            expected_win > 0
             and getattr(qualification, "win_rate_ppm", None) is not None
-            and qualification.win_rate_ppm < config.strategy.min_win_rate_ppm
+            and qualification.win_rate_ppm < expected_win
         ):
             return None
+        # volume soft vs hard
         if (
             config.strategy.min_volume_usd_micro is not None
             and getattr(qualification, "total_volume_usd_micro", None) is not None
-            and qualification.total_volume_usd_micro
-            < config.strategy.min_volume_usd_micro
         ):
-            return None
+            vol = qualification.total_volume_usd_micro  # type: ignore[attr-defined]
+            if vol < config.strategy.min_volume_usd_micro:
+                if config.strategy.volume_filter_is_soft:
+                    # soft: do not block, just allow (warning emitted via reason)
+                    pass
+                else:
+                    return None
 
     intent = ExecutionIntent(
         intent_id=(

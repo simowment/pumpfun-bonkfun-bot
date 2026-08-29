@@ -207,7 +207,7 @@ async def observe_address(  # noqa: C901, PLR0911, PLR0912, PLR0913, PLR0915
 
     preloaded_transactions: dict[str, _HeliusFullTransaction] = {}
     if (
-        _is_helius_endpoint(endpoint)
+        supports_full_transaction_history(endpoint)
         and cursor is None
         and before_signature is None
         and not standard_history_only
@@ -683,9 +683,13 @@ async def _read_helius_full_transaction_history(  # noqa: C901, PLR0911, PLR0912
             "limit": page_limit,
             "sortOrder": "desc",
             "transactionDetails": "full",
+            "filters": {
+                "slot": {
+                    "gte": start_slot if start_slot is not None else 0,
+                    "lte": end_slot if end_slot is not None else finalized_slot,
+                }
+            },
         }
-        if start_slot is not None and end_slot is not None:
-            options["filters"] = {"slot": {"gte": start_slot, "lte": end_slot}}
         if pagination_token is not None:
             options["paginationToken"] = pagination_token
         page_result = await _read_result(
@@ -878,9 +882,13 @@ async def _read_helius_signature_history(  # noqa: C901, PLR0911, PLR0912, PLR09
             "limit": page_limit,
             "sortOrder": "desc",
             "transactionDetails": "signatures",
+            "filters": {
+                "slot": {
+                    "gte": start_slot if start_slot is not None else 0,
+                    "lte": end_slot if end_slot is not None else finalized_slot,
+                }
+            },
         }
-        if start_slot is not None and end_slot is not None:
-            options["filters"] = {"slot": {"gte": start_slot, "lte": end_slot}}
         if pagination_token is not None:
             options["paginationToken"] = pagination_token
         page_result = await _read_result(
@@ -1431,6 +1439,12 @@ def _valid_http_endpoint(value: object) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
+def supports_full_transaction_history(value: str) -> bool:
+    """Return whether the RPC host documents getTransactionsForAddress."""
+
+    return _is_helius_endpoint(value) or _is_alchemy_solana_endpoint(value)
+
+
 def _is_helius_endpoint(value: str) -> bool:
     """Return whether an HTTPS endpoint is clearly a Helius RPC host."""
 
@@ -1442,6 +1456,18 @@ def _is_helius_endpoint(value: str) -> bool:
         return False
     hostname = hostname.rstrip(".").lower()
     return hostname == "helius-rpc.com" or hostname.endswith(".helius-rpc.com")
+
+
+def _is_alchemy_solana_endpoint(value: str) -> bool:
+    """Return whether an HTTPS endpoint is Alchemy's documented Solana host."""
+
+    try:
+        hostname = urlsplit(value).hostname
+    except ValueError:
+        return False
+    return hostname is not None and hostname.rstrip(".").lower() == (
+        "solana-mainnet.g.alchemy.com"
+    )
 
 
 def _valid_helius_pagination_token(value: object) -> bool:

@@ -45,6 +45,13 @@ class WalletEntityEvidence:
     evidence_ids: tuple[str, ...]
 
 
+class OperatorMethod(Enum):
+    """Bible method discriminator for winrate/sample thresholds."""
+
+    METHOD1_SNIPER_DEV = "method1_sniper_dev"
+    METHOD2_COPYTRADER_BUNDLER = "method2_copytrade_bundler"
+
+
 @dataclass(frozen=True, slots=True)
 class OperatorQualificationConfig:
     """Integer thresholds for one point-in-time qualification decision."""
@@ -58,6 +65,15 @@ class OperatorQualificationConfig:
     min_adverse_launch_count: int = 2
     min_adverse_rate_ppm: int = 500_000
     min_entity_probability_ppm: int = 500_000
+    # Bible F3/F5 gates (optional, fail-closed when set)
+    method: OperatorMethod = OperatorMethod.METHOD1_SNIPER_DEV
+    creator_creations_count: int | None = None
+    max_creator_creations: int | None = 5
+    require_max_creator_creations: bool = True
+    fresh_wallet_only: bool = False
+    prior_balance_was_zero: bool | None = None
+    ath_multiplier_ppm: int | None = None
+    require_min_amplitude_ppm: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +104,48 @@ class OperatorQualification:
         return self.average_peak_pnl_quote_base_units
 
 
-def qualify_operator(
+def qualification_config_for_method(  # noqa: PLR0913
+    *,
+    as_of_slot: Slot,
+    entity_id: str,
+    method: OperatorMethod,
+    method1_min_win_rate_ppm: int = 330_000,
+    method2_min_win_rate_ppm: int = 501_000,
+    method1_history_sample_count: int = 10,
+    method2_history_sample_count: int = 15,
+    max_creator_creations: int | None = 5,
+    require_max_creator_creations: bool = True,
+    fresh_wallet_only: bool = True,
+    require_min_amplitude_ppm: int | None = 100_000,
+) -> OperatorQualificationConfig:
+    """Build method-specific qualification config (F3 bible split)."""
+
+    if method is OperatorMethod.METHOD1_SNIPER_DEV:
+        return OperatorQualificationConfig(
+            as_of_slot=as_of_slot,
+            entity_id=entity_id,
+            min_sample_count=method1_history_sample_count,
+            min_win_rate_ppm=method1_min_win_rate_ppm,
+            method=method,
+            max_creator_creations=max_creator_creations,
+            require_max_creator_creations=require_max_creator_creations,
+            fresh_wallet_only=fresh_wallet_only,
+            require_min_amplitude_ppm=require_min_amplitude_ppm,
+        )
+    return OperatorQualificationConfig(
+        as_of_slot=as_of_slot,
+        entity_id=entity_id,
+        min_sample_count=method2_history_sample_count,
+        min_win_rate_ppm=method2_min_win_rate_ppm,
+        method=method,
+        max_creator_creations=max_creator_creations,
+        require_max_creator_creations=require_max_creator_creations,
+        fresh_wallet_only=False,
+        require_min_amplitude_ppm=require_min_amplitude_ppm,
+    )
+
+
+def qualify_operator(  # noqa: PLR0911
     *,
     outcomes: tuple[CompletedLaunchOutcome, ...],
     entity_evidence: tuple[WalletEntityEvidence, ...],
@@ -104,6 +161,9 @@ def qualify_operator(
     config_error = _validate_config(config)
     if config_error is not None:
         return config_error
+    gate_error = _validate_bible_gates(config)
+    if gate_error is not None:
+        return gate_error
     input_error = _validate_input_shapes(
         outcomes=outcomes,
         entity_evidence=entity_evidence,
@@ -135,6 +195,51 @@ def qualify_operator(
         matched_evidence=matched_evidence,
         config=config,
     )
+
+
+def _validate_bible_gates(
+    config: OperatorQualificationConfig,
+) -> OperatorQualification | None:
+    """Fail-closed bible gates: spam creator, fresh wallet, amplitude."""
+    if (
+        config.require_max_creator_creations
+        and config.max_creator_creations is not None
+    ):
+        if (
+            config.creator_creations_count is not None
+            and config.creator_creations_count > config.max_creator_creations
+        ):
+            return _abstain(
+                config=config,
+                reason=AbstainReason.MISSING_FEATURE,
+                reason_code="SPAM_CREATOR_EXCEEDED",
+                message=f"creator creations {config.creator_creations_count} exceeds limit {config.max_creator_creations}",
+            )
+    if config.fresh_wallet_only:
+        if config.prior_balance_was_zero is False:
+            return _abstain(
+                config=config,
+                reason=AbstainReason.MISSING_FEATURE,
+                reason_code="FRESH_WALLET_REQUIRED",
+                message="creator wallet had prior balance before funding slot",
+            )
+        # None = unknown -> fail-closed only for explicit false; unknown allowed to let upstream decide
+    if config.require_min_amplitude_ppm is not None:
+        if config.ath_multiplier_ppm is None:
+            return _abstain(
+                config=config,
+                reason=AbstainReason.MISSING_FEATURE,
+                reason_code="AMPLITUDE_EVIDENCE_MISSING",
+                message="ATH multiplier evidence is required and unavailable",
+            )
+        if config.ath_multiplier_ppm < config.require_min_amplitude_ppm:
+            return _abstain(
+                config=config,
+                reason=AbstainReason.MISSING_FEATURE,
+                reason_code="AMPLITUDE_BELOW_THRESHOLD",
+                message=f"ATH multiplier {config.ath_multiplier_ppm} below required {config.require_min_amplitude_ppm}",
+            )
+    return None
 
 
 def _build_result(

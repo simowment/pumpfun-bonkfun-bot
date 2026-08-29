@@ -41,9 +41,7 @@ from rugbot.intelligence.wallet_intelligence import (
     report_to_json,
 )
 from rugbot.runtime.config import (
-    SniperConfigError,
     load_provider_settings,
-    load_sniper_config,
     resolve_dotenv,
 )
 from rugbot.runtime.event_bus import EventBus
@@ -1184,7 +1182,6 @@ def build_ui_runtime(  # noqa: PLR0913
     *,
     state_dir: Path,
     wallet: str | None = None,
-    config_path: Path | None = None,
     sniper_runtime: SniperRuntime | None = None,
     sniper_daemon: SniperDaemonService | None = None,
     endpoint: str | None = None,
@@ -1255,9 +1252,7 @@ def build_ui_runtime(  # noqa: PLR0913
         solscan_api_key=providers.solscan_api_key,
         state_dir=state_dir,
     )
-    if config_path is not None:
-        _seed_configured_target(repository, service, config_path)
-    elif wallet is not None and repository.get_funder(wallet) is None:
+    if wallet is not None and repository.get_funder(wallet) is None:
         service.add_funder(wallet, label="Configured target")
     return app
 
@@ -1273,55 +1268,6 @@ def _resolve_websocket_endpoint(http_endpoint: str | None) -> str | None:
     return urlunsplit(
         (scheme, parsed.netloc, parsed.path, parsed.query, parsed.fragment)
     )
-
-
-def _normalize_execution_mode(mode: object) -> TargetExecutionMode:
-    if isinstance(mode, TargetExecutionMode):
-        return mode
-    val = str(mode).lower()
-    if val in ("observe", "off"):
-        return TargetExecutionMode.OFF
-    if val in ("live",):
-        return TargetExecutionMode.LIVE
-    return TargetExecutionMode.SIMULATED
-
-
-def _seed_configured_target(
-    repository: SQLiteTrackerRepository, service: TrackerService, config_path: Path
-) -> None:
-    try:
-        cfg = load_sniper_config(config_path)
-    except SniperConfigError:
-        return
-    funder = getattr(cfg.target, "funder_address", None) or getattr(
-        cfg.target, "id", None
-    )
-    if not funder or funder == SYSTEM_PROGRAM:
-        return
-    if repository.get_funder(funder) is None:
-        service.add_funder(funder, label="Configured target")
-    raw_mode = getattr(cfg.target, "execution_mode", None) or (
-        cfg.execution.mode.value if hasattr(cfg, "execution") else "simulated"
-    )
-    exec_mode = _normalize_execution_mode(raw_mode)
-    quote_size = getattr(cfg.target, "quote_size_lamports", None) or (
-        cfg.execution.quote_size_lamports if hasattr(cfg, "execution") else 10_000_000
-    )
-    policy = TargetExecutionPolicy(
-        funder_address=funder,
-        monitoring_enabled=getattr(cfg.target, "monitoring_enabled", True),
-        execution_mode=exec_mode,
-        quote_size_lamports=quote_size,
-        take_profit_pnl_ppm=getattr(cfg.target, "take_profit_pnl_ppm", 1_000_000),
-        stop_loss_pnl_ppm=getattr(cfg.target, "stop_loss_pnl_ppm", -300_000),
-        max_slippage_bps=getattr(cfg.target, "max_slippage_bps", 500),
-        priority_fee_microlamports=getattr(
-            cfg.target, "priority_fee_microlamports", 50_000
-        ),
-        jito_tip_lamports=getattr(cfg.target, "jito_tip_lamports", 1_000_000),
-        updated_at=datetime.now(UTC).isoformat(),
-    )
-    repository.save_target_execution_policy(policy)
 
 
 __all__ = [

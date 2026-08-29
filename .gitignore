@@ -26,8 +26,8 @@ eggs/
 .eggs/
 lib/
 lib64/
-!web/src/lib/
-!web/src/lib/**
+!frontend/src/lib/
+!frontend/src/lib/**
 parts/
 sdist/
 var/
@@ -181,3 +181,17 @@ scratch/
 
 # Deepwork orchestrator state
 .slim/deepwork/
+
+# Frontend dependencies & build artifacts
+frontend/node_modules/
+frontend/dist/
+node_modules/
+
+# Runtime DB and scratch artifacts
+data/
+.sesskey
+dry.json
+.opencode/
+.playwright-mcp/
+.env.test
+

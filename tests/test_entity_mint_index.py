@@ -125,3 +125,62 @@ async def test_entity_mints_require_finalized_creator_confirmation(monkeypatch) 
         f"curve-{TARGET_MINT}",
         f"curve-{LINKED_MINT}",
     ]
+
+
+@pytest.mark.anyio
+async def test_entity_mint_confirmation_is_bounded_to_newest_fifteen(
+    monkeypatch,
+) -> None:
+    candidates = tuple(
+        PumpfunCreatedTokenCandidate(
+            mint=f"Mint{index:02d}",
+            creator=TARGET,
+            name=f"Token {index}",
+            symbol=f"T{index}",
+            created_timestamp=index,
+        )
+        for index in range(20)
+    )
+    monkeypatch.setattr(
+        entity_mint_index,
+        "fetch_pumpfun_created_tokens",
+        lambda _wallet: candidates,
+    )
+    monkeypatch.setattr(
+        entity_mint_index,
+        "resolve_token_or_wallet",
+        lambda mint, **_kwargs: ResolvedTarget(
+            input_address=mint,
+            target_wallet=TARGET,
+            is_token=True,
+            creation_slot=int(mint[-2:]),
+            creation_signature=f"signature-{mint}",
+            bonding_curve=f"curve-{mint}",
+        ),
+    )
+
+    discovery = await discover_finalized_entity_mints(
+        target_wallet=TARGET,
+        graph_wallets=(),
+        endpoint="https://recorded.invalid",
+    )
+
+    assert len(discovery.mints) == 15
+    assert {mint.mint for mint in discovery.mints} == {
+        f"Mint{index:02d}" for index in range(5, 20)
+    }
+    assert discovery.warnings == (
+        "entity mint confirmation limited to newest 15 of 20 indexed mints",
+    )
+
+    anchored = await discover_finalized_entity_mints(
+        target_wallet=TARGET,
+        graph_wallets=(),
+        endpoint="https://recorded.invalid",
+        max_mints=3,
+        anchor_mint="Mint10",
+    )
+    assert {mint.mint for mint in anchored.mints} == {"Mint09", "Mint10", "Mint11"}
+    assert anchored.warnings == (
+        "entity mint confirmation limited to around anchor 3 of 20 indexed mints",
+    )

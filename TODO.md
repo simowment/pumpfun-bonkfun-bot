@@ -133,12 +133,25 @@ PositionExitWorker (TP / SL / sortie manuelle)
   31 passés (`uv run pytest -q` 60s), backtest demo `fixtures/backtest/demo.json` vert.
   Refacto TUI 5-tabs mise en suspens jusqu'à fix du `compose` lourd.
 
+## Trois choses (Image 1 — priorités utilisateur du 2026-08-26)
+
+> Source: capture utilisateur — les 3 livrables qui débloquent la méthode bible.
+
+1. **Remonter le financement d'un dev jusqu'à l'opérateur** — chaîne de relais atomiques, mother wallet, signatures de montants réutilisables.
+2. **Scorer un rugger sur ses anciens launches** — entrée, ATH, floor, winrate, et sortir le TP optimal chiffré.
+3. **Configurer et poser ses trackers** — copytrade ou Method 1, avec les filtres et les sorties, après ta validation.
+
+Statut au 2026-08-26: (1) partiel via `funder_discovery`/`cluster_graph` mais pas de chaîne atomique bout-en-bout exposée en 1-liner; (2) partiel via `rug_check`+backtest (B0/B1, rugged, mcap) mais winrate/TP optimal pas chiffré en 1 sortie; (3) `watch.yaml` + `LIVE` existent mais pose tracker manuelle, pas de wizard `copytrade vs Method1` après validation.
+
 ## Phase 2 — Target Analytics & Backtester (POST-P0)
 
 - [ ] Auto-Profiler de Mint & Cluster Analyzer :
   - Analyse automatique du bloc-0 (`getBlock`) à partir d'un mint ou d'un dev pour extraire la taille du bundle (ex: 58 SOL) et la flotte de wallets satellites.
   - Remontée de la signature de funding (CEX Binance/Coinbase vs Master Wallet) et détection des sous-adresses mères.
-  - Calcul automatique du score de qualification (Winrate ≥ 33% sur les 10 derniers tokens, amplitude ATH > +100%, MC départ ≤ 15k$).
+  - Métriques présentées à l'opérateur, jamais de filtre dur : winrate sur
+    les 10 derniers tokens (informatif — la décision reste manuelle),
+    amplitude ATH, et MC de la 1re bougie définie comme **1 seconde après la
+    création** (seuil indicatif ≤ 15k$).
   - Enrôlement direct comme `Target` dans SQLite et affichage dans l'onglet **Launches** / **Settings** du TUI via raccourci clavier (`T` / `Ctrl+I`).
 - [ ] Backtester chronologique par cible / cluster (Écran F4) :
   - Invariant économique : **Frontrun du bundle du dev théoriquement impossible au bloc-0** (entrée réaliste = post-bundle B0 ou dégradée en B1/B2+).
@@ -150,6 +163,20 @@ PositionExitWorker (TP / SL / sortie manuelle)
     - Calcul de l'espérance mathématique nette ($\text{Net EV}$) nette de tous les frais et du glissement post-bundle.
     - Identification du **TP Optimal historique** et de la **zone de robustesse**.
   - Action en 1 clic `[Apply to Target]` pour synchroniser les paramètres optimisés dans la configuration de la cible dans le TUI.
+- [ ] Présentation copytrade manuelle (FOCUS ACTUEL) :
+  - Montrer concrètement, par wallet candidat, ses patterns copytrade avec
+    preuves finalized : entrées bloc-0 / début bloc-1 (indice tx vs create),
+    régularité des montants (`identical_buy_amounts`), crew récurrent du
+    créateur (`repeat_bundlers`), panier croisé multi-créateurs
+    (`cross_entity_bundles`), profil de dump étagé (ventes `pump_trades`).
+  - Le wallet copytrade est présenté à l'opérateur ; aucune décision
+    d'achat n'est prise automatiquement à ce stade.
+  - Financement CEX : uniquement visible dans le graphe quand détecté
+    (le toggle CEX existe déjà dans GraphView) — pas d'analyse dédiée.
+- [ ] PARTIE AUTOMATIQUE (DIFFÉRÉE — ne pas implémenter maintenant) :
+    enrôlement automatique de l'entité en tracking + autobuy des tokens
+    présumés. Requiert : partie manuelle prouvée, approbation utilisateur
+    explicite par cible, et LIVE toujours désarmé pendant le développement.
 - [ ] Historique des lancements, taux de réussite, market cap d'entrée et
   financement parent d'un wallet cible.
 - [ ] Rapport synthétique `WATCH` / `PASS` fondé sur les données observées.
@@ -161,3 +188,13 @@ PositionExitWorker (TP / SL / sortie manuelle)
 - [ ] Découverte de wallets développeurs reliés.
 - [ ] Approbation utilisateur obligatoire avant tout ajout aux cibles.
 - [ ] Évaluer l'intégration différée de `sol-trade-sdk` (C:\Users\got\Documents\code\sol-trade-sdk-python) : seule la course à nonce durable (`NoncePool`/`NonceRaceExecutor`) est non redondante avec la pile d'exécution locale ; le reste dupliquerait builder/firewall/simulation/landing existants.
+
+## Phase 4 — Rug Discover (EN COURS — spec 2026-08-26)
+
+> Demande utilisateur : collecteur headless longue durée + suivi complet par lancement + enrichisseur historique + file interrogeable. Survit à la fermeture du Web.
+
+- [ ] **Collecteur headless `uv run rug_discover collect`** : écoute toutes les créations PumpPortal, s'abonne aux trades des nouveaux tokens, écrit événements réels dans SQLite/JSONL. Pas de synthèse inventée.
+- [ ] **Suivi complet par lancement** : création/créateur, achats bundle + ordre tx, signataires/fee payer, market cap à 1s, volume, ATH, ventes dev/bundlers, dump/sweep/durée d'inactivité. Source : PumpPortal + RPC finalized. GMGN optionnel.
+- [ ] **Enrichisseur historique batch** : `uv run rug_discover enrich <wallet|mint>` — anciens mints via Solscan/Pump.fun, bundles par lancement, autres tokens achetés, paniers croisés, cycles financement→achat→vente→sweep. Réutilise `rug_check --trace-funding --score --entity` dedup path.
+- [ ] **File dossiers interrogeable** : `uv run rug_discover candidates --since 24h --json` + `uv run rug_discover dossier <wallet> --json`. L'opérateur lance la collecte, parcourt, compare et restitue les ruggers.
+- [ ] **Processus persistant** : `rug_discover collect` tourne en arrière-plan hors Web (PID file + `rugged` health). `candidates`/`dossier` lisent la même base.

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -54,6 +55,9 @@ FINALIZED_SLOT_RESOLVE_TIMEOUT_SECONDS = 5.0
 FINALIZATION_WAIT_SECONDS = 60.0
 NATIVE_STREAM_SOURCE_ID = "solana-native-wss"
 PUMPPORTAL_STREAM_SOURCE_ID = "pumpportal-new-token"
+DEFAULT_POLL_SECONDS_WS_LIVE = 60.0
+DEFAULT_POLL_SECONDS_NO_WS = 5.0
+MIN_POLL_SECONDS = 5.0
 
 FinalizedSlotResolver: TypeAlias = Callable[[], Awaitable[int]]
 SourceFactory: TypeAlias = Callable[[str], ObservationSource]
@@ -96,7 +100,7 @@ class TrackedLaunchObservationProducer:
         transport: RpcHttpTransport | None = None,
         finalized_slot_resolver: FinalizedSlotResolver | None = None,
         source_factory: SourceFactory | None = None,
-        poll_interval_seconds: float = 5.0,
+        poll_interval_seconds: float | None = None,
         max_concurrency: int = 4,
     ) -> None:
         """Initialize the producer with the shared tracker stack and RPC endpoint."""
@@ -113,7 +117,12 @@ class TrackedLaunchObservationProducer:
             finalized_slot_resolver or self._default_finalized_slot
         )
         self._source_factory = source_factory or self._default_source
-        self._poll_interval_seconds = poll_interval_seconds
+        self._poll_interval_seconds = _resolve_tracked_poll_interval(
+            explicit=poll_interval_seconds,
+            has_websocket=websocket_endpoint is not None
+            or pumpportal_stream is not None,
+        )
+        self._poll_disabled = _resolve_tracked_poll_disabled()
         self._max_concurrency = max_concurrency
         self._sources: dict[str, ObservationSource] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -275,7 +284,7 @@ class TrackedLaunchObservationProducer:
             return (observation,)
         return None
 
-    async def _poll_pumpportal(self) -> None:
+    async def _poll_pumpportal(self) -> None:  # noqa: C901
         """Filter global creates and deliver only finalized tracked launches."""
 
         if self._pumpportal_stream is None:
@@ -285,8 +294,44 @@ class TrackedLaunchObservationProducer:
                 if set(self._tasks) != self._service.engine.tracked_wallets:
                     await self.refresh()
                 notification = await self._pumpportal_stream.next_global_notification()
+                # Bible-filter proxy: queue via screener (bounded, fail-closed) before LIVE broadcast.
+                # At creation we cannot know future rug; entry proxy is B0 + ≤15k MC + volume
+                # validated later via finalized enrichment (see screener._qualify_notification).
+                nominated = None
                 if self._global_launch_handler is not None:
-                    self._global_launch_handler(notification)
+                    try:
+                        nominated = self._global_launch_handler(notification)
+                    except Exception:
+                        logger.exception(
+                            "screener nomination failed for %s",
+                            notification.mint_pubkey,
+                        )
+                # Only broadcast LIVE if nomination succeeded (bounded queue accepted).
+                # Frontend additionally gates on enriched rugged+ATH (peak_mult >=2.0) toggle.
+                should_broadcast = (
+                    self._global_launch_handler is None or nominated is not None
+                )
+                if should_broadcast and self._service.event_bus is not None:
+                    from datetime import UTC, datetime  # noqa: PLC0415
+
+                    from rugbot.tracker.events import LaunchDetected  # noqa: PLC0415
+
+                    try:
+                        self._service.event_bus.publish(
+                            LaunchDetected(
+                                root_funder=notification.creator_pubkey,
+                                wallet=notification.creator_pubkey,
+                                data={
+                                    "mint": notification.mint_pubkey,
+                                    "signature": notification.signature,
+                                    "slot": None,
+                                    "created_at": int(datetime.now(UTC).timestamp()),
+                                    "creator": notification.creator_pubkey,
+                                },
+                            )
+                        )
+                    except Exception:  # noqa: BLE001,S110
+                        pass
                 if (
                     notification.creator_pubkey
                     not in self._service.engine.tracked_wallets
@@ -343,7 +388,14 @@ class TrackedLaunchObservationProducer:
         self._repository.set_launch_activation(address, activation_slot)
         source = self._source_factory(address)
         self._sources[address] = source
-        self._tasks[address] = asyncio.create_task(self._poll_address(address, source))
+        if self._poll_disabled:
+            self._tasks[address] = asyncio.create_task(
+                self._poll_address_disabled(address, source)
+            )
+        else:
+            self._tasks[address] = asyncio.create_task(
+                self._poll_address(address, source)
+            )
 
     async def _stop_address(self, address: str) -> None:
         task = self._tasks.pop(address, None)
@@ -358,6 +410,13 @@ class TrackedLaunchObservationProducer:
     async def _poll_address(self, address: str, source: ObservationSource) -> None:
         while not self._closed:
             try:
+                # WS-first: skip HTTP poll when either WS is connected (event-driven
+                # path handles notifications); periodic fallback still runs on interval.
+                if self._is_ws_live():
+                    await asyncio.sleep(self._poll_interval_seconds)
+                    # Opportunistic catch-up poll while WS live (health-check, ~60s).
+                    # Fail-closed: WS notifications also hydrate individually, so missed
+                    # creates are caught on reconnect via stream poll tasks.
                 async with self._semaphore:
                     result = await source.read()
                 self._attempted_http_addresses.add(address)
@@ -378,6 +437,50 @@ class TrackedLaunchObservationProducer:
                 self._healthy_http_addresses.discard(address)
                 logger.exception("tracked launch observation failed for %s", address)
             await asyncio.sleep(self._poll_interval_seconds)
+
+    def _is_ws_live(self) -> bool:
+        """Return True when any websocket path is currently connected."""
+        if self._pumpportal_stream is not None and self._pumpportal_stream.connected:
+            return True
+        if self._stream is not None and self._stream.connected:
+            return True
+        return False
+
+    async def _poll_address_disabled(
+        self, address: str, source: ObservationSource
+    ) -> None:
+        """Park the address task when HTTP fallback is disabled; WS drives delivery.
+
+        Keeps the address registered in _tasks for status/health, but does not
+        issue HTTP reads. Reconnect catch-up is handled by WS stream tasks
+        (_poll_stream/_poll_pumpportal) which hydrate via getTransaction.
+        Falls back to a single catch-up read if both streams disconnect.
+        """
+        while not self._closed:
+            try:
+                if self._is_ws_live():
+                    await asyncio.sleep(DEFAULT_POLL_SECONDS_WS_LIVE)
+                    continue
+                # No WS live: one-shot catchup to avoid missed creates (fail-closed).
+                async with self._semaphore:
+                    result = await source.read()
+                self._attempted_http_addresses.add(address)
+                if isinstance(result, AbstainResult):
+                    self._healthy_http_addresses.discard(address)
+                else:
+                    self._healthy_http_addresses.add(address)
+                    activation_slot = self._repository.get_launch_activation(address)
+                    fresh = tuple(o for o in result if o.slot > activation_slot)
+                    if fresh:
+                        await self._deliver(fresh)
+                    _acknowledge(source, result)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._attempted_http_addresses.add(address)
+                self._healthy_http_addresses.discard(address)
+                logger.exception("tracked launch observation failed for %s", address)
+            await asyncio.sleep(DEFAULT_POLL_SECONDS_WS_LIVE)
 
     async def _deliver(self, observations: ObservationBatch) -> None:
         async with self._delivery_lock:
@@ -448,6 +551,34 @@ def _acknowledge(source: ObservationSource, batch: ObservationBatch) -> None:
     acknowledge = getattr(source, "acknowledge", None)
     if callable(acknowledge):
         acknowledge(batch)
+
+
+def _resolve_tracked_poll_interval(
+    *, explicit: float | None, has_websocket: bool
+) -> float:
+    """Resolve poll interval: explicit > env RUGBOT_TRACKED_POLL_SECONDS > default."""
+    if explicit is not None:
+        if explicit < MIN_POLL_SECONDS:
+            raise ValueError("poll_interval_seconds must be >= 5.0")  # noqa: TRY003
+        return explicit
+    env_value = os.environ.get("RUGBOT_TRACKED_POLL_SECONDS", "").strip()
+    if env_value:
+        try:
+            parsed = float(env_value)
+        except ValueError as error:
+            raise ValueError("RUGBOT_TRACKED_POLL_SECONDS must be a number") from error  # noqa: TRY003
+        if parsed < MIN_POLL_SECONDS:
+            raise ValueError("RUGBOT_TRACKED_POLL_SECONDS must be >= 5.0")  # noqa: TRY003
+        return parsed
+    if has_websocket:
+        return DEFAULT_POLL_SECONDS_WS_LIVE
+    return DEFAULT_POLL_SECONDS_NO_WS
+
+
+def _resolve_tracked_poll_disabled() -> bool:
+    """Return True when per-wallet HTTP fallback should be disabled entirely."""
+    env_value = os.environ.get("RUGBOT_TRACKED_POLL_DISABLED", "").strip().lower()
+    return env_value in {"1", "true", "yes", "on"}
 
 
 __all__ = ["LaunchObservationStatus", "TrackedLaunchObservationProducer"]

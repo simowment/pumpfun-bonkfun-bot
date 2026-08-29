@@ -6,7 +6,7 @@ import json
 
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.intelligence.token_resolver import ResolvedTarget
-from rugbot.runtime import wallet_cli
+from rugbot.interfaces.cli import wallet as wallet_cli
 from rugbot.storage.database import DatabaseManager
 from rugbot.storage.tracker import SQLiteTrackerRepository
 

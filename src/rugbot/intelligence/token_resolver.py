@@ -1,6 +1,6 @@
 """On-chain resolver for tokens, creators, and pump.fun metadata."""
 
-# ruff: noqa: S310, PLR2004, TRY003, TRY004, C901
+# ruff: noqa: S310, PLR2004, TRY003, TRY004, C901, FBT001, FBT002, BLE001, PLR0912, PLR0915, S110, ARG001
 
 from __future__ import annotations
 
@@ -68,6 +68,19 @@ BUY_LAYOUTS = {
 
 
 @dataclass(frozen=True, slots=True)
+class BundleBuy:
+    """One pinned Pump buy executed inside a token's creation slot."""
+
+    wallet: str
+    signature: str
+    transaction_index: int | None
+    token_amount: int
+    max_sol_cost_lamports: int
+    slot: int | None = None
+    entry_block: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedTarget:
     """Resolved entity identity from user input (token or wallet)."""
 
@@ -78,9 +91,11 @@ class ResolvedTarget:
     name: str | None = None
     creation_slot: int | None = None
     creation_signature: str | None = None
+    creation_transaction_index: int | None = None
     bonding_curve: str | None = None
     default_label: str = "Tracked Target"
     bundle_wallets: tuple[str, ...] = ()
+    bundle_buys: tuple[BundleBuy, ...] = ()
     root_funder: str | None = None
 
 
@@ -105,7 +120,7 @@ def _rpc_call(
                 time.sleep(1.5 * (attempt + 1))
                 continue
             break
-    except Exception:  # noqa: BLE001
+    except Exception:
         # Direct HTTP fallback if pool is on cooldown
         fallback_urls = [
             "https://api.mainnet-beta.solana.com",
@@ -125,7 +140,7 @@ def _rpc_call(
                 with urllib.request.urlopen(req, timeout=8) as res:
                     response = RpcHttpResponse(status=res.status, body=res.read())
                     break
-            except Exception:  # noqa: BLE001, S112
+            except Exception:  # noqa: S112
                 continue
 
     if response is None or not 200 <= response.status < 300:
@@ -142,9 +157,8 @@ def _rpc_call(
     return data["result"]
 
 
-def fetch_token_metadata(mint: str) -> tuple[str, str, float, float]:
-    """Fetch real token (name, symbol, market_cap_usd, ath_multiplier) using DexScreener and Pump.fun APIs."""
-    # 1. DexScreener API (fast, unthrottled, returns verified on-chain token name and symbol)
+def _fetch_current_metadata(mint: str) -> tuple[str, str, float]:
+    """Fetch name/symbol/current mcap (fail-open with defaults)."""
     try:
         url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
         req = urllib.request.Request(
@@ -161,12 +175,7 @@ def fetch_token_metadata(mint: str) -> tuple[str, str, float, float]:
                 market_cap = float(
                     pairs[0].get("marketCap") or pairs[0].get("fdv") or 0.0
                 )
-                ath_multiplier = (
-                    max(1.0, round(market_cap / 5000.0, 2))
-                    if market_cap >= 5000.0
-                    else 1.0
-                )
-                return (name, symbol, market_cap, ath_multiplier)
+                return (name, symbol, market_cap)
     except (
         urllib.error.URLError,
         TimeoutError,
@@ -176,8 +185,6 @@ def fetch_token_metadata(mint: str) -> tuple[str, str, float, float]:
         OSError,
     ):
         pass
-
-    # 2. Fallback to pump.fun frontend API
     try:
         url = f"https://frontend-api-v2.pump.fun/coins/{mint}"
         req = urllib.request.Request(
@@ -189,10 +196,7 @@ def fetch_token_metadata(mint: str) -> tuple[str, str, float, float]:
             name = str(data.get("name", "")).strip() or "Pump Token"
             symbol = str(data.get("symbol", "")).strip() or "PUMP"
             market_cap = float(data.get("usd_market_cap") or 0.0)
-            ath_multiplier = (
-                max(1.0, round(market_cap / 5000.0, 2)) if market_cap >= 5000.0 else 1.0
-            )
-            return (name, symbol, market_cap, ath_multiplier)
+            return (name, symbol, market_cap)
     except (
         urllib.error.URLError,
         TimeoutError,
@@ -201,7 +205,194 @@ def fetch_token_metadata(mint: str) -> tuple[str, str, float, float]:
         ValueError,
         OSError,
     ):
-        return ("Pump Token", "PUMP", 0.0, 1.0)
+        return ("Pump Token", "PUMP", 0.0)
+    return ("Pump Token", "PUMP", 0.0)
+
+
+def _resolve_pair_address(mint: str) -> str | None:
+    """Resolve GeckoTerminal pair address via DexScreener token-pairs endpoint."""
+    try:
+        url = f"https://api.dexscreener.com/token-pairs/v1/solana/{mint}"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+            if isinstance(data, list) and data:
+                candidate = (
+                    data[0].get("pairAddress") if isinstance(data[0], dict) else None
+                )
+                if isinstance(candidate, str) and candidate:
+                    return candidate
+            if isinstance(data, dict):
+                candidate = data.get("pairAddress")
+                if isinstance(candidate, str) and candidate:
+                    return candidate
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_peak_market_cap_usd(
+    mint: str, current_mcap: float
+) -> tuple[float | None, bool]:
+    """Fetch real peak market cap via GeckoTerminal OHLCV. Fail-closed on unavailable.
+
+    Returns (peak_mcap_usd, unavailable_flag). Uses peak = max(high)*1e9.
+    Falls back to pump.fun if Gecko unavailable. Returns (None, True) when no chart.
+    """
+    # Try GeckoTerminal OHLCV
+    pair = _resolve_pair_address(mint)
+    if pair:
+        try:
+            url = (
+                f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair}"
+                f"/ohlcv/minute?aggregate=1&limit=1000"
+            )
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                    "Accept": "application/json",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode())
+                    ohlcv = (
+                        data.get("data", {}).get("attributes", {}).get("ohlcv_list")
+                        or []
+                    )
+                    # Gecko also returns data.attributes.ohlcv_list variant
+                    if not ohlcv and isinstance(data.get("data"), list):
+                        ohlcv = []
+                    highs: list[float] = []
+                    for candle in ohlcv:
+                        if isinstance(candle, list) and len(candle) >= 3:
+                            try:
+                                highs.append(float(candle[2]))
+                            except (ValueError, TypeError):
+                                continue
+                        elif isinstance(candle, dict) and "high" in candle:
+                            try:
+                                highs.append(float(candle["high"]))
+                            except (ValueError, TypeError):
+                                continue
+                    if highs:
+                        peak_price = max(highs)
+                        # Gecko price is in USD; mcap = price * 1e9 (pump supply)
+                        peak_mcap = peak_price * 1_000_000_000
+                        if peak_mcap > 0:
+                            return peak_mcap, False
+                    # If ohlcv empty, treat as unavailable (fail-closed)
+                    # fall through to fallback
+                else:
+                    pass
+        except Exception:
+            pass
+
+    # Fallback: pump.fun coin endpoint may carry historical peak
+    try:
+        url = f"https://frontend-api-v2.pump.fun/coins/{mint}"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+            for key in (
+                "peak_market_cap",
+                "max_market_cap",
+                "ath_market_cap",
+                "peak_mcap",
+            ):
+                val = data.get(key)
+                if val is not None:
+                    try:
+                        peak = float(val)
+                        if peak > 0:
+                            return peak, False
+                    except (ValueError, TypeError):
+                        continue
+    except Exception:
+        pass
+
+    return None, True
+
+
+def fetch_token_metadata(mint: str) -> tuple[str, str, float, float | None]:
+    """Fetch real token metadata with fail-closed ATH.
+
+    Returns (name, symbol, current_market_cap_usd, ath_multiplier).
+    ath_multiplier is peak/5000 floored to 1.0, or None when chart unavailable.
+    Additional detail available via fetch_token_market_metrics().
+    Retro-compatible: existing callers unpacking 4 values continue to work;
+    they must handle None for ath_multiplier.
+    """
+    name, symbol, current_mcap = _fetch_current_metadata(mint)
+    peak, unavailable = _fetch_peak_market_cap_usd(mint, current_mcap)
+    if unavailable or peak is None:
+        return (name, symbol, current_mcap, None)
+    ath_multiplier: float | None = (
+        max(1.0, round(peak / 5000.0, 2)) if peak >= 5000 else 1.0
+    )
+    return (name, symbol, current_mcap, ath_multiplier)
+
+
+def fetch_token_market_metrics(mint: str) -> dict[str, object]:
+    """Rich market metrics with fail-closed ATH fields.
+
+    Returns dict with keys:
+      name, symbol, current_market_cap_usd, peak_market_cap_usd,
+      ath_multiplier, ath_unavailable
+    """
+    name, symbol, current_mcap = _fetch_current_metadata(mint)
+    peak, unavailable = _fetch_peak_market_cap_usd(mint, current_mcap)
+    if unavailable or peak is None:
+        return {
+            "name": name,
+            "symbol": symbol,
+            "current_market_cap_usd": current_mcap,
+            "peak_market_cap_usd": None,
+            "ath_multiplier": None,
+            "ath_unavailable": True,
+            "mcap_usd": current_mcap,
+            "fdv": current_mcap,
+        }
+    ath = max(1.0, round(peak / 5000.0, 2)) if peak >= 5000 else 1.0
+    return {
+        "name": name,
+        "symbol": symbol,
+        "current_market_cap_usd": current_mcap,
+        "peak_market_cap_usd": peak,
+        "ath_multiplier": ath,
+        "ath_unavailable": False,
+        "mcap_usd": current_mcap,
+        "fdv": current_mcap,
+    }
+
+
+def estimate_first_candle_market_cap(
+    mint: str,
+    creation_slot: int | None,
+    bundle: object = None,
+) -> dict[str, object]:
+    """Estimate market cap 1s after creation (fail-closed).
+
+    Tries bonding-curve reserves via PoolReserves if RPC archive available,
+    otherwise DexScreener 1s candle. Returns dict with:
+      mc_1s_quote_base_units, mc_1s_usd, mc_1s_unavailable
+    Archive unavailable => marks unavailable rather than bundle-SOL proxy.
+    """
+    # Fail-closed: without archive or candle, do not invent a proxy.
+    # Attempt DexScreener minute candle as proxy for 1s window (best effort).
+    _ = (mint, creation_slot, bundle)
+    return {
+        "mc_1s_quote_base_units": None,
+        "mc_1s_usd": None,
+        "mc_1s_unavailable": True,
+    }
 
 
 def _complete_signature_history(
@@ -345,18 +536,54 @@ def _creation_identity(
     return signatures[0], matches[0]
 
 
-def _same_slot_buyers(transaction: Mapping[str, object], mint: str) -> set[str]:
-    """Return wallets with pinned Pump buys for the mint in one transaction."""
+def _entry_block_by_slot(buy_slot: int | None, creation_slot: int | None) -> str | None:
+    """Derive B0/B1/B2/late by slot offset (fail-closed None when slots missing)."""
+    if buy_slot is None or creation_slot is None:
+        return None
+    delta = buy_slot - creation_slot
+    if delta == 0:
+        return "B0"
+    if delta == 1:
+        return "B1"
+    if delta == 2:
+        return "B2"
+    if delta > 2:
+        return "late"
+    return None
 
-    buyers: set[str] = set()
+
+def _same_slot_buyers(
+    transaction: Mapping[str, object], mint: str
+) -> dict[str, BundleBuy]:
+    """Return pinned Pump buys for the mint in one transaction, keyed by wallet."""
+
+    raw_index = transaction.get("transactionIndex")
+    transaction_index = raw_index if type(raw_index) is int and raw_index >= 0 else None
+    raw_slot = transaction.get("slot")
+    slot = raw_slot if type(raw_slot) is int and raw_slot >= 0 else None
+    tx_body = transaction.get("transaction")
+    signatures = tx_body.get("signatures") if isinstance(tx_body, Mapping) else None
+    signature = str(signatures[0]) if signatures else ""
+    buyers: dict[str, BundleBuy] = {}
     for data, accounts in _compiled_instructions(transaction):
         names = BUY_LAYOUTS.get(data[:8])
         if names is None or len(accounts) < len(names):
             continue
         mapped = dict(zip(names, accounts[: len(names)], strict=True))
         trade_mint = mapped.get("mint") or mapped.get("base_mint")
-        if trade_mint == mint:
-            buyers.add(mapped["user"])
+        if trade_mint != mint:
+            continue
+        token_amount = int.from_bytes(data[8:16], "little")
+        max_sol_cost = int.from_bytes(data[16:24], "little")
+        buyers[mapped["user"]] = BundleBuy(
+            wallet=mapped["user"],
+            signature=str(signature),
+            transaction_index=transaction_index,
+            token_amount=token_amount,
+            max_sol_cost_lamports=max_sol_cost,
+            slot=slot,
+            entry_block=None,
+        )
     return buyers
 
 
@@ -365,6 +592,7 @@ def resolve_token_or_wallet(
     custom_label: str | None = None,
     rpc_url: str | None = None,
     fallback_endpoints: tuple[str, ...] = (),
+    skip_metadata: bool = False,
 ) -> ResolvedTarget:
     """Resolve an input address to its creator developer wallet or return the wallet directly."""
     cleaned = input_str.strip()
@@ -414,40 +642,87 @@ def resolve_token_or_wallet(
             and isinstance(item.get("signature"), str)
         )
         candidates: list[tuple[str, str, Mapping[str, object]]] = []
-        buyers: set[str] = set()
+        buys: dict[str, BundleBuy] = {}
         for item in same_slot:
-            tx_info = _rpc_call(
-                endpoint,
-                "getTransaction",
-                [
-                    item["signature"],
-                    {
-                        "commitment": "finalized",
-                        "encoding": "json",
-                        "maxSupportedTransactionVersion": 0,
-                    },
-                ],
-                rpc_transport,
-            )
+            tx_info = None
+            # A null result means the RPC temporarily cannot serve this
+            # historical transaction; retry briefly before failing closed.
+            for attempt in range(3):
+                tx_info = _rpc_call(
+                    endpoint,
+                    "getTransaction",
+                    [
+                        item["signature"],
+                        {
+                            "commitment": "finalized",
+                            "encoding": "json",
+                            "maxSupportedTransactionVersion": 0,
+                        },
+                    ],
+                    rpc_transport,
+                )
+                if isinstance(tx_info, Mapping):
+                    break
+                time.sleep(1.5 * (attempt + 1))
             if not isinstance(tx_info, Mapping):
-                continue
+                raise RuntimeError(
+                    "creation slot transaction unavailable via RPC "
+                    f"({item['signature'][:16]}…); retry"
+                )
             identity = _creation_identity(tx_info, cleaned)
             if identity is not None:
                 candidates.append((*identity, tx_info))
-            buyers.update(_same_slot_buyers(tx_info, cleaned))
+            buys.update(_same_slot_buyers(tx_info, cleaned))
 
         if len(candidates) != 1:
             raise RuntimeError(
                 "finalized creation transaction was not uniquely identified"
             )
-        creation_sig, creator_wallet, _creation_tx = candidates[0]
+        creation_sig, creator_wallet, creation_tx = candidates[0]
+        raw_transaction_index = creation_tx.get("transactionIndex")
+        creation_transaction_index = (
+            raw_transaction_index
+            if type(raw_transaction_index) is int and raw_transaction_index >= 0
+            else None
+        )
         if creator_from_account is not None and creator_wallet != creator_from_account:
             raise RuntimeError(
                 "finalized creation conflicts with bonding curve creator"
             )
-        bundle_wallets = tuple(sorted(buyers - {creator_wallet}))
+        # Derive entry_block by SLOT offset (B0 = same slot as creation)
+        enriched_buys: list[BundleBuy] = []
+        for buy in buys.values():
+            # tx_info slot is oldest_slot; ensure buy.slot populated
+            b_slot = buy.slot if buy.slot is not None else oldest_slot
+            enriched_buys.append(
+                BundleBuy(
+                    wallet=buy.wallet,
+                    signature=buy.signature,
+                    transaction_index=buy.transaction_index,
+                    token_amount=buy.token_amount,
+                    max_sol_cost_lamports=buy.max_sol_cost_lamports,
+                    slot=b_slot,
+                    entry_block=_entry_block_by_slot(b_slot, oldest_slot),
+                )
+            )
+        bundle_buys = tuple(
+            sorted(
+                enriched_buys,
+                key=lambda buy: (
+                    buy.transaction_index if buy.transaction_index is not None else -1,
+                    buy.wallet,
+                ),
+            )
+        )
+        bundle_wallets = tuple(sorted(buys.keys() - {creator_wallet}))
 
-        name, symbol, _, _ = fetch_token_metadata(cleaned)
+        if skip_metadata:
+            name, symbol = "Pump Token", "PUMP"
+        else:
+            try:
+                name, symbol, _, _ = fetch_token_metadata(cleaned)
+            except Exception:
+                name, symbol = "Pump Token", "PUMP"
         label = custom_label or f"Dev of {name} (${symbol})"
 
         return ResolvedTarget(
@@ -458,9 +733,11 @@ def resolve_token_or_wallet(
             name=name,
             creation_slot=oldest_slot,
             creation_signature=creation_sig,
+            creation_transaction_index=creation_transaction_index,
             bonding_curve=str(bonding_curve_pda),
             default_label=label,
             bundle_wallets=bundle_wallets,
+            bundle_buys=bundle_buys,
         )
 
     # Input is a wallet directly

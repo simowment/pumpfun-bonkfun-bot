@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from rugbot.tracker.models import (
     AlertOutboxRecord,
+    BundleParticipationRecord,
     EntityBackfillRecord,
     EntityBackfillStatus,
     FunderRecord,
@@ -59,7 +60,8 @@ class SQLiteTrackerRepository:
             );
 
             CREATE TABLE IF NOT EXISTS tracker_target_scans (
-                query TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query TEXT NOT NULL,
                 tracking_address TEXT,
                 token_symbol TEXT,
                 token_name TEXT,
@@ -72,9 +74,6 @@ class SQLiteTrackerRepository:
                 last_scanned_at TEXT NOT NULL,
                 scan_count INTEGER NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_tracker_target_scans_last
-                ON tracker_target_scans (last_scanned_at DESC);
-
             CREATE TABLE IF NOT EXISTS tracker_entity_backfills (
                 query TEXT PRIMARY KEY,
                 wallet TEXT NOT NULL,
@@ -153,21 +152,34 @@ class SQLiteTrackerRepository:
                 activation_slot INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS tracker_bundle_participations (
+                bundler_wallet TEXT NOT NULL,
+                mint TEXT NOT NULL,
+                creator TEXT NOT NULL,
+                creation_slot INTEGER NOT NULL,
+                buy_signature TEXT NOT NULL,
+                transaction_index INTEGER,
+                max_sol_cost_lamports INTEGER NOT NULL,
+                PRIMARY KEY (bundler_wallet, mint, buy_signature)
+            );
+            CREATE INDEX IF NOT EXISTS idx_tracker_bundle_participations_wallet
+                ON tracker_bundle_participations (bundler_wallet, creator);
             """
         )
         columns = {
             str(row["name"])
             for row in conn.execute("PRAGMA table_info(tracker_target_scans)")
         }
-        if {"tracking_eligible", "assessment"} & columns:
+        if columns and ("id" not in columns or "tracking_eligible" in columns):
             conn.executescript(
                 """
                 BEGIN IMMEDIATE;
-                ALTER TABLE tracker_target_scans
-                    RENAME TO tracker_target_scans_with_verdicts;
+                ALTER TABLE tracker_target_scans RENAME TO tracker_target_scans_legacy;
                 DROP INDEX IF EXISTS idx_tracker_target_scans_last;
                 CREATE TABLE tracker_target_scans (
-                    query TEXT PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    query TEXT NOT NULL,
                     tracking_address TEXT,
                     token_symbol TEXT,
                     token_name TEXT,
@@ -189,12 +201,28 @@ class SQLiteTrackerRepository:
                     query, tracking_address, token_symbol, token_name, scan_ok,
                     launch_count, linked_launch_count, repeat_bundler_mint_count,
                     message, first_scanned_at, last_scanned_at, scan_count
-                FROM tracker_target_scans_with_verdicts;
-                DROP TABLE tracker_target_scans_with_verdicts;
+                FROM tracker_target_scans_legacy;
+                DROP TABLE tracker_target_scans_legacy;
                 CREATE INDEX idx_tracker_target_scans_last
-                    ON tracker_target_scans (last_scanned_at DESC);
+                    ON tracker_target_scans (last_scanned_at DESC, id DESC);
+                CREATE INDEX idx_tracker_target_scans_entity
+                    ON tracker_target_scans (tracking_address, last_scanned_at DESC, id DESC);
                 COMMIT;
                 """
+            )
+        if (
+            columns
+            or conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tracker_target_scans'"
+            ).fetchone()
+        ):
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tracker_target_scans_last "
+                "ON tracker_target_scans (last_scanned_at DESC, id DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tracker_target_scans_entity "
+                "ON tracker_target_scans (tracking_address, last_scanned_at DESC, id DESC)"
             )
 
     # --- Funders ---
@@ -346,26 +374,20 @@ class SQLiteTrackerRepository:
             updated_at=row["updated_at"],
         )
 
-    def save_target_scan(self, scan: TargetScanRecord) -> None:
-        """Insert or update one persistent target scan summary."""
-        self._db.connection.execute(
+    def save_target_scan(self, scan: TargetScanRecord) -> TargetScanRecord:
+        """Append one persistent target scan event."""
+        conn = self._db.connection
+        occurrence = conn.execute(
+            "SELECT COALESCE(MAX(scan_count), 0) + 1 FROM tracker_target_scans WHERE query = ?",
+            (scan.query,),
+        ).fetchone()[0]
+        cursor = conn.execute(
             """
             INSERT INTO tracker_target_scans (
                 query, tracking_address, token_symbol, token_name, scan_ok,
                 launch_count, linked_launch_count, repeat_bundler_mint_count,
                 message, first_scanned_at, last_scanned_at, scan_count
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(query) DO UPDATE SET
-                tracking_address = excluded.tracking_address,
-                token_symbol = excluded.token_symbol,
-                token_name = excluded.token_name,
-                scan_ok = excluded.scan_ok,
-                launch_count = excluded.launch_count,
-                linked_launch_count = excluded.linked_launch_count,
-                repeat_bundler_mint_count = excluded.repeat_bundler_mint_count,
-                message = excluded.message,
-                last_scanned_at = excluded.last_scanned_at,
-                scan_count = tracker_target_scans.scan_count + 1
             """,
             (
                 scan.query,
@@ -379,37 +401,70 @@ class SQLiteTrackerRepository:
                 scan.message,
                 scan.first_scanned_at,
                 scan.last_scanned_at,
-                scan.scan_count,
+                occurrence,
             ),
+        )
+        return TargetScanRecord(
+            query=scan.query,
+            tracking_address=scan.tracking_address,
+            token_symbol=scan.token_symbol,
+            token_name=scan.token_name,
+            scan_ok=scan.scan_ok,
+            launch_count=scan.launch_count,
+            linked_launch_count=scan.linked_launch_count,
+            repeat_bundler_mint_count=scan.repeat_bundler_mint_count,
+            message=scan.message,
+            first_scanned_at=scan.first_scanned_at,
+            last_scanned_at=scan.last_scanned_at,
+            scan_count=occurrence,
+            id=int(cursor.lastrowid),
+        )
+
+    @staticmethod
+    def _target_scan_from_row(row: sqlite3.Row) -> TargetScanRecord:
+        """Decode one target scan event row."""
+        return TargetScanRecord(
+            query=row["query"],
+            tracking_address=row["tracking_address"],
+            token_symbol=row["token_symbol"],
+            token_name=row["token_name"],
+            scan_ok=bool(row["scan_ok"]),
+            launch_count=row["launch_count"],
+            linked_launch_count=row["linked_launch_count"],
+            repeat_bundler_mint_count=row["repeat_bundler_mint_count"],
+            message=row["message"],
+            first_scanned_at=row["first_scanned_at"],
+            last_scanned_at=row["last_scanned_at"],
+            scan_count=row["scan_count"],
+            id=row["id"],
         )
 
     def get_target_scans(self, limit: int = 100) -> tuple[TargetScanRecord, ...]:
-        """Fetch persistent target scan history, newest first."""
+        """Fetch persistent scan events, newest first."""
         rows = self._db.connection.execute(
             """
             SELECT * FROM tracker_target_scans
-            ORDER BY last_scanned_at DESC
+            ORDER BY last_scanned_at DESC, id DESC
             LIMIT ?
             """,
             (limit,),
         ).fetchall()
-        return tuple(
-            TargetScanRecord(
-                query=row["query"],
-                tracking_address=row["tracking_address"],
-                token_symbol=row["token_symbol"],
-                token_name=row["token_name"],
-                scan_ok=bool(row["scan_ok"]),
-                launch_count=row["launch_count"],
-                linked_launch_count=row["linked_launch_count"],
-                repeat_bundler_mint_count=row["repeat_bundler_mint_count"],
-                message=row["message"],
-                first_scanned_at=row["first_scanned_at"],
-                last_scanned_at=row["last_scanned_at"],
-                scan_count=row["scan_count"],
-            )
-            for row in rows
-        )
+        return tuple(self._target_scan_from_row(row) for row in rows)
+
+    def get_target_scans_for_entity(
+        self, entity_address: str, limit: int = 100
+    ) -> tuple[TargetScanRecord, ...]:
+        """Fetch persistent scan events for one resolved entity, newest first."""
+        rows = self._db.connection.execute(
+            """
+            SELECT * FROM tracker_target_scans
+            WHERE tracking_address = ?
+            ORDER BY last_scanned_at DESC, id DESC
+            LIMIT ?
+            """,
+            (entity_address, limit),
+        ).fetchall()
+        return tuple(self._target_scan_from_row(row) for row in rows)
 
     def save_entity_backfill(self, backfill: EntityBackfillRecord) -> None:
         """Insert or update one durable entity-history backfill."""
@@ -443,6 +498,66 @@ class SQLiteTrackerRepository:
                 backfill.created_at,
                 backfill.updated_at,
             ),
+        )
+
+    def save_bundle_participations(
+        self, participations: tuple[BundleParticipationRecord, ...]
+    ) -> None:
+        """Persist finalized creation-slot buys, ignoring duplicates."""
+
+        self._db.connection.executemany(
+            """
+            INSERT OR IGNORE INTO tracker_bundle_participations (
+                bundler_wallet, mint, creator, creation_slot,
+                buy_signature, transaction_index, max_sol_cost_lamports
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    item.bundler_wallet,
+                    item.mint,
+                    item.creator,
+                    item.creation_slot,
+                    item.buy_signature,
+                    item.transaction_index,
+                    item.max_sol_cost_lamports,
+                )
+                for item in participations
+            ],
+        )
+
+    def get_bundle_participations(
+        self,
+        bundler_wallets: tuple[str, ...],
+        *,
+        exclude_creator: str,
+    ) -> tuple[BundleParticipationRecord, ...]:
+        """Fetch participations by the wallets for creators other than the excluded one."""
+
+        if not bundler_wallets:
+            return ()
+        placeholders = ", ".join("?" for _ in bundler_wallets)
+        rows = self._db.connection.execute(
+            f"""
+            SELECT bundler_wallet, mint, creator, creation_slot,
+                   buy_signature, transaction_index, max_sol_cost_lamports
+            FROM tracker_bundle_participations
+            WHERE bundler_wallet IN ({placeholders}) AND creator != ?
+            ORDER BY bundler_wallet, creation_slot
+            """,  # noqa: S608 - placeholders are generated question marks.
+            (*bundler_wallets, exclude_creator),
+        ).fetchall()
+        return tuple(
+            BundleParticipationRecord(
+                bundler_wallet=row["bundler_wallet"],
+                mint=row["mint"],
+                creator=row["creator"],
+                creation_slot=row["creation_slot"],
+                buy_signature=row["buy_signature"],
+                transaction_index=row["transaction_index"],
+                max_sol_cost_lamports=row["max_sol_cost_lamports"],
+            )
+            for row in rows
         )
 
     def get_entity_backfill(self, query: str) -> EntityBackfillRecord | None:

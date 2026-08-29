@@ -24,13 +24,13 @@ from rugbot.ingest.pump.pump_stream import (
 )
 from rugbot.ingest.rpc_observer import JSON_TRANSACTION_FORMAT
 from rugbot.integrations.solana_logs_stream import SolanaLogsStream
+from rugbot.interfaces.tui.app import RugbotTuiApp
+from rugbot.interfaces.tui.widgets import LiveActivityView
 from rugbot.runtime.app import build_ui_runtime
 from rugbot.runtime.workers.tracked_launch_observation import (
     LaunchObservationStatus,
     TrackedLaunchObservationProducer,
 )
-from rugbot.tui.app import RugbotTuiApp
-from rugbot.tui.widgets import LiveActivityView
 
 WALLET = "2r2HuRi1vLzVxXnWAffWfsAMDkQpfG1c23KPDgR4wp5p"
 MINT = "E9CqsGL5uXPASB853f87ox8nZVgW7ucoeYMC4bN8pump"

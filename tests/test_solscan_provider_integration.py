@@ -210,3 +210,116 @@ def test_solscan_token_creation_contract() -> None:
     assert candidate.creator == creator
     assert candidate.transaction_signature == signature
     assert candidate.name == "Recorded Token"
+
+
+def test_solscan_nominates_only_transactions_touching_known_mints() -> None:
+    address = "FJz6SLz8CQBmm692kfp6e8s9FZPuqnKX5ZNcr7k5Kadd"
+    mint = "43WTM7ddYoHG44cf1rdr3RXLDJUxHh2vNerDgLgTe5uN"
+    program = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+    signature = base58.b58encode(bytes(range(64))).decode("ascii")
+
+    def recorded_transport(request, _timeout):
+        assert request.full_url.startswith(
+            "https://pro-api.solscan.io/playground/account/transactions/enhanced?"
+        )
+        return json.dumps(
+            {
+                "success": True,
+                "data": {
+                    "transactions": [
+                        {
+                            "slot": 441_000_000,
+                            "blockTime": 1_780_000_000,
+                            "transactionIndex": 7,
+                            "transaction": {
+                                "signatures": [signature],
+                                "message": {"accountKeys": [address, mint, program]},
+                            },
+                        },
+                        {
+                            "slot": 441_000_001,
+                            "blockTime": 1_780_000_001,
+                            "transactionIndex": 8,
+                            "transaction": {
+                                "signatures": [signature],
+                                "message": {"accountKeys": [address, program]},
+                            },
+                        },
+                    ],
+                    "cursor": None,
+                },
+            }
+        ).encode()
+
+    discovery = SolscanClient(
+        "test-key", transport=recorded_transport
+    ).mint_transaction_candidates(
+        address,
+        program=program,
+        mints=frozenset({mint}),
+        max_pages=1,
+    )
+
+    assert discovery.complete is True
+    assert discovery.pages_scanned == 1
+    assert discovery.warning is None
+    assert discovery.next_cursor is None
+    assert len(discovery.candidates) == 1
+    assert discovery.candidates[0].signature == signature
+    assert discovery.candidates[0].matched_mints == (mint,)
+    assert discovery.candidates[0].transaction_index == 7
+
+
+def test_solscan_mint_history_preserves_pages_before_rate_limit() -> None:
+    address = "FJz6SLz8CQBmm692kfp6e8s9FZPuqnKX5ZNcr7k5Kadd"
+    mint = "43WTM7ddYoHG44cf1rdr3RXLDJUxHh2vNerDgLgTe5uN"
+    program = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+    signature = base58.b58encode(bytes(range(64))).decode("ascii")
+    calls = 0
+
+    def recorded_transport(_request, _timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise urllib.error.HTTPError(
+                "https://pro-api.solscan.io/playground",
+                429,
+                "Too Many Requests",
+                Message(),
+                None,
+            )
+        return json.dumps(
+            {
+                "success": True,
+                "data": {
+                    "transactions": [
+                        {
+                            "slot": 441_000_000,
+                            "blockTime": 1_780_000_000,
+                            "transactionIndex": 7,
+                            "transaction": {
+                                "signatures": [signature],
+                                "message": {"accountKeys": [address, mint, program]},
+                            },
+                        }
+                    ],
+                    "cursor": "next-page",
+                },
+            }
+        ).encode()
+
+    discovery = SolscanClient(
+        "test-key", transport=recorded_transport
+    ).mint_transaction_candidates(
+        address,
+        program=program,
+        mints=frozenset({mint}),
+        max_pages=3,
+        page_pause_seconds=0,
+    )
+
+    assert discovery.complete is False
+    assert discovery.pages_scanned == 1
+    assert len(discovery.candidates) == 1
+    assert discovery.warning == "Solscan request failed with HTTP 429"
+    assert discovery.next_cursor == "next-page"

@@ -28,7 +28,6 @@ from rugbot.application.commands import BotCommand
 from rugbot.interfaces.base import BaseAdapter
 from rugbot.runtime.app import RugbotApp, build_ui_runtime
 from rugbot.runtime.config import (
-    resolve_config_path,
     resolve_dotenv,
     resolve_state_dir,
 )
@@ -1473,11 +1472,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         type=int,
         help="Alerts Channel ID (overrides DISCORD_CHANNEL_ID env)",
     )
-    parser.add_argument(
-        "--config",
-        "-f",
-        help="Path to watcher config YAML (default: watch.yaml)",
-    )
+
     parser.add_argument(
         "--state-dir",
         help="State directory (default: .state/discord)",
@@ -1505,13 +1500,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     state_dir = resolve_state_dir(
         Path(args.state_dir or os.environ.get("RUGBOT_STATE_DIR", ".state/discord"))
     )
-    config_path = resolve_config_path(
-        Path(args.config or os.environ.get("RUGBOT_CONFIG", "watch.yaml"))
-    )
 
     core = build_ui_runtime(
         state_dir=state_dir,
-        config_path=config_path if config_path.exists() else None,
     )
     adapter = DiscordAdapter(
         core,

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from rugbot.tracker.models import (
         AlertOutboxRecord,
+        BundleParticipationRecord,
         EntityBackfillRecord,
         FunderRecord,
         LaunchRecord,
@@ -44,11 +45,16 @@ class TrackerRepository(Protocol):
     ) -> TargetExecutionPolicy | None:
         """Fetch the execution policy for one tracked funder."""
 
-    def save_target_scan(self, scan: TargetScanRecord) -> None:
-        """Persist the latest finalized scan summary for one target query."""
+    def save_target_scan(self, scan: TargetScanRecord) -> TargetScanRecord:
+        """Append one finalized scan event and return its persisted record."""
 
     def get_target_scans(self, limit: int = 100) -> tuple[TargetScanRecord, ...]:
-        """Fetch persistent target scan history, newest first."""
+        """Fetch persistent scan events, newest first."""
+
+    def get_target_scans_for_entity(
+        self, entity_address: str, limit: int = 100
+    ) -> tuple[TargetScanRecord, ...]:
+        """Fetch scan events for one resolved entity, newest first."""
 
     def save_entity_backfill(self, backfill: EntityBackfillRecord) -> None:
         """Persist one entity backfill checkpoint and cached report."""
@@ -58,6 +64,19 @@ class TrackerRepository(Protocol):
 
     def get_incomplete_entity_backfills(self) -> tuple[EntityBackfillRecord, ...]:
         """Fetch resumable entity backfills ordered by oldest update first."""
+
+    def save_bundle_participations(
+        self, participations: tuple[BundleParticipationRecord, ...]
+    ) -> None:
+        """Persist finalized creation-slot buys, ignoring duplicates."""
+
+    def get_bundle_participations(
+        self,
+        bundler_wallets: tuple[str, ...],
+        *,
+        exclude_creator: str,
+    ) -> tuple[BundleParticipationRecord, ...]:
+        """Fetch participations by the wallets for creators other than the excluded one."""
 
     # --- Wallets ---
     def save_wallet(self, wallet: WalletRecord) -> None:

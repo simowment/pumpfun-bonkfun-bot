@@ -17,14 +17,14 @@ from rugbot.domain.decisions import AbstainResult
 from rugbot.ingest.rpc_observer import observe_address
 from rugbot.intelligence.token_resolver import resolve_token_or_wallet
 from rugbot.intelligence.wallet_intelligence import scan_wallet_intelligence
-from rugbot.runtime.cli import WatchCycleResult, run_watch_cycle
+from rugbot.interfaces.cli.watch import WatchCycleResult, run_watch_cycle
 from rugbot.runtime.config import (
     ExecutionMode,
     ListenerKind,
     SniperTarget,
     TargetKind,
-    load_sniper_config,
 )
+from rugbot.storage.config_store import load_sniper_config_db
 from rugbot.storage.jsonl_observation_store import JsonlObservationStore
 
 WALLET = "2r2HuRi1vLzVxXnWAffWfsAMDkQpfG1c23KPDgR4wp5p"
@@ -303,7 +303,7 @@ async def test_watch_cycle_reaches_standard_rpc_fallback(
     primary_app.router.add_post("/", rate_limited)
     fallback_app = web.Application()
     fallback_app.router.add_post("/", healthy)
-    config = load_sniper_config(Path("watch.yaml"))
+    config = load_sniper_config_db(tmp_path)
     config = replace(
         config,
         target=SniperTarget(kind=TargetKind.WALLET, id=WALLET),

@@ -19,6 +19,7 @@ from rugbot.intelligence.token_resolver import resolve_token_or_wallet
 from rugbot.tracker.models import (
     TargetExecutionMode,
     TargetExecutionPolicy,
+    TargetScanRecord,
 )
 from rugbot.utils.logger import get_logger
 
@@ -169,6 +170,23 @@ class ScreenerService:
             bundle_wallets_count=len(resolved.bundle_wallets),
         )
         self._store_candidate(candidate)
+        if self._tracker_service is not None:
+            timestamp = candidate.discovered_at
+            self._tracker_service.repository.save_target_scan(
+                TargetScanRecord(
+                    query=query.strip(),
+                    tracking_address=dev_wallet,
+                    token_symbol=candidate.token_symbol,
+                    token_name=candidate.token_name,
+                    scan_ok=False,
+                    launch_count=0,
+                    linked_launch_count=0,
+                    repeat_bundler_mint_count=0,
+                    message=candidate.qualification_reason,
+                    first_scanned_at=timestamp,
+                    last_scanned_at=timestamp,
+                )
+            )
         return candidate
 
     def _queue_notification(self, notification: PumpPortalLaunchNotification) -> None:

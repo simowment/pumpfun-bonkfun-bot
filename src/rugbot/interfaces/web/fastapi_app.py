@@ -24,6 +24,7 @@ logger = get_logger(__name__)
 SCAN_TIMEOUT_SECONDS = 120
 ENTITY_QUERY_MIN_LENGTH = 32
 ENTITY_QUERY_MAX_LENGTH = 64
+SCAN_HISTORY_MAX_LIMIT = 1000
 
 
 class ScanEntityRequest(BaseModel):
@@ -33,7 +34,7 @@ class ScanEntityRequest(BaseModel):
         min_length=ENTITY_QUERY_MIN_LENGTH,
         max_length=ENTITY_QUERY_MAX_LENGTH,
     )
-    max_transactions: int = Field(default=100, ge=1, le=100)
+    max_transactions: int = Field(default=100, ge=1, le=1000)
 
 
 class TrackEntityRequest(BaseModel):
@@ -82,6 +83,27 @@ def create_fastapi_app(  # noqa: C901, PLR0915
     async def api_state() -> dict[str, object]:
         return state_payload()
 
+    @app.get("/api/entity/{address}/scans")
+    async def api_entity_scan_history(
+        address: str, limit: int = 100
+    ) -> dict[str, object]:
+        normalized_address = address.strip()
+        if (
+            not ENTITY_QUERY_MIN_LENGTH
+            <= len(normalized_address)
+            <= ENTITY_QUERY_MAX_LENGTH
+        ):
+            raise HTTPException(status_code=422, detail="invalid entity address length")
+        if not 1 <= limit <= SCAN_HISTORY_MAX_LIMIT:
+            raise HTTPException(status_code=422, detail="invalid scan history limit")
+        return {
+            "ok": True,
+            "entity_address": normalized_address,
+            "scans": jsonable(
+                core.target_scan_history(normalized_address, limit=limit)
+            ),
+        }
+
     @app.post("/api/entity/scan")
     async def api_entity_scan(payload: ScanEntityRequest) -> dict[str, object]:
         query = payload.query.strip()
@@ -115,6 +137,24 @@ def create_fastapi_app(  # noqa: C901, PLR0915
         ):
             raise HTTPException(status_code=422, detail="invalid entity query length")
         result = core.cached_entity_report(normalized_query)
+        if not result.ok:
+            raise HTTPException(status_code=404, detail=result.message)
+        return {
+            "ok": True,
+            "message": result.message,
+            "data": jsonable(result.data),
+        }
+
+    @app.get("/api/wallet/balance")
+    async def api_wallet_balance(address: str) -> dict[str, object]:
+        normalized_address = address.strip()
+        if (
+            not ENTITY_QUERY_MIN_LENGTH
+            <= len(normalized_address)
+            <= ENTITY_QUERY_MAX_LENGTH
+        ):
+            raise HTTPException(status_code=422, detail="invalid wallet address length")
+        result = await core.wallet_balance(normalized_address)
         if not result.ok:
             raise HTTPException(status_code=404, detail=result.message)
         return {
@@ -185,8 +225,8 @@ def create_fastapi_app(  # noqa: C901, PLR0915
 
     candidates = (
         dist_dir,
-        Path.cwd() / "web" / "dist",
-        Path(__file__).resolve().parents[4] / "web" / "dist",
+        Path.cwd() / "frontend" / "dist",
+        Path(__file__).resolve().parents[4] / "frontend" / "dist",
     )
     resolved_dist = next(
         (

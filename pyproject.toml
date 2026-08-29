@@ -36,14 +36,22 @@ dev = [
 ]
 
 [project.scripts]
-rug_watch = "rugbot.runtime.cli:main"
-rug_wallet = "rugbot.runtime.wallet_cli:main"
-rug_target = "rugbot.runtime.wallet_cli:main"
-rug_wallet_tui = "rugbot.runtime.wallet_tui:main"
-rug_tui = "rugbot.runtime.wallet_tui:main"
+rug_watch = "rugbot.interfaces.cli.watch:main"
+rug_live = "rugbot.interfaces.cli.watch:main"
+rug_check = "rugbot.interfaces.cli.check_mint:main"
+rug_wallet = "rugbot.interfaces.cli.wallet:main"
+rug_target = "rugbot.interfaces.cli.wallet:main"
+rug_wallet_tui = "rugbot.interfaces.tui.runner:main"
+rug_tui = "rugbot.interfaces.tui.runner:main"
 rug_discord = "rugbot.interfaces.discord:main"
-rug_telegram = "rugbot.interfaces.telegram_runner:main"
-rug_web = "rugbot.interfaces.web_runner:main"
+rug_telegram = "rugbot.interfaces.telegram.runner:main"
+rug_web = "rugbot.interfaces.web.runner:main"
+rug_discover = "rugbot.interfaces.cli.discover:main"
+rug_create = "rugbot.interfaces.cli.create:main"
+rug_scalp = "rugbot.cli.scalper_cli:main"
+rug_config = "rugbot.cli.config_cli:main"
+rug_cluster = "rugbot.interfaces.cli.cluster:main"
+rug_backtest = "rugbot.interfaces.cli.backtest:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]

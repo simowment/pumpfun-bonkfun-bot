@@ -5,6 +5,7 @@ Solana client abstraction for blockchain operations.
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 import struct
 from typing import TYPE_CHECKING, Any
@@ -50,31 +51,70 @@ def set_loaded_accounts_data_size_limit(bytes_limit: int) -> Instruction:
 class SolanaClient:
     """Abstraction for Solana RPC client operations."""
 
-    def __init__(self, rpc_endpoint: str, max_rps: float = 25.0) -> None:
+    def __init__(
+        self,
+        rpc_endpoint: str,
+        max_rps: float = 25.0,
+        *,
+        enable_blockhash_updater: bool | None = None,
+        blockhash_poll_interval_seconds: float | None = None,
+    ) -> None:
         """Initialize Solana client with RPC endpoint.
 
         Args:
             rpc_endpoint: URL of the Solana RPC endpoint
             max_rps: Maximum RPC requests per second (rate limiter)
+            enable_blockhash_updater: Whether to start background blockhash polling.
+                Defaults to env RUGBOT_BLOCKHASH_POLL_ENABLED (opt-in, live only).
+            blockhash_poll_interval_seconds: Poll interval; defaults to 30s or
+                env RUGBOT_BLOCKHASH_POLL_SECONDS.
         """
         self.rpc_endpoint = rpc_endpoint
         self._client: AsyncClient | None = None
         self._cached_blockhash: Hash | None = None
         self._cached_last_valid_block_height: int | None = None
         self._blockhash_lock = asyncio.Lock()
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self._blockhash_updater_task = None
+        self._blockhash_poll_interval = _resolve_blockhash_interval(
+            blockhash_poll_interval_seconds
+        )
+        should_start = _resolve_blockhash_enabled(enable_blockhash_updater)
+        if should_start:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._blockhash_updater_task: asyncio.Task[None] | None = None
+            else:
+                self._blockhash_updater_task = loop.create_task(
+                    self.start_blockhash_updater(interval=self._blockhash_poll_interval)
+                )
         else:
-            self._blockhash_updater_task = loop.create_task(
-                self.start_blockhash_updater()
-            )
+            self._blockhash_updater_task = None
         self._rate_limiter = TokenBucketRateLimiter(max_rps=max_rps)
         self._session: aiohttp.ClientSession | None = None
         self._session_lock = asyncio.Lock()
 
-    async def start_blockhash_updater(self, interval: float = 5.0) -> None:
+    def start_blockhash_polling(self) -> None:
+        """Start the background blockhash updater if not already running."""
+        if (
+            self._blockhash_updater_task is not None
+            and not self._blockhash_updater_task.done()
+        ):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._blockhash_updater_task = loop.create_task(
+            self.start_blockhash_updater(interval=self._blockhash_poll_interval)
+        )
+
+    def stop_blockhash_polling(self) -> None:
+        """Cancel the background blockhash updater if running."""
+        if self._blockhash_updater_task is not None:
+            self._blockhash_updater_task.cancel()
+            self._blockhash_updater_task = None
+
+    async def start_blockhash_updater(self, interval: float = 30.0) -> None:
         """Start background task to update recent blockhash."""
         while True:
             try:
@@ -526,3 +566,27 @@ class SolanaClient:
                 await asyncio.sleep(wait_time + jitter)
 
         return None
+
+
+def _resolve_blockhash_enabled(explicit: bool | None) -> bool:  # noqa: FBT001
+    if explicit is not None:
+        return explicit
+    raw = os.environ.get("RUGBOT_BLOCKHASH_POLL_ENABLED", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _resolve_blockhash_interval(explicit: float | None) -> float:
+    if explicit is not None:
+        if explicit < 5:  # noqa: PLR2004
+            raise ValueError("blockhash_poll_interval_seconds must be >= 5")  # noqa: TRY003
+        return explicit
+    raw = os.environ.get("RUGBOT_BLOCKHASH_POLL_SECONDS", "").strip()
+    if not raw:
+        return 30.0
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise ValueError("RUGBOT_BLOCKHASH_POLL_SECONDS must be a number") from error  # noqa: TRY003
+    if value < 5:  # noqa: PLR2004
+        raise ValueError("RUGBOT_BLOCKHASH_POLL_SECONDS must be >= 5")  # noqa: TRY003
+    return value

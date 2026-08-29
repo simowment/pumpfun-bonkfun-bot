@@ -54,7 +54,7 @@ SYSTEM_TRANSFER_TAG = b"\x02\x00\x00\x00"
 SYSTEM_TRANSFER_DATA_LENGTH = 12
 SYSTEM_TRANSFER_ACCOUNT_COUNT = 2
 SOLANA_ADDRESS_BYTES = 32
-MAX_HISTORY_TRANSACTIONS = 100
+MAX_HISTORY_TRANSACTIONS = 1000
 HISTORY_PAGE_SIZE = 20
 MAX_HISTORY_PAGES = 100
 MAX_LINKED_WALLETS = 20
@@ -480,6 +480,58 @@ async def build_wallet_intelligence_report_from_histories(
         report,
         creator_history=creator_history,
         repeat_bundler_entities=repeat_bundler_entities,
+    )
+
+
+def with_confirmed_entity_launches(
+    report: WalletIntelligenceReport,
+    launches: tuple[WalletLaunch, ...],
+    extra_repeat_bundlers: tuple[RepeatBundlerEntity, ...] = (),
+) -> WalletIntelligenceReport:
+    """Merge finalized-RPC-confirmed indexed creations into launch evidence.
+
+    Indexed nominations confirmed against finalized RPC carry slot, signature,
+    and transaction index. They are merged with history-derived launches,
+    deduped by signature, and the launch counters are recomputed so the
+    report reflects the creator's complete confirmed launch history even when
+    the creations fall outside the bounded observation window.
+    """
+
+    if not launches:
+        return report
+    known_signatures = {launch.signature for launch in report.launches}
+    merged = tuple(
+        sorted(
+            (
+                *report.launches,
+                *(
+                    launch
+                    for launch in launches
+                    if launch.signature not in known_signatures
+                ),
+            ),
+            key=lambda launch: (launch.slot, launch.signature),
+        )
+    )
+    repeat_bundlers = {
+        (entity.bundler_wallet, entity.entity_creator): entity
+        for entity in report.repeat_bundler_entities
+    }
+    for entity in extra_repeat_bundlers:
+        repeat_bundlers.setdefault(
+            (entity.bundler_wallet, entity.entity_creator), entity
+        )
+    return replace(
+        report,
+        launches=merged,
+        launch_count=len(merged),
+        early_launch_count=sum(launch.position_is_zero_or_one for launch in merged),
+        repeat_bundler_entities=tuple(
+            sorted(
+                repeat_bundlers.values(),
+                key=lambda entity: (entity.bundler_wallet, entity.entity_creator),
+            )
+        ),
     )
 
 
@@ -1937,7 +1989,7 @@ def _validate_request(
         type(max_transactions) is not int
         or not 1 <= max_transactions <= MAX_HISTORY_TRANSACTIONS
     ):
-        return _abstain("max_transactions must be between 1 and 100", -1)
+        return _abstain("max_transactions must be between 1 and 1000", -1)
     if (
         type(max_history_pages) is not int
         or not 1 <= max_history_pages <= MAX_HISTORY_PAGES

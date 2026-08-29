@@ -108,31 +108,14 @@ The bridge serves a UI-agnostic JSON API and a live WebSocket event stream:
   and then broadcasts every core tracker event.
 
 Configuration is read from validated environment variables: `RUG_WEB_HOST`
-(default `127.0.0.1`), `RUG_WEB_PORT` (default `8787`), `RUGBOT_STATE_DIR`
-(default `.state/web`), and `RUGBOT_CONFIG` (default `watch.yaml`). CORS is
-permissive for local development.
+(default `127.0.0.1`), `RUG_WEB_PORT` (default `8787`), and `RUGBOT_STATE_DIR`
+(default `.state/web`). Watcher config and portfolio are DB-only in
+`state.sqlite3` / `rugbot.db` via `rugbot config set` (or `rug_config set --file`
+as a one-shot import). CORS is permissive for local development.
 
-Watch a persistent portfolio of known creator wallets in paper mode:
-
-```yaml
-# watch-portfolio.yaml
-wallets:
-  - "CREATOR_WALLET_A"
-  - "CREATOR_WALLET_B"
-```
-
-```powershell
-uv run rug_watch --portfolio watch-portfolio.yaml --mode paper `
-  --interval-seconds 5 --state-dir .state/portfolio
-```
-
-The portfolio file is strict: it accepts only the `wallets` list, requires
-valid unique Solana public keys, and has no schema or version field. Each
-wallet is polled through the same finalized observation and paper-execution
-path and gets isolated durable state under
-`.state/portfolio/wallets/<wallet>/`. A per-wallet abstention is reported in
-that cycle without stopping the other wallets or the persistent loop. Use
-`--once` for one real RPC pass while keeping the same state layout.
+Portfolio wallets are stored DB-only (`portfolio` config type) and watched from
+the primary `rugbot config` state. Each portfolio wallet is polled through the
+same finalized observation path.
 
 Inspect wallet history and linked-wallet evidence:
 
@@ -143,7 +126,7 @@ uv run rug_wallet --wallet CREATOR_WALLET --pretty
 Interactive terminal UI:
 
 ```powershell
-uv run rug_wallet_tui --config watch.yaml
+uv run rug_wallet_tui --state-dir .state/watch
 ```
 
 Press `r` to refresh, `f` to focus the wallet field, `1`/`2`/`3` to switch
@@ -179,9 +162,9 @@ dynamically unsupported finalized account state abstains before simulation or
 signing.
 
 The UI refreshes every 30 seconds by default and uses the same bounded,
-finalized-RPC report as the JSON command. The Settings tab edits the same
-strict `watch.yaml` consumed by `rug_watch`; saving validates the whole file
-and replaces it atomically. It exposes the public target wallet, quote size,
+finalized-RPC report as the JSON command. The Settings tab edits the DB-backed
+watcher config (`state.sqlite3` via `ConfigStore`); saving validates the mapping
+and persists it to the DB. It exposes the public target wallet, quote size,
 slippage, routing policy, priority fee, Jito tip, compute/data limits, signer
 public key, entry market-cap, timing gates, exit thresholds, and qualification
 fields without creating a second configuration. Missing historical or market
@@ -220,9 +203,8 @@ Helius Enhanced Transactions can be useful for later display-only enrichment,
 but the canonical graph continues to use raw finalized RPC evidence so
 offline replay and online inspection cannot diverge.
 
-[`watch.yaml`](watch.yaml) contains the fixed quote size and observe/paper/
-simulation mode; its wallet is used when neither `--wallet` nor `--portfolio`
-is given.
+The DB-backed watcher config contains the fixed quote size and observe/paper/
+simulation mode; its wallet is used when `--wallet` is not given.
 The watcher persists immutable raw observations in
 `.state/watch/observations.jsonl` and derived restart state in
 `.state/watch/state.sqlite3` for a single wallet, or under the per-wallet

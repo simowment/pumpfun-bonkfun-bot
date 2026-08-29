@@ -7,6 +7,7 @@ import json
 from collections.abc import Awaitable, Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import base58
@@ -47,11 +48,20 @@ class PumpPortalLaunchNotification:
 class PumpPortalLaunchStream:
     """Share one free global PumpPortal stream across tracked entity wallets."""
 
-    def __init__(self, websocket_endpoint: str = PUMPPORTAL_WS_URL) -> None:
+    def __init__(
+        self,
+        websocket_endpoint: str = PUMPPORTAL_WS_URL,
+        api_key: str | None = None,
+    ) -> None:
         """Initialize a validated PumpPortal WebSocket endpoint."""
 
         if not websocket_endpoint.startswith("wss://"):
             raise ValueError("PumpPortal stream endpoint must use wss://")  # noqa: TRY003
+        if api_key:
+            separator = "&" if "?" in websocket_endpoint else "?"
+            websocket_endpoint = (
+                f"{websocket_endpoint}{separator}api-key={quote(api_key, safe='')}"
+            )
         self._websocket_endpoint = websocket_endpoint
         self._wallets: frozenset[str] = frozenset()
         self._websocket: object | None = None
@@ -176,6 +186,7 @@ class PumpCreateStreamSource:
     transport: RpcHttpTransport | None = None
     observer_id: str = "pump-create-stream"
     processed_handler: ProcessedCreateHandler | None = None
+    pumpportal_api_key: str | None = None
     _boot_id: UUID = field(default_factory=uuid4, init=False)
     _receive_sequence: int = field(default=0, init=False)
     _catchup_complete: bool = field(default=False, init=False)
@@ -205,7 +216,9 @@ class PumpCreateStreamSource:
             handled_ledger=self.handled_ledger,
             transport=self.transport,
         )
-        self._launch_stream = PumpPortalLaunchStream()
+        self._launch_stream = PumpPortalLaunchStream(
+            api_key=self.pumpportal_api_key,
+        )
 
     async def read(  # noqa: C901
         self,

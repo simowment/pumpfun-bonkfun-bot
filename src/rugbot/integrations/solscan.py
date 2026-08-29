@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +23,7 @@ SOLSCAN_PLAYGROUND_URL: Final[str] = "https://pro-api.solscan.io/playground"
 SOLANA_ADDRESS_BYTES: Final[int] = 32
 SOLANA_SIGNATURE_BYTES: Final[int] = 64
 MAX_FUNDED_BY_ADDRESSES: Final[int] = 50
+MAX_ENTITY_MINT_CANDIDATES: Final[int] = 500
 DEFAULT_TIMEOUT_SECONDS: Final[int] = 15
 PLAYGROUND_TRANSACTION_LIMIT: Final[int] = 10
 DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS: Final[float] = 30.0
@@ -68,6 +70,28 @@ class SolscanTokenCreationCandidate:
     created_time: int
     name: str
     symbol: str
+
+
+@dataclass(frozen=True, slots=True)
+class SolscanMintTransactionCandidate:
+    """Indexed transaction touching known mints; requires finalized RPC hydration."""
+
+    signature: str
+    slot: int
+    transaction_index: int | None
+    block_time: int
+    matched_mints: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SolscanMintTransactionDiscovery:
+    """Bounded indexed mint matches with explicit pagination completeness."""
+
+    candidates: tuple[SolscanMintTransactionCandidate, ...]
+    pages_scanned: int
+    complete: bool
+    warning: str | None
+    next_cursor: str | None
 
 
 SolscanTransport = Callable[[urllib.request.Request, int], bytes]
@@ -228,6 +252,59 @@ class SolscanClient:
             cursor=cursor_value,
         )
 
+    def mint_transaction_candidates(  # noqa: PLR0913
+        self,
+        address: str,
+        *,
+        program: str,
+        mints: frozenset[str],
+        max_pages: int = 10,
+        page_pause_seconds: float = 1.0,
+        cursor: str | None = None,
+    ) -> SolscanMintTransactionDiscovery:
+        """Nominate indexed transactions intersecting a known entity mint set."""
+
+        if not mints or len(mints) > MAX_ENTITY_MINT_CANDIDATES:
+            raise ValueError("Solscan mint candidate set must contain 1 to 500 mints")
+        for mint in mints:
+            _validate_address(mint)
+        _validate_address(address)
+        _validate_address(program)
+        candidates: dict[str, SolscanMintTransactionCandidate] = {}
+        pages_scanned = 0
+        complete = False
+        warning: str | None = None
+        for _ in range(max_pages):
+            try:
+                page = self.enhanced_transactions(
+                    address,
+                    program=program,
+                    cursor=cursor,
+                )
+            except SolscanProviderError as error:
+                warning = str(error)
+                break
+            pages_scanned += 1
+            for row in page.transactions:
+                candidate = _mint_transaction_candidate(row, mints)
+                if candidate is not None:
+                    candidates[candidate.signature] = candidate
+            cursor = page.cursor
+            if cursor is None:
+                complete = True
+                break
+            if page_pause_seconds > 0:
+                time.sleep(page_pause_seconds)
+        else:
+            warning = f"Solscan mint history reached the {max_pages}-page bound"
+        return SolscanMintTransactionDiscovery(
+            candidates=tuple(candidates.values()),
+            pages_scanned=pages_scanned,
+            complete=complete,
+            warning=warning,
+            next_cursor=cursor,
+        )
+
     def _request(
         self,
         path_or_url: str,
@@ -267,6 +344,52 @@ class SolscanClient:
         if not isinstance(payload, dict):
             raise SolscanProviderError("Solscan returned a non-object response")
         return payload
+
+
+def _mint_transaction_candidate(
+    row: dict[str, Any],
+    mints: frozenset[str],
+) -> SolscanMintTransactionCandidate | None:
+    """Narrow one enhanced row to an indexed mint candidate."""
+
+    transaction = row.get("transaction")
+    message = transaction.get("message") if isinstance(transaction, dict) else None
+    signatures = (
+        transaction.get("signatures") if isinstance(transaction, dict) else None
+    )
+    account_keys = message.get("accountKeys") if isinstance(message, dict) else None
+    slot = row.get("slot")
+    transaction_index = row.get("transactionIndex")
+    block_time = row.get("blockTime")
+    if block_time is None:
+        block_time = row.get("block_time")
+    if (
+        not isinstance(signatures, list)
+        or not signatures
+        or not isinstance(signatures[0], str)
+        or not isinstance(account_keys, list)
+        or not all(isinstance(key, str) for key in account_keys)
+        or type(slot) is not int
+        or slot < 0
+        or type(block_time) is not int
+        or block_time < 0
+        or (
+            transaction_index is not None
+            and (type(transaction_index) is not int or transaction_index < 0)
+        )
+    ):
+        raise SolscanProviderError("Solscan enhanced transaction row is incomplete")
+    _validate_signature(signatures[0])
+    matched_mints = tuple(sorted(mints.intersection(account_keys)))
+    if not matched_mints:
+        return None
+    return SolscanMintTransactionCandidate(
+        signature=signatures[0],
+        slot=slot,
+        transaction_index=transaction_index,
+        block_time=block_time,
+        matched_mints=matched_mints,
+    )
 
 
 def _urlopen_transport(request: urllib.request.Request, timeout: int) -> bytes:
@@ -319,6 +442,8 @@ __all__ = [
     "SolscanClient",
     "SolscanEnhancedTransactionPage",
     "SolscanFundingCandidate",
+    "SolscanMintTransactionCandidate",
+    "SolscanMintTransactionDiscovery",
     "SolscanProviderError",
     "SolscanTokenCreationCandidate",
 ]

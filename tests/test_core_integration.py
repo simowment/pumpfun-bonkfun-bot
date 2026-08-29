@@ -19,6 +19,7 @@ from rugbot.interfaces.discord import (
     QuickBuyView,
     SettingsView,
 )
+from rugbot.interfaces.tui.app import RugbotTuiApp, TargetsTable
 from rugbot.runtime.app import build_ui_runtime
 from rugbot.storage.database import DatabaseManager
 from rugbot.storage.tracker import SQLiteTrackerRepository
@@ -27,7 +28,6 @@ from rugbot.tracker.models import (
     TargetExecutionMode,
     TargetExecutionPolicy,
 )
-from rugbot.tui.app import RugbotTuiApp, TargetsTable
 
 
 def test_token_and_creator_resolution(monkeypatch: pytest.MonkeyPatch):

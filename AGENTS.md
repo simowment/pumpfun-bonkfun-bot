@@ -52,7 +52,7 @@ When adding features:
 | `uv sync`                                          | Install/update dependencies       |
 | `source .venv/bin/activate`                       | Activate virtual environment      |
 | `uv pip install -e .`                              | Install package as editable       |
-| `uv run rug_watch --config watch.yaml --once`     | Run one finalized read-only pass  |
+| `uv run rug_watch --once`     | Run one finalized read-only pass (DB config in state.sqlite3)  |
 | `uv run python -m rugbot.backtest.cli --input fixtures/backtest/demo.json --pretty` | Run the canonical demo backtest |
 
 ---
@@ -89,6 +89,13 @@ demonstrate a fully executable, net-profitable exit in paper/backtest mode?
 7. Never run live trading while developing this system. Observe, paper, and
    route-simulation execution remain the permitted development modes until the
    user gives separate explicit authorization after out-of-sample evidence.
+8. **Never write temporary/scratch JSON files to the repository root.** Any
+   one-off output produced during analysis (sample mint lists, scan dumps,
+   RPC results, temporary data) MUST be written to
+   `C:\Users\got\AppData\Local\Temp\opencode\` (the pre-approved scratch dir)
+   or under `.state/`. Do NOT drop `*.json`/`*.csv`/scratch artifacts at the
+   repo root. Only canonical committed fixtures under `fixtures/` are allowed
+   in-tree.
 
 ---
 

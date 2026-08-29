@@ -45,7 +45,7 @@ class TrackerConfig:
 
 @dataclass(frozen=True, slots=True)
 class TargetScanRecord:
-    """Persisted summary of the latest finalized scan for one target query."""
+    """One persisted scan event associated with a resolved entity."""
 
     query: str
     tracking_address: str | None
@@ -59,6 +59,7 @@ class TargetScanRecord:
     first_scanned_at: str
     last_scanned_at: str
     scan_count: int = 1
+    id: int | None = None
 
 
 class EntityBackfillStatus(StrEnum):
@@ -87,9 +88,23 @@ class EntityBackfillRecord:
     updated_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class BundleParticipationRecord:
+    """One wallet's finalized creation-slot buy on one confirmed entity launch."""
+
+    bundler_wallet: str
+    mint: str
+    creator: str
+    creation_slot: int
+    buy_signature: str
+    transaction_index: int | None
+    max_sol_cost_lamports: int
+
+
 __all__ = [
     "LAMPORTS_PER_SOL",
     "AlertOutboxRecord",
+    "BundleParticipationRecord",
     "DecisionEvent",
     "DecisionKind",
     "EntityBackfillRecord",

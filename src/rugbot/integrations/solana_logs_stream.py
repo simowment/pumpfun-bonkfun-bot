@@ -111,8 +111,8 @@ class SolanaLogsStream:
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 2, MAX_RECONNECT_DELAY_SECONDS)
             else:
-                reconnect_delay = RECONNECT_DELAY_SECONDS
                 if notification is not None:
+                    reconnect_delay = RECONNECT_DELAY_SECONDS
                     return notification
 
     async def _read_notification(self) -> WalletLogNotification | None:

@@ -117,6 +117,42 @@ def test_target_scan_history_survives_database_reopen(tmp_path: Path) -> None:
     assert history[0].scan_count == 1
 
 
+def test_target_scan_history_appends_and_filters_by_entity(tmp_path: Path) -> None:
+    """Each scan remains queryable after later scans for the same entity."""
+
+    database = DatabaseManager(tmp_path / "rugbot.db")
+    repository = SQLiteTrackerRepository(database)
+    entity = "9BnKqsHE5WxUSo6XJxzpTgH4Nj7UH3UrbshymMYsBjL8"
+    other_entity = "8KiXkQXRYcFKVYuyioFqdxs6cK6k1qPigPTaEHRmpump"
+    for query, address, message in (
+        (entity, entity, "first scan"),
+        (entity, entity, "second scan"),
+        (other_entity, other_entity, "other entity"),
+    ):
+        repository.save_target_scan(
+            TargetScanRecord(
+                query=query,
+                tracking_address=address,
+                token_symbol=None,
+                token_name=None,
+                scan_ok=True,
+                launch_count=1,
+                linked_launch_count=0,
+                repeat_bundler_mint_count=0,
+                message=message,
+                first_scanned_at=f"2026-08-24T05:0{len(message)}:00+00:00",
+                last_scanned_at=f"2026-08-24T05:0{len(message)}:00+00:00",
+            )
+        )
+
+    history = repository.get_target_scans_for_entity(entity)
+    database.close()
+
+    assert [scan.message for scan in history] == ["second scan", "first scan"]
+    assert [scan.scan_count for scan in history] == [2, 1]
+    assert all(scan.tracking_address == entity for scan in history)
+
+
 def test_target_scan_schema_removes_verdict_columns_without_losing_history(
     tmp_path: Path,
 ) -> None:
@@ -166,6 +202,37 @@ def test_target_scan_schema_removes_verdict_columns_without_losing_history(
     assert history[0].query == "target"
     assert history[0].launch_count == 3
     assert history[0].scan_count == 4
+
+
+def test_fastapi_exposes_entity_scan_history(tmp_path: Path) -> None:
+    """Expose persisted per-entity scan events through the web boundary."""
+
+    entity = "9BnKqsHE5WxUSo6XJxzpTgH4Nj7UH3UrbshymMYsBjL8"
+    core = build_ui_runtime(state_dir=tmp_path)
+    core.repository.save_target_scan(
+        TargetScanRecord(
+            query=entity,
+            tracking_address=entity,
+            token_symbol="TEST",  # noqa: S106 - fixture label, not a secret.
+            token_name="Test token",  # noqa: S106 - fixture label, not a secret.
+            scan_ok=False,
+            launch_count=0,
+            linked_launch_count=0,
+            repeat_bundler_mint_count=0,
+            message="pending finalized evidence",
+            first_scanned_at="2026-08-24T05:00:00+00:00",
+            last_scanned_at="2026-08-24T05:00:00+00:00",
+        )
+    )
+    app = create_fastapi_app(core)
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/entity/{entity}/scans")
+
+    assert response.status_code == 200
+    assert response.json()["entity_address"] == entity
+    assert response.json()["scans"][0]["message"] == "pending finalized evidence"
+    assert response.json()["scans"][0]["scan_ok"] is False
 
 
 def test_fastapi_exposes_persisted_state_without_seed_data(tmp_path: Path) -> None:
@@ -258,6 +325,60 @@ def test_cached_entity_report_adds_real_pump_bonding_curve(tmp_path: Path) -> No
     assert response.json()["data"]["identity"]["bonding_curve"] == expected
 
 
+def test_cached_entity_report_resolves_via_tracking_address(tmp_path: Path) -> None:
+    """A report cached under a mint query is retrievable by its resolved entity."""
+
+    mint = "7V1XwAbQntvcKLgAH8aNWSBf6PnFCjEH6w7Bzic4pump"
+    creator = "4jPMW7KgFyJwNbE7sb2hJHPy7XBYB48FEhd3vZkCk61i"
+    core = build_ui_runtime(state_dir=tmp_path)
+    core.repository.save_entity_backfill(
+        EntityBackfillRecord(
+            query=mint,
+            wallet=creator,
+            requested_transactions=10,
+            cached_transactions=10,
+            before_signature=None,
+            status=EntityBackfillStatus.COMPLETE,
+            message="finalized history cached: 10/10",
+            report_json=(
+                '{"identity":{"input":"'
+                + mint
+                + '","is_token":true,"resolved_creator":"'
+                + creator
+                + '"},"tracking_address":"'
+                + creator
+                + '"}'
+            ),
+            created_at="2026-08-24T05:00:00+00:00",
+            updated_at="2026-08-24T05:01:00+00:00",
+        )
+    )
+    core.repository.save_target_scan(
+        TargetScanRecord(
+            query=mint,
+            tracking_address=creator,
+            token_symbol="Unfazed",  # noqa: S106 - test fixture label
+            token_name="The Unfazed Hawk",  # noqa: S106 - test fixture label
+            scan_ok=True,
+            launch_count=0,
+            linked_launch_count=0,
+            repeat_bundler_mint_count=0,
+            message="finalized history cached: 10/10",
+            first_scanned_at="2026-08-24T05:01:00+00:00",
+            last_scanned_at="2026-08-24T05:01:00+00:00",
+        )
+    )
+    app = create_fastapi_app(core)
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/entity/cache?query={creator}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["tracking_address"] == creator
+    assert data["identity"]["resolved_creator"] == creator
+
+
 def test_fastapi_has_no_seeded_cluster_or_token_routes(tmp_path: Path) -> None:
     core = build_ui_runtime(state_dir=tmp_path)
     app = create_fastapi_app(core)
@@ -286,6 +407,34 @@ def test_fastapi_rejects_unresolved_tracking(tmp_path: Path) -> None:
 
     assert response.status_code == 409
     assert "must be resolved" in response.json()["detail"]
+
+
+def test_fastapi_returns_finalized_wallet_balance(tmp_path: Path, monkeypatch) -> None:
+    """Expose the selected wallet's validated finalized SOL balance."""
+
+    address = "5SW7p56x22LKj8gYcE8DVVd1S59UJUGR9jKq2PFdKiKg"
+    core = build_ui_runtime(state_dir=tmp_path)
+
+    async def wallet_balance(requested_address: str) -> CommandResult:
+        assert requested_address == address
+        return CommandResult(
+            ok=True,
+            message="finalized SOL balance loaded",
+            data={"address": address, "balance_lamports": 1_250_000_000, "slot": 42},
+        )
+
+    monkeypatch.setattr(core, "wallet_balance", wallet_balance)
+    app = create_fastapi_app(core)
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/wallet/balance?address={address}")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "address": address,
+        "balance_lamports": 1_250_000_000,
+        "slot": 42,
+    }
 
 
 def test_fastapi_tracks_resolved_address_without_qualification(

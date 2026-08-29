@@ -15,10 +15,10 @@
 ### Les 7 étapes de qualification d'un rugger
 
 1. **Vérifier le potentiel de gain :** Il doit y avoir au moins **+100% d'amplitude** entre la fin de la 1ère bougie (post-bundle) et le point culminant (ATH).
-2. **Contrôler la taille de la première bougie :** La première bougie ne doit pas dépasser **15 000 $ de Market Cap**. Au-delà, le point d'entrée est trop haut et le ratio Risk/Reward est dégradé par rapport au plancher de liquidité Pump.fun (~2 500 $).
+2. **Contrôler la taille de la première bougie :** La première bougie (définie ici comme la bougie de **1 seconde** suivant la création) ne doit pas dépasser **15 000 $ de Market Cap**. Au-delà, le point d'entrée est trop haut et le ratio Risk/Reward est dégradé par rapport au plancher de liquidité Pump.fun (~2 500 $).
 3. **Tracer la source de funding (Solscan) :** Identifier quand, d'où et avec quel montant exact de SOL le wallet créateur a été approvisionné (ex: CEX Binance/Coinbase ou Master Wallet).
 4. **Remonter l'historique des lancements :** Lister tous les tokens créés par la même source de funding sur les 7 à 10 derniers jours.
-5. **Backtest sur 10 tokens minimum :** Vérifier sur les 10 derniers lancements combien ont atteint le palier **+100%**. Le **Winrate minimum doit être de 33%** (1 victoire à +100% couvre 2 pertes à -30%/-50%).
+5. **Backtest sur 10 tokens minimum :** Vérifier sur les 10 derniers lancements combien ont atteint le palier **+100%**. Le **Winrate minimum doit être de 33%** (1 victoire à +100% couvre 2 pertes à -30%/-50%). En complément, contrôler le profil de risque de chaque token : **perte potentielle maximale ≤ 30%** pour un gain visé ≥ 100% (ratio **1:3**). Un rugger dont les tokens descendent au-delà de -30% depuis le point d'entrée est moins prévisible — s'il ne vend pas tout au même point, son schéma n'est pas exploitable en take-profit automatique.
 6. **Calcul de l'espérance mathématique :**
    $$\text{Gain Net} = (\text{Nb Wins} \times +100\%) - (\text{Nb Losses} \times 40\%)$$
    *Exemple :* 7 victoires (+700%) et 3 pertes (-120%) = **+580% net** $\rightarrow$ Opérateur hautement qualifié.
@@ -28,10 +28,15 @@
 
 Pour repérer rapidement les ruggers qualifiés sans être pollué par le bruit :
 - **Audit / Dev Creations :** `Max 5 à 10 creations` (élimine les spammeurs de masse sans système qui lancent 50 tokens sans pump).
-- **Volume Minimum :** `≥ 20 000 $` (isole les tokens ayant eu une réelle activité de pump).
+- **Plateforme :** ne conserver que **Pump.fun**. Décocher les autres plateformes de création (Bonk, Bags, Moonshot…) pour n'isoler que les tokens émis sur le programme Pump — c'est la seule source fiable du schéma recherché.
+- **Paire / quote :** ne garder que **SOL** (décocher USDC, USD1) pour éviter les tokens cotés ailleurs et raisonner uniquement en SOL.
+- **Volume indicatif :** viser environ `20 000 $ à 30 000 $` pour isoler les
+  tokens ayant eu une activité de pump significative. Ce n'est pas un seuil
+  strict : le contexte du lancement et la structure du bundle priment.
 - **Colonnes essentielles à afficher :** Market Cap, Volume, Fees paid, Dev Creation count, Funding Time (masquer le reste : KOLs, Twitter, Insiders non fiables).
 - **Unité d'analyse :** Toujours raisonner en **SOL** plutôt qu'en USD (plus précis pour évaluer la taille des bundles et liquidités).
 - **Créneaux horaires clés :** Forte concentration de volume et d'opérateurs US/internationaux entre **00h00 et 06h00 UTC+1**.
+- **Fenêtre de maturité :** cibler les tokens créés **~1h auparavant** et déjà dumpés (cycle montée → ATH → floor visible). Un token plus jeune n'a pas encore de trajectoire exploitable ; trop vieux, le cycle est déjà consommé.
 
 ---
 
@@ -50,6 +55,49 @@ Quand le développeur masque son adresse de création via des montants randomis�
 - **Point d'entrée bas :** Le wallet doit entrer dans le bloc-0 ou début bloc-1 (si son entrée est trop haute sur la courbe, le copytrade achètera au sommet de la bougie).
 - **Winrate > 50%** sur ses 15 dernières opérations.
 - **Profil de dump étagé :** 1 gros achat initial suivi de multiples ventes partielles (prise de profit méthodique).
+
+### Checklist opérateur issue de l'analyse des bundles
+
+Cette checklist sert à **consigner les faits observables**. Tant que la
+découverte autonome des ruggers n'est pas explicitement activée, le tracker ne
+doit ni appliquer ces règles comme filtres cachés, ni produire un verdict de
+qualification. Il doit présenter les données nécessaires et laisser
+l'interprétation à l'utilisateur.
+
+1. Dans Axiom, l'utilisateur trie les transactions de la plus ancienne à la
+   plus récente afin d'isoler le lancement et les premiers achats. Les premières
+   transactions portant le badge développeur sont distinguées des achats des
+   wallets satellites. Ce tri reste une action utilisateur dans le périmètre
+   actuel du tool.
+2. Relever les premiers achats du bundle : wallet, ordre exact, slot, heure,
+   montant en SOL et token acheté. Des montants proches et des achats très
+   rapprochés constituent un indice de coordination, pas une preuve isolée.
+3. Vérifier sur Solscan tous les signataires de chaque achat. Conserver
+   séparément le wallet acheteur, le fee payer et tout wallet programme ou
+   distributeur. La présence de deux signataires est un élément de liaison à
+   recouper avec les autres observations ; elle ne prouve pas à elle seule la
+   propriété commune.
+4. Pour chaque wallet suspect, noter son historique d'achats et de ventes, les
+   tokens concernés et la fréquence d'activité. Un rythme compatible avec les
+   lancements de l'opérateur est plus informatif qu'un wallet achetant en continu
+   toutes les quelques minutes.
+5. Noter les cycles de balance : financement, achat, vente, sweep ou retour à
+   zéro, puis refinancement. Un solde actuel nul ne signifie pas nécessairement
+   que le wallet est abandonné.
+6. Sur GMGN/Axiom, relever le market cap du **premier achat** du wallet pour
+   chaque token. Ne pas substituer le prix moyen au véritable point d'entrée.
+7. Constituer un panier croisé par wallet : mints achetés, date de création du
+   token, date et heure du premier achat, ordre dans le bundle, montant et point
+   d'entrée. Les recouvrements entre plusieurs lancements servent à confirmer la
+   répétition du réseau.
+8. Examiner au moins 10 à 15 tokens avant de tirer une conclusion sur la
+   régularité. Enregistrer pour chaque scénario le gain maximal exécutable, la
+   perte adverse, les frais et les résultats de plusieurs TP plutôt que de fixer
+   arbitrairement un seuil unique.
+9. Lors d'un éventuel copytrade futur, distinguer les paramètres observés dans
+   la vidéo — premier achat uniquement, TP testé et sortie après inactivité — des
+   règles déjà prouvées par le backtest. Ils ne doivent pas devenir des valeurs
+   automatiques sans validation sur l'historique de l'entité suivie.
 
 ---
 
@@ -98,6 +146,8 @@ L'opérateur utilise un compte Binance/Coinbase pour financer un fresh wallet pa
 
 ### Règles de capital strictes
 - **Taille de position maximale :** **5% du capital total** par trade (ex: 50 € par snipe pour un capital de 1 000 € ; 100 € pour 2 000 €).
+- **Plafond anti-détection :** ne pas dépasser un achat trop gros par token — un ordre massif crée un price impact qui signale le sniper au rugger (qui peut alors rug aussitôt). Rester sous un seuil qui ne déforme pas la courbe (à titre indicatif, de l'ordre de quelques centaines de dollars), et augmenter la taille **progressivement** après validation sur un schéma éprouvé. Pour scaler au-delà, répartir sur **plusieurs wallets** au lieu d'un ordre unique.
+- **Contre-détection :** si un rug vient immédiatement après son propre achat (le dev dump dès l'entrée), le rugger a probablement repéré le sniper → retirer l'adresse et en chercher une nouvelle. La plupart des ruggers sont automatisés, donc peu réactifs ; uniquement certains ajustent leur schéma s'ils se savent suivis.
 - **Nombre de targets actives :** Ne pas surveiller plus de **2 à 3 ruggers qualifiés simultanément** (chacun produisant 5 à 10 tokens par jour).
 - **Durée de vie d'un rugger :** Un opérateur conserve généralement son schéma pendant **1 à 2 semaines** avant de modifier ses montants ou sa structure de funding. Auditer en continu.
 

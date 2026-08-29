@@ -65,107 +65,6 @@ class ClusterBacktestReport:
     token_outcomes: tuple[ClusterTokenOutcome, ...]
 
 
-# Canonical verified historical launches for the 5SW7p56x / uxtoRPdP / HKm7Pxgp cluster
-VERIFIED_CLUSTER_LAUNCHES = (
-    {
-        "mint": "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf",
-        "symbol": "PUMP4W",
-        "creator": "uxtoRPdPjRekYmxs1uUqVRZWh38iqonc9KgPuZXPeSY",
-        "slot": 441305367,
-        "entry_sol": 0.000000030,
-        "peak_sol": 0.000000052,
-        "peak_mult": 1.73,
-        "time_to_peak": 48.0,
-        "dump_sol": 0.000000015,
-        "dump_time": 95.0,
-    },
-    {
-        "mint": "HvhnVs7xDQfKTfCmAyUHmBQ5pUV7syMHZGVjzLN1pump",
-        "symbol": "HVHN",
-        "creator": "uxtoRPdPjRekYmxs1uUqVRZWh38iqonc9KgPuZXPeSY",
-        "slot": 441297911,
-        "entry_sol": 0.000000030,
-        "peak_sol": 0.000000078,
-        "peak_mult": 2.60,
-        "time_to_peak": 62.0,
-        "dump_sol": 0.000000018,
-        "dump_time": 110.0,
-    },
-    {
-        "mint": "5kDgvcE9JjKEBgpEAbAFtSuhVo2EYNgBQKH5CGDzpump",
-        "symbol": "5KDG",
-        "creator": "uxtoRPdPjRekYmxs1uUqVRZWh38iqonc9KgPuZXPeSY",
-        "slot": 441285044,
-        "entry_sol": 0.000000030,
-        "peak_sol": 0.000000048,
-        "peak_mult": 1.60,
-        "time_to_peak": 38.0,
-        "dump_sol": 0.000000012,
-        "dump_time": 75.0,
-    },
-    {
-        "mint": "27vEi2mxfiCCTnYcdmP9WAedn8W6digbhYAQN1B6pump",
-        "symbol": "27VEI",
-        "creator": "HKm7PxgpUW72su2ZguJ7Azw3AFibzubiW8vhchQFoZTB",
-        "slot": 441258728,
-        "entry_sol": 0.000000030,
-        "peak_sol": 0.000000063,
-        "peak_mult": 2.10,
-        "time_to_peak": 55.0,
-        "dump_sol": 0.000000010,
-        "dump_time": 88.0,
-    },
-    {
-        "mint": "7EpwXyNovzKCMnr6h7eq1mM3eSigSWEJXdYNfWfGpump",
-        "symbol": "7EPW",
-        "creator": "HKm7PxgpUW72su2ZguJ7Azw3AFibzubiW8vhchQFoZTB",
-        "slot": 441245145,
-        "entry_sol": 0.000000030,
-        "peak_sol": 0.000000039,
-        "peak_mult": 1.30,
-        "time_to_peak": 25.0,
-        "dump_sol": 0.000000014,
-        "dump_time": 50.0,
-    },
-    {
-        "mint": "9YqZi8Kccb8jBkzece2cDtR9j9Gg71j6qdN9aPNWpump",
-        "symbol": "9YQZ",
-        "creator": "HKm7PxgpUW72su2ZguJ7Azw3AFibzubiW8vhchQFoZTB",
-        "slot": 441241841,
-        "entry_sol": 0.000000030,
-        "peak_sol": 0.000000057,
-        "peak_mult": 1.90,
-        "time_to_peak": 52.0,
-        "dump_sol": 0.000000011,
-        "dump_time": 82.0,
-    },
-    {
-        "mint": "DF4JTnoKh9gkizMYuThmcAo3syPrR9mFnbL7eNW6pump",
-        "symbol": "DF4J",
-        "creator": "uxtoRPdPjRekYmxs1uUqVRZWh38iqonc9KgPuZXPeSY",
-        "slot": 441236054,
-        "entry_sol": 0.000000030,
-        "peak_sol": 0.000000033,
-        "peak_mult": 1.10,
-        "time_to_peak": 15.0,
-        "dump_sol": 0.000000009,
-        "dump_time": 40.0,
-    },
-    {
-        "mint": "4MhfyxhLq1ZrPHotk7mnv3rEEkpoDKiEKxwiUMdtpump",
-        "symbol": "4MHF",
-        "creator": "uxtoRPdPjRekYmxs1uUqVRZWh38iqonc9KgPuZXPeSY",
-        "slot": 441220541,
-        "entry_sol": 0.000000030,
-        "peak_sol": 0.000000069,
-        "peak_mult": 2.30,
-        "time_to_peak": 68.0,
-        "dump_sol": 0.000000015,
-        "dump_time": 105.0,
-    },
-)
-
-
 def _simulate_single_token(
     item: dict[str, Any], policy: ClusterBacktestPolicy
 ) -> tuple[ClusterTokenOutcome, float]:
@@ -229,15 +128,15 @@ def _simulate_single_token(
 
 
 def run_cluster_backtest(
-    target_address: str = "5SW7p56x22LKj8gYcE8DVVd1S59UJUGR9jKq2PFdKiKg",
+    target_address: str,
+    launches: tuple[dict[str, Any], ...] | list[dict[str, Any]],
     policy: ClusterBacktestPolicy | None = None,
-    launches: tuple[dict[str, Any], ...] | None = None,
 ) -> ClusterBacktestReport:
     """Execute a leakage-safe realistic backtest simulation on an operator cluster."""
+    if not launches:
+        raise ValueError("No launches provided for cluster backtest")  # noqa: TRY003
     if policy is None:
         policy = ClusterBacktestPolicy()
-    if launches is None:
-        launches = VERIFIED_CLUSTER_LAUNCHES
 
     outcomes: list[ClusterTokenOutcome] = []
     total_invested = 0.0
@@ -301,20 +200,3 @@ def run_cluster_backtest(
         policy=policy,
         token_outcomes=tuple(outcomes),
     )
-
-
-if __name__ == "__main__":
-    report = run_cluster_backtest()
-    print(f"=== BACKTEST REPORT FOR TARGET: {report.target_address} ===")
-    print(f"Sample Size: {report.sample_size} tokens")
-    print(
-        f"Winrate: {report.winrate_pct:.1f}% ({report.winning_trades}W / {report.losing_trades}L)"
-    )
-    print(f"Total Invested: {report.total_invested_sol:.2f} SOL")
-    print(
-        f"Total Net PnL: {report.total_net_pnl_sol:+.4f} SOL (ROI: {report.net_roi_pct:+.1f}%)"
-    )
-    print(f"Profit Factor: {report.profit_factor:.2f}")
-    print(f"Average Peak Multiplier: {report.average_peak_multiplier:.2f}x")
-    print(f"Average Time to Peak: {report.average_time_to_peak_seconds:.1f}s")
-    print(f"Total Fees & Gas: {report.total_fees_sol:.4f} SOL")
