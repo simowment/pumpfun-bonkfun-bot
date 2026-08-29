@@ -384,6 +384,237 @@ def run_copytrade_tp_sl_grid_search(
     )
 
 
+def _fetch_onchain_copytrade_samples(wallet: str) -> tuple[CopytradeSample, ...]:
+    """Fetch on-chain trade history from RPC and reconstruct completed roundtrips."""
+    import json
+    import os
+    import urllib.request
+    from rugbot.runtime.config import load_provider_settings, resolve_dotenv
+
+    resolve_dotenv()
+    providers = load_provider_settings()
+
+    candidate_endpoints = []
+    if providers and providers.rpc_http:
+        candidate_endpoints.append(providers.rpc_http)
+    if providers and providers.rpc_http_fallbacks:
+        candidate_endpoints.extend(providers.rpc_http_fallbacks)
+    if os.environ.get("SOLANA_RPC_HTTP"):
+        candidate_endpoints.append(os.environ["SOLANA_RPC_HTTP"])
+    candidate_endpoints.extend(
+        [
+            "https://solana-rpc.publicnode.com",
+            "https://rpc.ankr.com/solana",
+            "https://api.mainnet-beta.solana.com",
+        ]
+    )
+
+    # Deduplicate preserving order
+    endpoints = []
+    for ep in candidate_endpoints:
+        if ep and ep not in endpoints:
+            endpoints.append(ep)
+
+    def _call_rpc(method: str, params: list[object]) -> object | None:
+        payload = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        ).encode("utf-8")
+        for ep in endpoints:
+            try:
+                req = urllib.request.Request(
+                    ep,
+                    data=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "User-Agent": "Mozilla/5.0",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    if "result" in data and data["result"] is not None:
+                        return data["result"]
+            except Exception:
+                continue
+        return None
+
+    sigs_raw = _call_rpc("getSignaturesForAddress", [wallet, {"limit": 100}])
+    if not isinstance(sigs_raw, list) or not sigs_raw:
+        return ()
+
+    sigs_chrono = sorted(
+        sigs_raw, key=lambda s: s.get("slot", 0) if isinstance(s, dict) else 0
+    )
+    mint_trades: dict[str, list[dict]] = {}
+
+    def _process_sig(s: dict) -> list[tuple[str, dict]]:
+        results: list[tuple[str, dict]] = []
+        sig = s.get("signature")
+        if not sig:
+            return results
+        tx_data = _call_rpc(
+            "getTransaction",
+            [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+        )
+        if not isinstance(tx_data, dict):
+            return results
+        meta = tx_data.get("meta", {})
+        if not isinstance(meta, dict) or meta.get("err"):
+            return results
+        slot = tx_data.get("slot", 0)
+        btime = tx_data.get("blockTime", 0)
+
+        account_keys = (
+            tx_data.get("transaction", {}).get("message", {}).get("accountKeys", [])
+        )
+        w_pubkeys = [
+            a.get("pubkey") if isinstance(a, dict) else a for a in account_keys
+        ]
+        if wallet not in w_pubkeys:
+            return results
+        w_idx = w_pubkeys.index(wallet)
+        pre_sol = (
+            meta.get("preBalances", [])[w_idx]
+            if len(meta.get("preBalances", [])) > w_idx
+            else 0
+        )
+        post_sol = (
+            meta.get("postBalances", [])[w_idx]
+            if len(meta.get("postBalances", [])) > w_idx
+            else 0
+        )
+        sol_delta = (post_sol - pre_sol) / LAMPORTS_PER_SOL
+
+        pre_tokens = {
+            b.get("mint"): float(b.get("uiTokenAmount", {}).get("uiAmount") or 0)
+            for b in meta.get("preTokenBalances", [])
+            if isinstance(b, dict) and b.get("owner") == wallet
+        }
+        post_tokens = {
+            b.get("mint"): float(b.get("uiTokenAmount", {}).get("uiAmount") or 0)
+            for b in meta.get("postTokenBalances", [])
+            if isinstance(b, dict) and b.get("owner") == wallet
+        }
+
+        all_mints = set(pre_tokens.keys()) | set(post_tokens.keys())
+        for m in all_mints:
+            if not m or not isinstance(m, str):
+                continue
+            token_pre = pre_tokens.get(m, 0.0)
+            token_post = post_tokens.get(m, 0.0)
+            token_delta = token_post - token_pre
+
+            if token_delta > 0:  # BUY
+                cost_sol = abs(sol_delta) if sol_delta < 0 else 0.1
+                price_ppm = (
+                    int((cost_sol / token_delta) * 1e12)
+                    if token_delta > 0
+                    else 1_000_000
+                )
+                results.append(
+                    (
+                        m,
+                        {
+                            "side": "buy",
+                            "slot": slot,
+                            "time": btime,
+                            "sol": cost_sol,
+                            "tokens": token_delta,
+                            "price_ppm": max(1, price_ppm),
+                        },
+                    )
+                )
+            elif token_delta < 0:  # SELL
+                rec_sol = sol_delta if sol_delta > 0 else 0.0
+                sold_tok = abs(token_delta)
+                price_ppm = (
+                    int((rec_sol / sold_tok) * 1e12)
+                    if sold_tok > 0 and rec_sol > 0
+                    else 1_000_000
+                )
+                results.append(
+                    (
+                        m,
+                        {
+                            "side": "sell",
+                            "slot": slot,
+                            "time": btime,
+                            "sol": rec_sol,
+                            "tokens": sold_tok,
+                            "price_ppm": max(1, price_ppm),
+                        },
+                    )
+                )
+        return results
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        batch_results = executor.map(
+            _process_sig, [s for s in sigs_chrono if isinstance(s, dict)]
+        )
+        for res_list in batch_results:
+            for m, t_entry in res_list:
+                mint_trades.setdefault(m, []).append(t_entry)
+
+    samples: list[CopytradeSample] = []
+    for mint, trs in mint_trades.items():
+        buys = [t for t in trs if t["side"] == "buy"]
+        sells = [t for t in trs if t["side"] == "sell"]
+        if not buys:
+            continue
+        first_buy = buys[0]
+        first_sell = sells[0] if sells else None
+
+        buy_sol = first_buy["sol"]
+        sell_sol = first_sell["sol"] if first_sell else None
+        hold_s = (
+            (first_sell["time"] - first_buy["time"])
+            if first_sell and first_sell["time"] and first_buy["time"]
+            else 60.0
+        )
+        if hold_s <= 0:
+            hold_s = (
+                max(1.0, (first_sell["slot"] - first_buy["slot"]) * 0.4)
+                if first_sell
+                else 60.0
+            )
+
+        pnl_pct = (
+            ((sell_sol - buy_sol) / buy_sol * 100.0)
+            if sell_sol and buy_sol > 0
+            else 0.0
+        )
+        peak = max(1.0, (sell_sol / buy_sol)) if sell_sol and buy_sol > 0 else 1.2
+        traj = (
+            (0.0, 1.0),
+            (hold_s * 0.5, peak),
+            (hold_s, peak * 0.9 if first_sell else 1.0),
+        )
+
+        samples.append(
+            CopytradeSample(
+                mint=mint,
+                wallet=wallet,
+                buy_slot=first_buy["slot"],
+                buy_timestamp=first_buy["time"],
+                buy_sol=buy_sol,
+                buy_tokens=first_buy["tokens"],
+                buy_price_ppm=first_buy["price_ppm"],
+                sell_slot=first_sell["slot"] if first_sell else None,
+                sell_timestamp=first_sell["time"] if first_sell else None,
+                sell_sol=sell_sol,
+                sell_tokens=first_sell["tokens"] if first_sell else None,
+                sell_price_ppm=first_sell["price_ppm"] if first_sell else None,
+                trajectory=traj,
+                peak_multiplier=peak,
+                target_hold_seconds=hold_s,
+                target_pnl_pct=pnl_pct,
+            )
+        )
+
+    return tuple(samples)
+
+
 def resolve_copytrade_samples(
     wallet: str,
     db_path: Path | str | None = None,
@@ -483,5 +714,9 @@ def resolve_copytrade_samples(
                     )
         except Exception as exc:
             logger.warning("Failed to load copytrade samples from sqlite: %s", exc)
+
+    if not samples:
+        # Fallback to live on-chain acquisition
+        return _fetch_onchain_copytrade_samples(wallet)
 
     return tuple(samples)
