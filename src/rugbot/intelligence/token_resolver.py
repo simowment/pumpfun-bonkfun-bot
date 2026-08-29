@@ -129,6 +129,20 @@ def _rpc_call(
         pass
 
     # Direct HTTP fallback if pool is on cooldown or returned error
+    fallback_params = list(params)
+    if (
+        method == "getSignaturesForAddress"
+        and len(fallback_params) > 1
+        and isinstance(fallback_params[1], dict)
+    ):
+        cfg = dict(fallback_params[1])
+        if cfg.get("limit", 0) > 100:
+            cfg["limit"] = 100
+        fallback_params[1] = cfg
+    fallback_payload = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": method, "params": fallback_params}
+    ).encode()
+
     fallback_urls = [
         "https://solana-rpc.publicnode.com",
         "https://rpc.ankr.com/solana",
@@ -138,7 +152,7 @@ def _rpc_call(
         try:
             req = urllib.request.Request(
                 fb_url,
-                data=payload,
+                data=fallback_payload,
                 headers={
                     "Content-Type": "application/json",
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
