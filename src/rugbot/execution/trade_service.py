@@ -196,6 +196,8 @@ class TradeResult:
     message: str = ""
     take_profit_pct: float | None = None
     stop_loss_pct: float | None = None
+    realized_pnl_sol: float | None = None
+    realized_pnl_pct: float | None = None
     error: str | None = None
 
 
@@ -209,13 +211,19 @@ class ActivePosition:
     entry_price_sol: float
     entry_slot: int
     mode: ExecutionMode
+    entry_fees_sol: float = 0.0
     take_profit_pct: float | None = None
     stop_loss_pct: float | None = None
     trailing_stop_pct: float | None = None
     peak_price_sol: float = 0.0
     current_pnl_pct: float = 0.0
     current_value_sol: float = 0.0
+    unrealized_pnl_sol: float = 0.0
     opened_at_ts: float = field(default_factory=time.time)
+
+
+import sqlite3
+from pathlib import Path
 
 
 class TradingService:
@@ -228,6 +236,7 @@ class TradingService:
         private_key: str | None = None,
         default_mode: ExecutionMode = ExecutionMode.DRY_RUN,
         default_routing: RoutingPolicy = RoutingPolicy.RPC_ONLY,
+        db_path: Path | str = Path(".state/trading.sqlite3"),
     ) -> None:
         resolve_dotenv()
         providers = load_provider_settings()
@@ -237,8 +246,148 @@ class TradingService:
         self._private_key = private_key or os.environ.get("SOLANA_PRIVATE_KEY")
         self._default_mode = default_mode
         self._default_routing = default_routing
+        self._db_path = Path(db_path)
         self._positions: dict[str, ActivePosition] = {}
+        self._closed_trades: list[dict[str, Any]] = []
         self._lock = asyncio.Lock()
+        self._init_db()
+        self._load_from_db()
+
+    def _init_db(self) -> None:
+        try:
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(str(self._db_path)) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS active_positions (
+                        mint TEXT PRIMARY KEY,
+                        entry_sol REAL NOT NULL,
+                        entry_fees_sol REAL NOT NULL,
+                        token_amount INTEGER NOT NULL,
+                        entry_price_sol REAL NOT NULL,
+                        entry_slot INTEGER NOT NULL,
+                        mode TEXT NOT NULL,
+                        take_profit_pct REAL,
+                        stop_loss_pct REAL,
+                        trailing_stop_pct REAL,
+                        peak_price_sol REAL NOT NULL,
+                        current_pnl_pct REAL NOT NULL,
+                        current_value_sol REAL NOT NULL,
+                        unrealized_pnl_sol REAL NOT NULL,
+                        opened_at_ts REAL NOT NULL
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS closed_trades (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        mint TEXT NOT NULL,
+                        mode TEXT NOT NULL,
+                        tokens_sold INTEGER NOT NULL,
+                        sol_proceeds REAL NOT NULL,
+                        cost_basis_sol REAL NOT NULL,
+                        fees_sol REAL NOT NULL,
+                        realized_pnl_sol REAL NOT NULL,
+                        realized_pnl_pct REAL NOT NULL,
+                        timestamp REAL NOT NULL
+                    )
+                """)
+        except Exception as exc:
+            logger.warning("Failed to init trading db: %s", exc)
+
+    def _load_from_db(self) -> None:
+        try:
+            if not self._db_path.exists():
+                return
+            with sqlite3.connect(str(self._db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                for row in conn.execute("SELECT * FROM active_positions"):
+                    pos = ActivePosition(
+                        mint=row["mint"],
+                        entry_sol=row["entry_sol"],
+                        entry_fees_sol=row["entry_fees_sol"],
+                        token_amount=row["token_amount"],
+                        entry_price_sol=row["entry_price_sol"],
+                        entry_slot=row["entry_slot"],
+                        mode=ExecutionMode(row["mode"]),
+                        take_profit_pct=row["take_profit_pct"],
+                        stop_loss_pct=row["stop_loss_pct"],
+                        trailing_stop_pct=row["trailing_stop_pct"],
+                        peak_price_sol=row["peak_price_sol"],
+                        current_pnl_pct=row["current_pnl_pct"],
+                        current_value_sol=row["current_value_sol"],
+                        unrealized_pnl_sol=row["unrealized_pnl_sol"],
+                        opened_at_ts=row["opened_at_ts"],
+                    )
+                    self._positions[pos.mint] = pos
+
+                for row in conn.execute("SELECT * FROM closed_trades ORDER BY id ASC"):
+                    self._closed_trades.append(dict(row))
+        except Exception as exc:
+            logger.warning("Failed to load trading db: %s", exc)
+
+    def _persist_position(self, pos: ActivePosition) -> None:
+        try:
+            with sqlite3.connect(str(self._db_path)) as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO active_positions (
+                        mint, entry_sol, entry_fees_sol, token_amount, entry_price_sol,
+                        entry_slot, mode, take_profit_pct, stop_loss_pct, trailing_stop_pct,
+                        peak_price_sol, current_pnl_pct, current_value_sol, unrealized_pnl_sol,
+                        opened_at_ts
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        pos.mint,
+                        pos.entry_sol,
+                        pos.entry_fees_sol,
+                        pos.token_amount,
+                        pos.entry_price_sol,
+                        pos.entry_slot,
+                        pos.mode.value,
+                        pos.take_profit_pct,
+                        pos.stop_loss_pct,
+                        pos.trailing_stop_pct,
+                        pos.peak_price_sol,
+                        pos.current_pnl_pct,
+                        pos.current_value_sol,
+                        pos.unrealized_pnl_sol,
+                        pos.opened_at_ts,
+                    ),
+                )
+        except Exception as exc:
+            logger.warning("Failed to persist position: %s", exc)
+
+    def _delete_persisted_position(self, mint: str) -> None:
+        try:
+            with sqlite3.connect(str(self._db_path)) as conn:
+                conn.execute("DELETE FROM active_positions WHERE mint = ?", (mint,))
+        except Exception as exc:
+            logger.warning("Failed to delete position: %s", exc)
+
+    def _persist_closed_trade(self, trade: dict[str, Any]) -> None:
+        try:
+            with sqlite3.connect(str(self._db_path)) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO closed_trades (
+                        mint, mode, tokens_sold, sol_proceeds, cost_basis_sol,
+                        fees_sol, realized_pnl_sol, realized_pnl_pct, timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        trade["mint"],
+                        trade["mode"],
+                        trade["tokens_sold"],
+                        trade["sol_proceeds"],
+                        trade["cost_basis_sol"],
+                        trade["fees_sol"],
+                        trade["realized_pnl_sol"],
+                        trade["realized_pnl_pct"],
+                        trade["timestamp"],
+                    ),
+                )
+        except Exception as exc:
+            logger.warning("Failed to persist closed trade: %s", exc)
 
     @property
     def endpoint(self) -> str:
@@ -254,6 +403,7 @@ class TradingService:
             {
                 "mint": pos.mint,
                 "entry_sol": pos.entry_sol,
+                "entry_fees_sol": pos.entry_fees_sol,
                 "token_amount": pos.token_amount,
                 "entry_price_sol": pos.entry_price_sol,
                 "entry_slot": pos.entry_slot,
@@ -263,10 +413,44 @@ class TradingService:
                 "trailing_stop_pct": pos.trailing_stop_pct,
                 "current_pnl_pct": pos.current_pnl_pct,
                 "current_value_sol": pos.current_value_sol,
+                "unrealized_pnl_sol": pos.unrealized_pnl_sol,
                 "opened_at_ts": pos.opened_at_ts,
             }
             for pos in self._positions.values()
         ]
+
+    def get_closed_trades(self) -> list[dict[str, Any]]:
+        """Return historical closed trade records."""
+        return list(self._closed_trades)
+
+    def get_pnl_summary(self) -> dict[str, Any]:
+        """Compute aggregated portfolio PnL across closed and open positions."""
+        total_trades = len(self._closed_trades)
+        wins = sum(
+            1 for t in self._closed_trades if (t.get("realized_pnl_sol") or 0.0) > 0
+        )
+        losses = sum(
+            1 for t in self._closed_trades if (t.get("realized_pnl_sol") or 0.0) < 0
+        )
+        winrate_pct = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
+
+        realized_pnl_sol = sum(
+            t.get("realized_pnl_sol", 0.0) for t in self._closed_trades
+        )
+        total_fees_sol = sum(t.get("fees_sol", 0.0) for t in self._closed_trades)
+        unrealized_pnl_sol = sum(p.unrealized_pnl_sol for p in self._positions.values())
+
+        return {
+            "total_trades": total_trades,
+            "wins": wins,
+            "losses": losses,
+            "winrate_pct": winrate_pct,
+            "realized_pnl_sol": realized_pnl_sol,
+            "unrealized_pnl_sol": unrealized_pnl_sol,
+            "total_net_pnl_sol": realized_pnl_sol + unrealized_pnl_sol,
+            "total_fees_sol": total_fees_sol,
+            "open_positions_count": len(self._positions),
+        }
 
     def get_position(self, mint: str) -> ActivePosition | None:
         """Return active position for a mint."""
@@ -389,7 +573,10 @@ class TradingService:
                 if not receipt.accepted:
                     if not is_live:
                         # Fallback to canonical initial Pump.fun CPMM curve for mock/test/completed tokens in paper mode
-                        tokens = int((1_073_000_000_000_000 * spec.quote_lamports) / (30_000_000_000 + spec.quote_lamports))
+                        tokens = int(
+                            (1_073_000_000_000_000 * spec.quote_lamports)
+                            / (30_000_000_000 + spec.quote_lamports)
+                        )
                     else:
                         return TradeResult(
                             ok=False,
@@ -398,19 +585,23 @@ class TradingService:
                             mode=spec.mode,
                             sol_amount=spec.amount_sol,
                             token_amount=0,
-                            error=receipt.message or "Order rejected by execution engine",
+                            error=receipt.message
+                            or "Order rejected by execution engine",
                         )
                 else:
                     tokens = receipt.simulated_output_base_units or int(
-                        (1_073_000_000_000_000 * spec.quote_lamports) / (30_000_000_000 + spec.quote_lamports)
+                        (1_073_000_000_000_000 * spec.quote_lamports)
+                        / (30_000_000_000 + spec.quote_lamports)
                     )
                 sol = spec.amount_sol
                 ui_tokens = tokens / 1_000_000.0 if tokens > 0 else 0.0
                 price = (sol / ui_tokens) if ui_tokens > 0 else 0.0
 
+                fee_sol = float(receipt.estimated_fee_lamports or 0) / LAMPORTS_PER_SOL
                 pos = ActivePosition(
                     mint=spec.mint,
                     entry_sol=sol,
+                    entry_fees_sol=fee_sol,
                     token_amount=tokens,
                     entry_price_sol=price,
                     entry_slot=int(receipt.as_of_slot),
@@ -421,8 +612,10 @@ class TradingService:
                     peak_price_sol=price,
                     current_pnl_pct=0.0,
                     current_value_sol=sol,
+                    unrealized_pnl_sol=-fee_sol,
                 )
                 self._positions[spec.mint] = pos
+                self._persist_position(pos)
 
                 sig = (
                     receipt.signature
@@ -439,8 +632,7 @@ class TradingService:
                     token_amount=tokens,
                     signature=sig,
                     effective_price_sol=price,
-                    fee_sol=float(receipt.estimated_fee_lamports or 0)
-                    / LAMPORTS_PER_SOL,
+                    fee_sol=fee_sol,
                     slot=int(receipt.as_of_slot),
                     message=f"{prefix} buy executed: {ui_tokens:,.2f} tokens received @ {price:.10f} SOL/token",
                     take_profit_pct=spec.take_profit_pct,
@@ -531,7 +723,13 @@ class TradingService:
                 if not receipt.accepted:
                     if not is_live:
                         # Fallback to canonical initial Pump.fun CPMM curve for mock/test/completed tokens in paper mode
-                        sol = float((30_000_000_000 * sell_tokens) / (1_073_000_000_000_000 + sell_tokens)) / LAMPORTS_PER_SOL
+                        sol = (
+                            float(
+                                (30_000_000_000 * sell_tokens)
+                                / (1_073_000_000_000_000 + sell_tokens)
+                            )
+                            / LAMPORTS_PER_SOL
+                        )
                     else:
                         return TradeResult(
                             ok=False,
@@ -540,26 +738,69 @@ class TradingService:
                             mode=spec.mode,
                             sol_amount=0.0,
                             token_amount=sell_tokens,
-                            error=receipt.message or "Sell rejected by execution engine",
+                            error=receipt.message
+                            or "Sell rejected by execution engine",
                         )
                 else:
-                    sol = float(receipt.simulated_output_base_units or 0) / LAMPORTS_PER_SOL
+                    sol = (
+                        float(receipt.simulated_output_base_units or 0)
+                        / LAMPORTS_PER_SOL
+                    )
                 tokens = sell_tokens
                 ui_tokens = tokens / 1_000_000.0 if tokens > 0 else 0.0
                 price = (sol / ui_tokens) if ui_tokens > 0 else 0.0
+                fee_sol = float(receipt.estimated_fee_lamports or 0) / LAMPORTS_PER_SOL
+                realized_pnl_sol: float | None = None
+                realized_pnl_pct: float | None = None
 
                 if pos is not None:
+                    fraction_sold = (
+                        tokens / pos.token_amount if pos.token_amount > 0 else 1.0
+                    )
+                    cost_basis_sol = pos.entry_sol * fraction_sold
+                    buy_fees_sol = pos.entry_fees_sol * fraction_sold
+                    total_trade_fees_sol = buy_fees_sol + fee_sol
+                    realized_pnl_sol = sol - cost_basis_sol - total_trade_fees_sol
+                    realized_pnl_pct = (
+                        (realized_pnl_sol / cost_basis_sol * 100.0)
+                        if cost_basis_sol > 0
+                        else 0.0
+                    )
+
                     remaining = max(0, pos.token_amount - tokens)
                     if remaining == 0:
                         del self._positions[spec.mint]
+                        self._delete_persisted_position(spec.mint)
                     else:
                         pos.token_amount = remaining
+                        pos.entry_sol -= cost_basis_sol
+                        pos.entry_fees_sol -= buy_fees_sol
+                        self._persist_position(pos)
+
+                    closed_rec = {
+                        "mint": spec.mint,
+                        "mode": spec.mode.value,
+                        "tokens_sold": tokens,
+                        "sol_proceeds": sol,
+                        "cost_basis_sol": cost_basis_sol,
+                        "fees_sol": total_trade_fees_sol,
+                        "realized_pnl_sol": realized_pnl_sol,
+                        "realized_pnl_pct": realized_pnl_pct,
+                        "timestamp": time.time(),
+                    }
+                    self._closed_trades.append(closed_rec)
+                    self._persist_closed_trade(closed_rec)
 
                 sig = (
                     receipt.signature
                     or f"dryrun_sell_{int(time.time_ns() // 1_000_000)}"
                 )
                 prefix = "Live" if is_live else "Dry-Run"
+
+                pnl_msg = ""
+                if realized_pnl_sol is not None and realized_pnl_pct is not None:
+                    pnl_sign = "+" if realized_pnl_sol >= 0 else ""
+                    pnl_msg = f" | Net PnL: {pnl_sign}{realized_pnl_sol:.4f} SOL ({pnl_sign}{realized_pnl_pct:.2f}%)"
 
                 return TradeResult(
                     ok=True,
@@ -570,10 +811,11 @@ class TradingService:
                     token_amount=tokens,
                     signature=sig,
                     effective_price_sol=price,
-                    fee_sol=float(receipt.estimated_fee_lamports or 0)
-                    / LAMPORTS_PER_SOL,
+                    fee_sol=fee_sol,
                     slot=int(receipt.as_of_slot),
-                    message=f"{prefix} sell executed: {ui_tokens:,.2f} tokens sold for {sol:.4f} SOL (@ {price:.10f} SOL/token)",
+                    realized_pnl_sol=realized_pnl_sol,
+                    realized_pnl_pct=realized_pnl_pct,
+                    message=f"{prefix} sell executed: {ui_tokens:,.2f} tokens sold for {sol:.4f} SOL (@ {price:.10f} SOL/token){pnl_msg}",
                 )
             except Exception as exc:
                 return TradeResult(
@@ -600,11 +842,6 @@ class TradingService:
         for pos in positions_to_check:
             try:
                 # Estimate current sell value via simulation port
-                sim_spec = SellOrderSpec(
-                    mint=pos.mint,
-                    amount_tokens=pos.token_amount,
-                    mode=ExecutionMode.DRY_RUN,
-                )
                 sim_intent = ExecutionIntent(
                     intent_id=f"tick_{int(time.time_ns())}",
                     as_of_slot=Slot(0),
@@ -626,17 +863,21 @@ class TradingService:
                             receipt.simulated_output_base_units / LAMPORTS_PER_SOL
                         )
                         current_price = (
-                            current_sol / pos.token_amount
+                            current_sol / (pos.token_amount / 1_000_000.0)
                             if pos.token_amount > 0
                             else 0.0
                         )
                         pos.current_value_sol = current_sol
+                        pos.unrealized_pnl_sol = (
+                            current_sol - pos.entry_sol - pos.entry_fees_sol
+                        )
                         pos.current_pnl_pct = (
                             ((current_sol - pos.entry_sol) / pos.entry_sol * 100.0)
                             if pos.entry_sol > 0
                             else 0.0
                         )
                         pos.peak_price_sol = max(pos.peak_price_sol, current_price)
+                        self._persist_position(pos)
 
                         # Check Take-Profit Trigger
                         if (

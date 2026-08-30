@@ -8,8 +8,20 @@ import argparse
 import asyncio
 import sys
 
-from rugbot.execution.ports import ExecutionMode
-from rugbot.execution.trade_service import BuyOrderSpec, SellOrderSpec, TradingService
+from solders.pubkey import Pubkey
+
+from rugbot.domain.fees import FeeConfig
+from rugbot.domain.quote_engine import executable_buy_quote, executable_sell_quote
+from rugbot.domain.quotes import ExecutableQuote, QuotePath
+from rugbot.execution.live import _build_trade_context, _fetch_trade_accounts
+from rugbot.execution.ports import ExecutionIntent, ExecutionMode, Slot
+from rugbot.execution.trade_service import (
+    LAMPORTS_PER_SOL,
+    BuyOrderSpec,
+    SellOrderSpec,
+    TradingService,
+)
+from rugbot.integrations.solana_rpc import SolanaClient
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -18,6 +30,22 @@ def build_parser() -> argparse.ArgumentParser:
         description="Unified Pump.fun Buy/Sell CLI with zero duplication across Dry-Run and Live modes",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # Quote command
+    quote_parser = subparsers.add_parser(
+        "quote",
+        help="Inspect live on-chain bonding curve reserves, market cap, and quotes",
+    )
+    quote_parser.add_argument("--mint", required=True, help="Token mint address")
+    quote_parser.add_argument(
+        "--sol",
+        type=float,
+        default=0.1,
+        help="SOL amount to quote for buy (default: 0.1 SOL)",
+    )
+    quote_parser.add_argument(
+        "--tokens", type=int, default=None, help="Token base units to quote for sell"
+    )
 
     # Buy command
     buy_parser = subparsers.add_parser("buy", help="Execute a token purchase")
@@ -108,7 +136,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Positions command
     subparsers.add_parser(
-        "positions", help="List all open positions and active TP/SL levels"
+        "positions",
+        help="List all open positions with unrealized PnL and active TP/SL levels",
+    )
+
+    # PnL command
+    subparsers.add_parser(
+        "pnl", help="Display net PnL summary and closed trade history"
     )
 
     # Monitor command
@@ -235,20 +269,121 @@ async def run_cli(args: argparse.Namespace) -> int:
         print("=" * 60)
         return 1
 
+    if args.command == "quote":
+        mint_str = args.mint.strip()
+        print("=" * 60)
+        print(" 🔍 PUMP.FUN ON-CHAIN MARKET QUOTE")
+        print("=" * 60)
+        print(f" Target Mint:     {mint_str}")
+        print("-" * 60)
+
+        try:
+            mint_pk = Pubkey.from_string(mint_str)
+            client = SolanaClient(service.endpoint)
+            slot, accounts = await _fetch_trade_accounts(client, mint_pk)
+            dummy_intent = ExecutionIntent(
+                intent_id="cli_quote",
+                as_of_slot=Slot(0),
+                market_id=mint_str,
+                side="buy",
+                quote_amount_base_units=int(args.sol * LAMPORTS_PER_SOL),
+                base_amount_base_units=None,
+                max_slippage_bps=500,
+                reason_codes=("quote",),
+            )
+            _, reserves = _build_trade_context(
+                accounts=accounts,
+                mint=mint_pk,
+                user=Pubkey.from_string("11111111111111111111111111111111"),
+                intent=dummy_intent,
+            )
+            await client.close()
+
+            # Exact integer CPMM calculations for Pump.fun bonding curve
+            spendable_sol_lamports = int(args.sol * LAMPORTS_PER_SOL)
+            net_sol_lamports = (spendable_sol_lamports * 99) // 100
+            tokens_out_base = (
+                int(reserves.virtual_base_reserves) * net_sol_lamports
+            ) // (int(reserves.virtual_quote_reserves) + net_sol_lamports)
+            tokens_for_buy = tokens_out_base / 1_000_000.0
+            price_buy = args.sol / tokens_for_buy if tokens_for_buy > 0 else 0.0
+
+            sell_tokens = args.tokens or int(tokens_out_base)
+            sol_out_gross = (int(reserves.virtual_quote_reserves) * sell_tokens) // (
+                int(reserves.virtual_base_reserves) + sell_tokens
+            )
+            sol_out_net = (sol_out_gross * 99) // 100
+            sol_for_sell = sol_out_net / LAMPORTS_PER_SOL
+            price_sell = (
+                sol_for_sell / (sell_tokens / 1_000_000.0) if sell_tokens > 0 else 0.0
+            )
+
+            # Market Cap
+            mcap_sol = (reserves.virtual_quote_reserves / LAMPORTS_PER_SOL) * (
+                1_000_000_000.0 / (reserves.virtual_base_reserves / 1_000_000.0)
+            )
+
+            print(f" Slot:                   {slot}")
+            print(
+                f" Virtual SOL Reserves:   {reserves.virtual_quote_reserves / LAMPORTS_PER_SOL:.4f} SOL"
+            )
+            print(
+                f" Real SOL Reserves:      {reserves.real_quote_reserves / LAMPORTS_PER_SOL:.4f} SOL"
+            )
+            print(
+                f" Curve Status:           {'MIGRATED / COMPLETE' if reserves.is_complete else 'ACTIVE (Bonding Curve)'}"
+            )
+            print(f" Est. Market Cap:        ~{mcap_sol:.2f} SOL")
+            print("-" * 60)
+            print(
+                f" Buy Quote ({args.sol:.4f} SOL):   {tokens_for_buy:,.2f} tokens (@ {price_buy:.10f} SOL/token)"
+            )
+            print(
+                f" Sell Quote ({sell_tokens / 1_000_000:,.2f} tokens): {sol_for_sell:.6f} SOL (@ {price_sell:.10f} SOL/token)"
+            )
+            print("=" * 60)
+            return 0
+        except Exception as exc:
+            print(f"[-] Failed to fetch quote: {exc}")
+            print("=" * 60)
+            return 1
+
     if args.command == "positions":
         positions = service.get_positions()
         if not positions:
             print("No open positions found.")
             return 0
         print(f"[*] Open Positions ({len(positions)}):")
-        print("-" * 75)
-        print(f"{'MINT':<44} | {'SIZE (SOL)':<10} | {'TOKENS':<14} | {'MODE':<8}")
-        print("-" * 75)
+        print("-" * 85)
+        print(
+            f"{'MINT':<44} | {'ENTRY (SOL)':<11} | {'TOKENS':<14} | {'UNREALIZED PNL':<16} | {'MODE':<8}"
+        )
+        print("-" * 85)
         for p in positions:
-            print(
-                f"{p['mint']:<44} | {p['entry_sol']:<10.4f} | {p['token_amount']:<14,} | {p['mode']:<8}"
+            pnl_str = (
+                f"{'+' if p['current_pnl_pct'] >= 0 else ''}{p['current_pnl_pct']:.2f}%"
             )
-        print("-" * 75)
+            print(
+                f"{p['mint']:<44} | {p['entry_sol']:<11.4f} | {p['token_amount']:<14,} | {pnl_str:<16} | {p['mode']:<8}"
+            )
+        print("-" * 85)
+        return 0
+
+    if args.command == "pnl":
+        summary = service.get_pnl_summary()
+        trades = service.get_closed_trades()
+        print("=" * 60)
+        print(" 📊 PUMP.FUN TRADING PERFORMANCE & PNL SUMMARY")
+        print("=" * 60)
+        print(f" Total Closed Trades:    {summary['total_trades']}")
+        print(
+            f" Wins / Losses:          {summary['wins']} W / {summary['losses']} L (Winrate: {summary['winrate_pct']:.1f}%)"
+        )
+        print(f" Total Fees Paid:        {summary['total_fees_sol']:.6f} SOL")
+        print(f" Net Realized PnL:       {summary['realized_pnl_sol']:+.6f} SOL")
+        print(f" Open Positions Value:   {summary['unrealized_pnl_sol']:+.6f} SOL")
+        print(f" Net Total Portfolio:    {summary['total_net_pnl_sol']:+.6f} SOL")
+        print("=" * 60)
         return 0
 
     if args.command == "monitor":
