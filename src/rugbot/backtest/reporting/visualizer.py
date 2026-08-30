@@ -404,7 +404,7 @@ def export_vectorbt_ohlc_report(
 
     # 4. Cumulative Equity
     equities = [r.cumulative_equity_sol for r in records] if records else [0.0]
-    eq_x = dates[:len(records)] if len(dates) >= len(records) else [f"T#{r.trade_index}" for r in records]
+    eq_x = dates[: len(records)] if len(dates) >= len(records) else [f"T#{r.trade_index}" for r in records]
     fig.add_trace(
         go.Scatter(
             x=eq_x,
@@ -422,7 +422,7 @@ def export_vectorbt_ohlc_report(
     fig.update_layout(
         template="plotly_dark",
         title=dict(
-            text=f"<b>VectorBT High-Res 1s OHLC Candlestick Report: {mint}</b><br><span style='font-size: 13px; color: #94a3b8;'>1s Candles: {len(candles)} | Trades: {len(records)} | Total Fees: -{total_fees_sol:.4f} SOL</span>",
+            text=f"<b>1s OHLC Candlestick Report: {mint}</b><br><span style='font-size: 13px; color: #94a3b8;'>1s Candles: {len(candles)} | Trades: {len(records)} | Total Fees: -{total_fees_sol:.4f} SOL</span>",
             x=0.02,
             y=0.98,
         ),
@@ -432,9 +432,211 @@ def export_vectorbt_ohlc_report(
         height=950,
         margin=dict(l=60, r=40, t=100, b=60),
     )
-    fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
-    fig.update_xaxes(rangeslider_visible=False, row=2, col=1)
-    fig.update_xaxes(rangeslider_visible=False, row=3, col=1)
+    # Category type prevents empty time voids stretching across non-trading periods
+    fig.update_xaxes(type="category", gridcolor="#1e293b", row=1, col=1)
+    fig.update_xaxes(type="category", gridcolor="#1e293b", row=2, col=1)
+    fig.update_xaxes(type="category", gridcolor="#1e293b", row=3, col=1)
+    fig.update_yaxes(title_text="Price (SOL)", gridcolor="#1e293b", row=1, col=1)
+    fig.update_yaxes(title_text="Vol (SOL)", gridcolor="#1e293b", row=2, col=1)
+    fig.update_yaxes(title_text="PnL (SOL)", gridcolor="#1e293b", row=3, col=1)
 
     fig.write_html(str(out), include_plotlyjs=True)
+
+    # Also export TradingView Lightweight Charts HTML alongside
+    tv_path = out.with_name(out.stem + "_tradingview.html")
+    export_tradingview_html_report(mint, candles, records, total_fees_sol, tv_path)
+
+    # Also export mplfinance high-res PNG image
+    png_path = out.with_suffix(".png")
+    export_mplfinance_png_chart(mint, candles, records, png_path)
+
+    return out
+
+
+def export_mplfinance_png_chart(
+    mint: str,
+    candles: list[OHLCCandle],
+    records: list[TradePerformanceRecord],
+    output_path: Path | str,
+) -> Path | None:
+    """Export a high-resolution PNG candlestick chart using mplfinance."""
+    import datetime
+    import mplfinance as mpf
+    import pandas as pd
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    if not candles:
+        return None
+
+    try:
+        # Construct Pandas DataFrame for mplfinance
+        dates = [
+            datetime.datetime.fromtimestamp(c.timestamp, tz=datetime.timezone.utc)
+            for c in candles
+        ]
+        df = pd.DataFrame(
+            {
+                "Open": [c.open for c in candles],
+                "High": [c.high for c in candles],
+                "Low": [c.low for c in candles],
+                "Close": [c.close for c in candles],
+                "Volume": [c.volume for c in candles],
+            },
+            index=pd.DatetimeIndex(dates),
+        )
+
+        mc = mpf.make_marketcolors(
+            up="#22c55e",
+            down="#ef4444",
+            edge="inherit",
+            wick="inherit",
+            volume={"up": "#22c55e", "down": "#ef4444"},
+        )
+        style = mpf.make_mpf_style(
+            base_mpf_style="nightclouds",
+            marketcolors=mc,
+            facecolor="#090d16",
+            edgecolor="#1f2937",
+            gridcolor="#1e293b",
+        )
+
+        mpf.plot(
+            df,
+            type="candle",
+            volume=True,
+            style=style,
+            title=f"Pump.fun 1s Financial Chart — {mint[:12]}...",
+            savefig=dict(fname=str(out), dpi=150, bbox_inches="tight"),
+        )
+        return out
+    except Exception:
+        return None
+
+
+def export_tradingview_html_report(
+    mint: str,
+    candles: list[OHLCCandle],
+    records: list[TradePerformanceRecord],
+    total_fees_sol: float,
+    output_path: Path | str,
+) -> Path:
+    """Export an interactive TradingView Lightweight Charts HTML application."""
+    import json
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    if not candles:
+        out.write_text("<html><body><h2>No OHLC data</h2></body></html>", encoding="utf-8")
+        return out
+
+    candle_data = [
+        {
+            "time": c.timestamp,
+            "open": c.open,
+            "high": c.high,
+            "low": c.low,
+            "close": c.close,
+        }
+        for c in candles
+    ]
+    vol_data = [
+        {
+            "time": c.timestamp,
+            "value": c.volume,
+            "color": "#22c55e" if c.close >= c.open else "#ef4444",
+        }
+        for c in candles
+    ]
+
+    markers = []
+    for r in records:
+        markers.append(
+            {
+                "time": candles[0].timestamp,
+                "position": "belowBar",
+                "color": "#22c55e",
+                "shape": "arrowUp",
+                "text": f"BUY {r.entry_sol:.3f} SOL @ {candles[0].open:.9f}",
+            }
+        )
+        pnl_sign = "+" if r.net_pnl_sol >= 0 else ""
+        markers.append(
+            {
+                "time": candles[-1].timestamp,
+                "position": "aboveBar",
+                "color": "#ef4444",
+                "shape": "arrowDown",
+                "text": f"SELL {r.exit_sol:.3f} SOL ({pnl_sign}{r.net_pnl_sol:.4f} SOL / {pnl_sign}{r.roi_pct:.1f}%)",
+            }
+        )
+
+    cd_json = json.dumps(candle_data)
+    vol_json = json.dumps(vol_data)
+    mk_json = json.dumps(markers)
+
+    peak_price = max(c.high for c in candles)
+    total_vol = sum(c.volume for c in candles)
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>TradingView Chart - {mint}</title>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        body {{ margin: 0; padding: 0; background: #090d16; color: #e5e7eb; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }}
+        .header {{ padding: 12px 20px; background: #111827; border-bottom: 1px solid #1f2937; display: flex; justify-content: space-between; align-items: center; }}
+        .title {{ font-size: 15px; font-weight: bold; color: #38bdf8; }}
+        .stats {{ font-size: 13px; color: #9ca3af; }}
+        .badge {{ background: #1e293b; color: #10b981; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; margin-left: 8px; }}
+        #chart {{ width: 100vw; height: calc(100vh - 55px); }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="title">📈 {mint} <span class="badge">1s LIVE</span></div>
+        <div class="stats">Candles: {len(candles)} | Volume: {total_vol:.2f} SOL | Peak: {peak_price:.10f} SOL | Fees: -{total_fees_sol:.4f} SOL</div>
+    </div>
+    <div id="chart"></div>
+    <script>
+        const chart = LightweightCharts.createChart(document.getElementById('chart'), {{
+            width: window.innerWidth,
+            height: window.innerHeight - 55,
+            layout: {{ background: {{ color: '#090d16' }}, textColor: '#9ca3af' }},
+            grid: {{ vertLines: {{ color: '#131b2e' }}, horzLines: {{ color: '#131b2e' }} }},
+            crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+            rightPriceScale: {{ borderColor: '#1f2937' }},
+            timeScale: {{ borderColor: '#1f2937', timeVisible: true, secondsVisible: true }},
+        }});
+
+        const candlestickSeries = chart.addCandlestickSeries({{
+            upColor: '#22c55e',
+            downColor: '#ef4444',
+            borderVisible: false,
+            wickUpColor: '#22c55e',
+            wickDownColor: '#ef4444',
+        }});
+        candlestickSeries.setData({cd_json});
+
+        const volumeSeries = chart.addHistogramSeries({{
+            color: '#3b82f6',
+            priceFormat: {{ type: 'volume' }},
+            priceScaleId: '',
+            scaleMargins: {{ top: 0.8, bottom: 0 }},
+        }});
+        volumeSeries.setData({vol_json});
+
+        candlestickSeries.setMarkers({mk_json});
+        chart.timeScale().fitContent();
+
+        window.addEventListener('resize', () => {{
+            chart.resize(window.innerWidth, window.innerHeight - 55);
+        }});
+    </script>
+</body>
+</html>"""
+    out.write_text(html, encoding="utf-8")
     return out
