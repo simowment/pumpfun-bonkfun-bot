@@ -7,12 +7,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from pathlib import Path
 
 from solders.pubkey import Pubkey
 
-from rugbot.domain.fees import FeeConfig
-from rugbot.domain.quote_engine import executable_buy_quote, executable_sell_quote
-from rugbot.domain.quotes import ExecutableQuote, QuotePath
 from rugbot.execution.live import _build_trade_context, _fetch_trade_accounts
 from rugbot.execution.ports import ExecutionIntent, ExecutionMode, Slot
 from rugbot.execution.trade_service import (
@@ -141,8 +139,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # PnL command
-    subparsers.add_parser(
+    pnl_parser = subparsers.add_parser(
         "pnl", help="Display net PnL summary and closed trade history"
+    )
+    pnl_parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="Display VectorBT terminal equity curve and export interactive HTML report",
+    )
+
+    # Chart command (OHLC)
+    chart_parser = subparsers.add_parser(
+        "chart",
+        help="Fetch OHLC candlesticks and render VectorBT price & execution chart",
+    )
+    chart_parser.add_argument("--mint", required=True, help="Target token mint address")
+    chart_parser.add_argument(
+        "--timeframe",
+        type=int,
+        default=60,
+        help="Candle timeframe in seconds (default: 60s)",
+    )
+    chart_parser.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Maximum candles to fetch (default: 50)",
     )
 
     # Monitor command
@@ -384,6 +406,121 @@ async def run_cli(args: argparse.Namespace) -> int:
         print(f" Open Positions Value:   {summary['unrealized_pnl_sol']:+.6f} SOL")
         print(f" Net Total Portfolio:    {summary['total_net_pnl_sol']:+.6f} SOL")
         print("=" * 60)
+
+        if getattr(args, "plot", False):
+            from rugbot.backtest.reporting.visualizer import (
+                TradePerformanceRecord,
+                export_vectorbt_html_report,
+                generate_terminal_equity_chart,
+            )
+
+            if not trades:
+                print("\n[!] No closed trades to plot equity curve.")
+                return 0
+
+            perf_records: list[TradePerformanceRecord] = []
+            cum_equity = 0.0
+            peak_equity = 0.0
+            for idx, t in enumerate(trades, 1):
+                net_pnl = float(t.get("realized_pnl_sol", 0.0))
+                cum_equity += net_pnl
+                peak_equity = max(peak_equity, cum_equity)
+                dd = (
+                    ((cum_equity - peak_equity) / peak_equity * 100.0)
+                    if peak_equity > 0
+                    else 0.0
+                )
+                gross_pnl = float(t.get("sol_proceeds", 0.0)) - float(
+                    t.get("cost_basis_sol", 0.0)
+                )
+                perf_records.append(
+                    TradePerformanceRecord(
+                        trade_index=idx,
+                        mint=t.get("mint", "unknown"),
+                        entry_sol=float(t.get("cost_basis_sol", 0.0)),
+                        exit_sol=float(t.get("sol_proceeds", 0.0)),
+                        gross_pnl_sol=gross_pnl,
+                        net_pnl_sol=net_pnl,
+                        roi_pct=float(t.get("realized_pnl_pct", 0.0)),
+                        market_impact_pct=0.0,
+                        holding_seconds=0.0,
+                        is_win=net_pnl > 0,
+                        cumulative_equity_sol=cum_equity,
+                        drawdown_pct=dd,
+                    )
+                )
+
+            print("\n" + generate_terminal_equity_chart(perf_records))
+            html_out = Path(".state/trading_pnl_report.html")
+            export_vectorbt_html_report(
+                target="live_trading_portfolio",
+                mode="execution",
+                records=perf_records,
+                total_fees_sol=summary["total_fees_sol"],
+                market_impact_drag_sol=0.0,
+                output_path=html_out,
+            )
+            print(f"\n[+] Interactive VectorBT HTML Report saved to: {html_out}")
+        return 0
+
+    if args.command == "chart":
+        from rugbot.backtest.reporting.visualizer import (
+            TradePerformanceRecord,
+            export_vectorbt_ohlc_report,
+            generate_terminal_candlestick_chart,
+        )
+        from rugbot.domain.ohlc import fetch_token_ohlc_candles
+
+        mint = args.mint.strip()
+        print(
+            f"[*] Fetching OHLC candles for {mint[:8]}... (Timeframe: {args.timeframe}s, Limit: {args.limit})"
+        )
+        candles = await fetch_token_ohlc_candles(
+            mint, timeframe_seconds=args.timeframe, max_candles=args.limit
+        )
+
+        if not candles:
+            print(f"[!] No OHLC candlestick data available for {mint}")
+            return 1
+
+        print("\n" + generate_terminal_candlestick_chart(candles))
+
+        # Check for matching closed trades
+        trades = service.get_closed_trades()
+        mint_trades = [t for t in trades if t.get("mint") == mint]
+        perf_records: list[TradePerformanceRecord] = []
+        for idx, t in enumerate(mint_trades, 1):
+            net_pnl = float(t.get("realized_pnl_sol", 0.0))
+            perf_records.append(
+                TradePerformanceRecord(
+                    trade_index=idx,
+                    mint=mint,
+                    entry_sol=float(t.get("cost_basis_sol", 0.0)),
+                    exit_sol=float(t.get("sol_proceeds", 0.0)),
+                    gross_pnl_sol=float(t.get("sol_proceeds", 0.0))
+                    - float(t.get("cost_basis_sol", 0.0)),
+                    net_pnl_sol=net_pnl,
+                    roi_pct=float(t.get("realized_pnl_pct", 0.0)),
+                    market_impact_pct=0.0,
+                    holding_seconds=0.0,
+                    is_win=net_pnl > 0,
+                    cumulative_equity_sol=net_pnl,
+                    drawdown_pct=0.0,
+                )
+            )
+
+        html_out = Path(".state/token_ohlc_report.html")
+        export_vectorbt_ohlc_report(
+            target="live_trading",
+            mint=mint,
+            candles=candles,
+            records=perf_records,
+            total_fees_sol=0.0015 * len(perf_records),
+            output_path=html_out,
+        )
+        print(
+            f"\n[+] Interactive VectorBT OHLC Candlestick Report saved to: {html_out}"
+        )
         return 0
 
     if args.command == "monitor":
