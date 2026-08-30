@@ -157,14 +157,14 @@ def build_parser() -> argparse.ArgumentParser:
     chart_parser.add_argument(
         "--timeframe",
         type=int,
-        default=60,
-        help="Candle timeframe in seconds (default: 60s)",
+        default=1,
+        help="Candle timeframe in seconds (default: 1s)",
     )
     chart_parser.add_argument(
         "--limit",
         type=int,
-        default=50,
-        help="Maximum candles to fetch (default: 50)",
+        default=180,
+        help="Maximum candles to fetch (default: 180)",
     )
 
     # Monitor command

@@ -285,9 +285,9 @@ def export_vectorbt_ohlc_report(
         return out
 
     dates = [
-        datetime.datetime.fromtimestamp(c.timestamp, tz=datetime.UTC).strftime(
-            "%H:%M:%S"
-        )
+        datetime.datetime.fromtimestamp(
+            c.timestamp, tz=datetime.timezone.utc
+        ).strftime("%Y-%m-%d %H:%M:%S")
         for c in candles
     ]
     opens = [c.open for c in candles]
@@ -302,14 +302,14 @@ def export_vectorbt_ohlc_report(
         shared_xaxes=True,
         vertical_spacing=0.06,
         subplot_titles=(
-            f"<b>{mint[:8]}... OHLC Candlesticks & Executed Trades</b>",
+            f"<b>{mint[:8]}... 1s OHLC Candlesticks & Executed Trades</b>",
             "<b>Volume (SOL)</b>",
             "<b>Cumulative Realized PnL & Equity (SOL)</b>",
         ),
         row_heights=[0.55, 0.2, 0.25],
     )
 
-    # 1. Candlestick trace
+    # 1. Candlestick trace (1-second high-resolution candles)
     fig.add_trace(
         go.Candlestick(
             x=dates,
@@ -317,9 +317,12 @@ def export_vectorbt_ohlc_report(
             high=highs,
             low=lows,
             close=closes,
-            name="OHLC Price",
-            increasing_line_color="#10b981",
+            name="1s OHLC Price",
+            increasing_line_color="#22c55e",
+            increasing_fillcolor="#22c55e",
             decreasing_line_color="#ef4444",
+            decreasing_fillcolor="#ef4444",
+            whiskerwidth=0.8,
         ),
         row=1,
         col=1,
@@ -354,9 +357,9 @@ def export_vectorbt_ohlc_report(
                 name="Buy Entries",
                 marker=dict(
                     symbol="triangle-up",
-                    size=14,
+                    size=15,
                     color="#22c55e",
-                    line=dict(width=1, color="#ffffff"),
+                    line=dict(width=1.5, color="#ffffff"),
                 ),
                 hovertext=buy_texts,
                 hoverinfo="text",
@@ -373,9 +376,9 @@ def export_vectorbt_ohlc_report(
                 name="Sell Exits",
                 marker=dict(
                     symbol="triangle-down",
-                    size=14,
+                    size=15,
                     color="#ef4444",
-                    line=dict(width=1, color="#ffffff"),
+                    line=dict(width=1.5, color="#ffffff"),
                 ),
                 hovertext=sell_texts,
                 hoverinfo="text",
@@ -386,7 +389,7 @@ def export_vectorbt_ohlc_report(
 
     # 3. Volume bars
     vol_colors = [
-        "#10b981" if c >= o else "#ef4444" for o, c in zip(opens, closes, strict=False)
+        "#22c55e" if c >= o else "#ef4444" for o, c in zip(opens, closes, strict=False)
     ]
     fig.add_trace(
         go.Bar(
@@ -401,7 +404,7 @@ def export_vectorbt_ohlc_report(
 
     # 4. Cumulative Equity
     equities = [r.cumulative_equity_sol for r in records] if records else [0.0]
-    eq_x = [f"T#{r.trade_index}" for r in records] if records else ["T#0"]
+    eq_x = dates[:len(records)] if len(dates) >= len(records) else [f"T#{r.trade_index}" for r in records]
     fig.add_trace(
         go.Scatter(
             x=eq_x,
@@ -419,17 +422,19 @@ def export_vectorbt_ohlc_report(
     fig.update_layout(
         template="plotly_dark",
         title=dict(
-            text=f"<b>VectorBT OHLC Candlestick Report: {mint}</b><br><span style='font-size: 13px; color: #94a3b8;'>Candles: {len(candles)} | Trades: {len(records)} | Total Fees: -{total_fees_sol:.4f} SOL</span>",
+            text=f"<b>VectorBT High-Res 1s OHLC Candlestick Report: {mint}</b><br><span style='font-size: 13px; color: #94a3b8;'>1s Candles: {len(candles)} | Trades: {len(records)} | Total Fees: -{total_fees_sol:.4f} SOL</span>",
             x=0.02,
             y=0.98,
         ),
         paper_bgcolor="#090d16",
         plot_bgcolor="#131b2e",
         showlegend=True,
-        height=900,
+        height=950,
         margin=dict(l=60, r=40, t=100, b=60),
-        xaxis_rangeslider_visible=False,
     )
+    fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
+    fig.update_xaxes(rangeslider_visible=False, row=2, col=1)
+    fig.update_xaxes(rangeslider_visible=False, row=3, col=1)
 
     fig.write_html(str(out), include_plotlyjs=True)
     return out

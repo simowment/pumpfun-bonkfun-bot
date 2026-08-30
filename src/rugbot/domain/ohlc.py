@@ -1,12 +1,15 @@
-"""OHLC candlestick data model and aggregation engine for Pump.fun tokens."""
+"""High-resolution 1-second and multi-timeframe OHLC candlestick aggregation engine for Pump.fun tokens."""
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
-import time
+import struct
 import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import Mapping
 
 from solders.pubkey import Pubkey
 
@@ -17,6 +20,18 @@ from rugbot.utils.logger import get_logger
 logger = get_logger(__name__)
 
 PUMP_PROGRAM_ID_STR = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+_TRADE_EVENT_DISCRIMINATOR = bytes([189, 219, 127, 211, 78, 230, 97, 238])
+
+
+@dataclass(frozen=True, slots=True)
+class TradeTick:
+    """Raw decoded on-chain trade tick."""
+
+    timestamp: int  # BlockTime in seconds
+    price: float  # Price in SOL per token
+    volume: float  # Volume in SOL
+    is_buy: bool
+    signature: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,24 +39,199 @@ class OHLCCandle:
     """Standardized Open-High-Low-Close-Volume candle."""
 
     timestamp: int  # Unix epoch timestamp in seconds
-    open: float  # Price in SOL or USD per UI token
+    open: float  # Price in SOL
     high: float
     low: float
     close: float
     volume: float  # Volume in SOL
 
 
+def build_ohlc_candles(
+    ticks: list[TradeTick],
+    *,
+    timeframe_seconds: int = 1,
+    max_candles: int = 500,
+    fill_empty: bool = True,
+) -> list[OHLCCandle]:
+    """Resample trade ticks into continuous 1-second (or custom interval) OHLCV candles."""
+    if not ticks:
+        return []
+
+    sorted_ticks = sorted(ticks, key=lambda t: t.timestamp)
+    start_ts = sorted_ticks[0].timestamp
+    end_ts = sorted_ticks[-1].timestamp
+
+    # Group ticks into timeframe buckets
+    buckets: dict[int, list[TradeTick]] = defaultdict(list)
+    for tick in sorted_ticks:
+        b_ts = (tick.timestamp // timeframe_seconds) * timeframe_seconds
+        buckets[b_ts].append(tick)
+
+    candles: list[OHLCCandle] = []
+
+    if fill_empty and (end_ts - start_ts) // timeframe_seconds <= max_candles * 3:
+        # Continuous time series with forward-filled prices
+        curr_price = sorted_ticks[0].price
+        for ts in range(start_ts, end_ts + timeframe_seconds, timeframe_seconds):
+            if ts in buckets:
+                b_ticks = buckets[ts]
+                prices = [t.price for t in b_ticks]
+                vol = sum(t.volume for t in b_ticks)
+                candles.append(
+                    OHLCCandle(
+                        timestamp=ts,
+                        open=prices[0],
+                        high=max(prices),
+                        low=min(prices),
+                        close=prices[-1],
+                        volume=round(vol, 6),
+                    )
+                )
+                curr_price = prices[-1]
+            else:
+                candles.append(
+                    OHLCCandle(
+                        timestamp=ts,
+                        open=curr_price,
+                        high=curr_price,
+                        low=curr_price,
+                        close=curr_price,
+                        volume=0.0,
+                    )
+                )
+    else:
+        # Sparse non-empty buckets
+        for ts in sorted(buckets.keys()):
+            b_ticks = buckets[ts]
+            prices = [t.price for t in b_ticks]
+            vol = sum(t.volume for t in b_ticks)
+            candles.append(
+                OHLCCandle(
+                    timestamp=ts,
+                    open=prices[0],
+                    high=max(prices),
+                    low=min(prices),
+                    close=prices[-1],
+                    volume=round(vol, 6),
+                )
+            )
+
+    return candles[-max_candles:]
+
+
 async def fetch_token_ohlc_candles(
     mint: str,
     *,
-    timeframe_seconds: int = 60,
-    max_candles: int = 100,
+    timeframe_seconds: int = 1,
+    max_candles: int = 300,
 ) -> list[OHLCCandle]:
-    """Fetch or aggregate OHLC candles for a Pump.fun mint across on-chain RPC and Gecko APIs."""
+    """Fetch exact on-chain trade ticks and aggregate into 1-second (or custom) OHLCV candles."""
     resolve_dotenv()
     settings = load_provider_settings()
+    client = SolanaClient(settings.rpc_http)
 
-    # 1. Try GeckoTerminal OHLCV first if pool exists
+    try:
+        mint_pk = Pubkey.from_string(mint.strip())
+        pump_prog = Pubkey.from_string(PUMP_PROGRAM_ID_STR)
+        bonding_curve_pda, _ = Pubkey.find_program_address(
+            [b"bonding-curve", bytes(mint_pk)], pump_prog
+        )
+
+        # Fetch signatures on bonding curve PDA
+        sig_resp = await client.post_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getSignaturesForAddress",
+                "params": [str(bonding_curve_pda), {"limit": 100}],
+            }
+        )
+
+        raw_sigs = sig_resp.get("result", [])
+        if not raw_sigs:
+            return []
+
+        sigs = [
+            s["signature"]
+            for s in raw_sigs
+            if isinstance(s, dict) and "signature" in s
+        ]
+
+        # Batch fetch parsed transactions concurrently
+        tasks = [
+            client.post_rpc(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getTransaction",
+                    "params": [
+                        sig,
+                        {
+                            "commitment": "finalized",
+                            "encoding": "json",
+                            "maxSupportedTransactionVersion": 0,
+                        },
+                    ],
+                }
+            )
+            for sig in sigs
+        ]
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        ticks: list[TradeTick] = []
+        for sig, r in zip(sigs, results, strict=False):
+            if not isinstance(r, dict) or not r.get("result"):
+                continue
+            res = r["result"]
+            bt = res.get("blockTime")
+            if not bt:
+                continue
+
+            logs = res.get("meta", {}).get("logMessages", [])
+            for log in logs:
+                if log.startswith("Program data: "):
+                    try:
+                        raw = base64.b64decode(log[14:])
+                        if (
+                            len(raw) >= 8 + 32 + 8 + 8 + 1
+                            and raw[:8] == _TRADE_EVENT_DISCRIMINATOR
+                        ):
+                            sol_amt = struct.unpack_from("<Q", raw, 8 + 32)[0]
+                            tok_amt = struct.unpack_from("<Q", raw, 8 + 32 + 8)[
+                                0
+                            ]
+                            is_buy = bool(raw[8 + 32 + 8 + 8])
+                            if sol_amt > 0 and tok_amt > 0:
+                                price = (sol_amt / 1e9) / (tok_amt / 1e6)
+                                ticks.append(
+                                    TradeTick(
+                                        timestamp=int(bt),
+                                        price=price,
+                                        volume=sol_amt / 1e9,
+                                        is_buy=is_buy,
+                                        signature=sig,
+                                    )
+                                )
+                    except Exception:
+                        continue
+
+        if ticks:
+            return build_ohlc_candles(
+                ticks,
+                timeframe_seconds=timeframe_seconds,
+                max_candles=max_candles,
+                fill_empty=True,
+            )
+
+    except Exception as exc:
+        logger.warning(
+            "Failed to extract on-chain ticks for OHLC: %s", exc
+        )
+    finally:
+        await client.close()
+
+    # Fallback to GeckoTerminal OHLCV if pool exists
     try:
         from rugbot.intelligence.token_resolver import _resolve_pair_address
 
@@ -59,7 +249,9 @@ async def fetch_token_ohlc_candles(
                 if resp.status == 200:
                     data = json.loads(resp.read().decode())
                     raw_candles = (
-                        data.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
+                        data.get("data", {})
+                        .get("attributes", {})
+                        .get("ohlcv_list", [])
                     )
                     if raw_candles:
                         parsed: list[OHLCCandle] = []
@@ -79,85 +271,6 @@ async def fetch_token_ohlc_candles(
                             parsed.sort(key=lambda x: x.timestamp)
                             return parsed[-max_candles:]
     except Exception as exc:
-        logger.debug("GeckoTerminal OHLCV fetch failed: %s", exc)
+        logger.debug("GeckoTerminal OHLCV fallback failed: %s", exc)
 
-    # 2. Reconstruct from on-chain bonding curve RPC signatures & swap history
-    client = SolanaClient(settings.rpc_http)
-    try:
-        mint_pk = Pubkey.from_string(mint.strip())
-        pump_prog = Pubkey.from_string(PUMP_PROGRAM_ID_STR)
-        bonding_curve_pda, _ = Pubkey.find_program_address(
-            [b"bonding-curve", bytes(mint_pk)], pump_prog
-        )
-
-        resp = await client.post_rpc(
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getSignaturesForAddress",
-                "params": [str(bonding_curve_pda), {"limit": max_candles * 2}],
-            }
-        )
-
-        sigs = resp.get("result", [])
-        if not sigs:
-            return []
-
-        # Group signatures by blockTime / timeframe
-        now_ts = int(time.time())
-        buckets: dict[int, list[float]] = defaultdict(list)
-        volumes: dict[int, float] = defaultdict(float)
-
-        # Baseline pump curve price: ~0.000000028 SOL/token
-        base_price = 0.0000000280
-
-        # Sort signatures chronologically
-        sorted_sigs = sorted(
-            [s for s in sigs if s.get("blockTime")],
-            key=lambda x: int(x["blockTime"]),
-        )
-
-        if not sorted_sigs:
-            # Synthetic single candle from now
-            return [
-                OHLCCandle(
-                    timestamp=now_ts,
-                    open=base_price,
-                    high=base_price * 1.05,
-                    low=base_price * 0.98,
-                    close=base_price,
-                    volume=0.1,
-                )
-            ]
-
-        # Aggregate trades into timeframe buckets
-        current_p = base_price
-        for i, s in enumerate(sorted_sigs):
-            bt = int(s["blockTime"])
-            bucket_ts = (bt // timeframe_seconds) * timeframe_seconds
-            variation = 1.0 + (((i % 7) - 3) * 0.012)
-            trade_price = current_p * variation
-            buckets[bucket_ts].append(trade_price)
-            volumes[bucket_ts] += 0.05
-            current_p = trade_price
-
-        candles: list[OHLCCandle] = []
-        for ts in sorted(buckets.keys()):
-            prices = buckets[ts]
-            candles.append(
-                OHLCCandle(
-                    timestamp=ts,
-                    open=prices[0],
-                    high=max(prices),
-                    low=min(prices),
-                    close=prices[-1],
-                    volume=round(volumes[ts], 4),
-                )
-            )
-
-        return candles[-max_candles:]
-    except Exception as exc:
-        logger.warning("Failed to aggregate on-chain OHLC candles: %s", exc)
-        return []
-    finally:
-        await client.close()
+    return []
