@@ -278,7 +278,7 @@ def query_bundler_candidates(
 
     if not filtered:
         msg = "Aucun token créé il y a ~1h et dumpé dans collect — lance collect plus longtemps"
-        return [], [], msg
+        return [], [], msg, 0
 
     # Group bundlers
     bundler_map: dict[str, dict[str, Any]] = {}
