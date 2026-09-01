@@ -463,10 +463,11 @@ def export_mplfinance_png_chart(
     records: list[TradePerformanceRecord],
     output_path: Path | str,
 ) -> Path | None:
-    """Export a high-resolution PNG candlestick chart using mplfinance."""
+    """Export a high-resolution PNG financial chart with human-readable Market Cap in USD ($k)."""
     import datetime
 
-    import mplfinance as mpf
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
     import pandas as pd
 
     out = Path(output_path)
@@ -476,45 +477,144 @@ def export_mplfinance_png_chart(
         return None
 
     try:
-        # Construct Pandas DataFrame for mplfinance
+        # Approximate SOL/USD rate for clean market cap scaling
+        sol_usd = 145.0
+        total_supply = 1_000_000_000.0
+
         dates = [
             datetime.datetime.fromtimestamp(c.timestamp, tz=datetime.UTC)
             for c in candles
         ]
+        mcaps_k = [
+            (c.close * total_supply * sol_usd) / 1000.0 for c in candles
+        ]
+        highs_k = [(c.high * total_supply * sol_usd) / 1000.0 for c in candles]
+        lows_k = [(c.low * total_supply * sol_usd) / 1000.0 for c in candles]
+        opens_k = [(c.open * total_supply * sol_usd) / 1000.0 for c in candles]
+        volumes = [c.volume for c in candles]
+
         df = pd.DataFrame(
             {
-                "Open": [c.open for c in candles],
-                "High": [c.high for c in candles],
-                "Low": [c.low for c in candles],
-                "Close": [c.close for c in candles],
-                "Volume": [c.volume for c in candles],
-            },
-            index=pd.DatetimeIndex(dates),
+                "date": dates,
+                "open": opens_k,
+                "high": highs_k,
+                "low": lows_k,
+                "close": mcaps_k,
+                "volume": volumes,
+            }
+        )
+        df.sort_values("date", inplace=True)
+
+        plt.style.use("dark_background")
+        fig, (ax1, ax2) = plt.subplots(
+            2,
+            1,
+            figsize=(12, 7.5),
+            gridspec_kw={"height_ratios": [3.2, 1]},
+            sharex=True,
+        )
+        fig.patch.set_facecolor("#090d16")
+        ax1.set_facecolor("#0d1322")
+        ax2.set_facecolor("#0d1322")
+
+        # 1. Plot Main Price / Market Cap Curve
+        ax1.plot(
+            df["date"],
+            df["close"],
+            color="#22c55e",
+            linewidth=2.2,
+            label="Market Cap ($k USD)",
+            zorder=3,
+        )
+        ax1.fill_between(
+            df["date"], df["close"], color="#22c55e", alpha=0.12, zorder=2
         )
 
-        mc = mpf.make_marketcolors(
-            up="#22c55e",
-            down="#ef4444",
-            edge="inherit",
-            wick="inherit",
-            volume={"up": "#22c55e", "down": "#ef4444"},
+        # Draw Candlestick wicks and bodies on top of line for key moves
+        for _, row in df.iterrows():
+            d = row["date"]
+            o = row["open"]
+            c = row["close"]
+            h = row["high"]
+            l_val = row["low"]
+            col = "#22c55e" if c >= o else "#ef4444"
+            ax1.vlines(d, l_val, h, color=col, linewidth=1.0, alpha=0.7, zorder=3)
+
+        # 2. Highlight ATH Peak
+        peak_idx = df["high"].idxmax()
+        peak_row = df.loc[peak_idx]
+        peak_val = peak_row["high"]
+        ax1.scatter(
+            [peak_row["date"]],
+            [peak_val],
+            color="#fbbf24",
+            s=90,
+            zorder=5,
+            edgecolor="#ffffff",
+            linewidth=1.5,
         )
-        style = mpf.make_mpf_style(
-            base_mpf_style="nightclouds",
-            marketcolors=mc,
-            facecolor="#090d16",
-            edgecolor="#1f2937",
-            gridcolor="#1e293b",
+        ax1.annotate(
+            f"ATH Peak: ${peak_val:.1f}k",
+            xy=(peak_row["date"], peak_val),
+            xytext=(0, 14),
+            textcoords="offset points",
+            ha="center",
+            color="#fbbf24",
+            fontsize=11,
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.25", fc="#1e293b", ec="#fbbf24", lw=1),
         )
 
-        mpf.plot(
-            df,
-            type="candle",
-            volume=True,
-            style=style,
-            title=f"Pump.fun 1s Financial Chart — {mint[:12]}...",
-            savefig=dict(fname=str(out), dpi=150, bbox_inches="tight"),
+        # 3. Detect and Annotate Big Red Dump / Rug
+        last_row = df.iloc[-1]
+        floor_val = last_row["close"]
+        if peak_val > floor_val * 2.5:
+            ax1.annotate(
+                f"[RUG DUMP] ➜ ${floor_val:.1f}k Floor",
+                xy=(last_row["date"], floor_val),
+                xytext=(-120, 25),
+                textcoords="offset points",
+                color="#ef4444",
+                fontsize=11,
+                fontweight="bold",
+                bbox=dict(
+                    boxstyle="round,pad=0.25", fc="#1e293b", ec="#ef4444", lw=1.2
+                ),
+                arrowprops=dict(arrowstyle="->", color="#ef4444", lw=2.2),
+            )
+
+        ax1.set_ylabel("Market Cap ($k USD)", color="#e2e8f0", fontsize=12, fontweight="600")
+        ax1.set_title(
+            f"Pump.fun On-Chain Financial Chart — {mint[:14]}... (ATH: ${peak_val:.1f}k | Floor: ${floor_val:.1f}k)",
+            color="#38bdf8",
+            fontsize=13,
+            fontweight="bold",
+            pad=14,
         )
+        ax1.grid(True, linestyle="--", alpha=0.2, color="#334155")
+        ax1.legend(loc="upper left", framealpha=0.3)
+
+        # 4. Volume Panel
+        vol_colors = [
+            "#22c55e" if c >= o else "#ef4444"
+            for o, c in zip(df["open"], df["close"], strict=False)
+        ]
+        ax2.bar(
+            df["date"],
+            df["volume"],
+            color=vol_colors,
+            width=0.0003,
+            alpha=0.85,
+            edgecolor=None,
+        )
+        ax2.set_ylabel("Volume (SOL)", color="#e2e8f0", fontsize=11, fontweight="600")
+        ax2.set_xlabel("Time (UTC)", color="#e2e8f0", fontsize=11, fontweight="600")
+        ax2.grid(True, linestyle="--", alpha=0.2, color="#334155")
+        ax2.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+
+        plt.tight_layout()
+        plt.savefig(str(out), dpi=150, facecolor=fig.get_facecolor(), edgecolor="none")
+        plt.close(fig)
         return out
     except Exception:
         return None

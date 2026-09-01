@@ -136,13 +136,13 @@ async def fetch_token_ohlc_candles(
             [b"bonding-curve", bytes(mint_pk)], pump_prog
         )
 
-        # Fetch signatures on bonding curve PDA
+        # Fetch signatures on bonding curve PDA across full lifecycle
         sig_resp = await client.post_rpc(
             {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "getSignaturesForAddress",
-                "params": [str(bonding_curve_pda), {"limit": 100}],
+                "params": [str(bonding_curve_pda), {"limit": 1000}],
             }
         )
 
@@ -150,8 +150,17 @@ async def fetch_token_ohlc_candles(
         if not raw_sigs:
             return []
 
+        # If more than 100 signatures, sample evenly across the lifecycle
+        if len(raw_sigs) > 100:
+            step = max(1, len(raw_sigs) // 100)
+            sampled_items = [raw_sigs[i] for i in range(0, len(raw_sigs), step)][:100]
+        else:
+            sampled_items = raw_sigs
+
         sigs = [
-            s["signature"] for s in raw_sigs if isinstance(s, dict) and "signature" in s
+            s["signature"]
+            for s in sampled_items
+            if isinstance(s, dict) and "signature" in s
         ]
 
         # Batch fetch parsed transactions concurrently
