@@ -99,21 +99,30 @@ def build_ohlc_candles(
                     )
                 )
     else:
-        # Sparse non-empty buckets
+        # Sparse non-empty buckets (Equal-width rendering)
+        curr_price = sorted_ticks[0].price
         for ts in sorted(buckets.keys()):
             b_ticks = buckets[ts]
             prices = [t.price for t in b_ticks]
             vol = sum(t.volume for t in b_ticks)
+
+            # Open at previous close to form contiguous visual bodies across time gaps
+            c_open = curr_price
+            c_close = prices[-1]
+            c_high = max(*prices, c_open, c_close)
+            c_low = min(*prices, c_open, c_close)
+
             candles.append(
                 OHLCCandle(
                     timestamp=ts,
-                    open=prices[0],
-                    high=max(prices),
-                    low=min(prices),
-                    close=prices[-1],
+                    open=c_open,
+                    high=c_high,
+                    low=c_low,
+                    close=c_close,
                     volume=round(vol, 6),
                 )
             )
+            curr_price = c_close
 
     return candles[-max_candles:]
 
@@ -154,15 +163,8 @@ async def fetch_token_ohlc_candles(
         # We must reverse to get chronological order from launch -> pump -> dump
         chronological_sigs = list(reversed(raw_sigs))
 
-        # If more than 100 signatures, sample evenly across the lifecycle
-        if len(chronological_sigs) > 100:
-            step = max(1, len(chronological_sigs) // 100)
-            sampled_items = [
-                chronological_sigs[i]
-                for i in range(0, len(chronological_sigs), step)
-            ][:100]
-        else:
-            sampled_items = chronological_sigs
+        # If more than 1000 signatures, we only take the most recent 1000 to avoid overloading
+        sampled_items = chronological_sigs[-1000:]
 
         sigs = [
             s["signature"]
@@ -170,27 +172,31 @@ async def fetch_token_ohlc_candles(
             if isinstance(s, dict) and "signature" in s
         ]
 
-        # Batch fetch parsed transactions concurrently
-        tasks = [
-            client.post_rpc(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getTransaction",
-                    "params": [
-                        sig,
-                        {
-                            "commitment": "finalized",
-                            "encoding": "json",
-                            "maxSupportedTransactionVersion": 0,
-                        },
-                    ],
-                }
-            )
-            for sig in sigs
-        ]
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Batch fetch parsed transactions concurrently in chunks of 100 to avoid rate limits
+        results = []
+        chunk_size = 100
+        for i in range(0, len(sigs), chunk_size):
+            chunk_sigs = sigs[i : i + chunk_size]
+            tasks = [
+                client.post_rpc(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "getTransaction",
+                        "params": [
+                            sig,
+                            {
+                                "commitment": "finalized",
+                                "encoding": "json",
+                                "maxSupportedTransactionVersion": 0,
+                            },
+                        ],
+                    }
+                )
+                for sig in chunk_sigs
+            ]
+            chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
+            results.extend(chunk_results)
 
         ticks: list[TradeTick] = []
         for sig, r in zip(sigs, results, strict=False):
@@ -211,9 +217,7 @@ async def fetch_token_ohlc_candles(
                             and raw[:8] == _TRADE_EVENT_DISCRIMINATOR
                         ):
                             sol_amt = struct.unpack_from("<Q", raw, 8 + 32)[0]
-                            tok_amt = struct.unpack_from("<Q", raw, 8 + 32 + 8)[
-                                0
-                            ]
+                            tok_amt = struct.unpack_from("<Q", raw, 8 + 32 + 8)[0]
                             is_buy = bool(raw[8 + 32 + 8 + 8])
                             if sol_amt > 0 and tok_amt > 0:
                                 price = (sol_amt / 1e9) / (tok_amt / 1e6)
