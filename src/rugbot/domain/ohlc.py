@@ -9,7 +9,6 @@ import struct
 import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Mapping
 
 from solders.pubkey import Pubkey
 
@@ -152,9 +151,7 @@ async def fetch_token_ohlc_candles(
             return []
 
         sigs = [
-            s["signature"]
-            for s in raw_sigs
-            if isinstance(s, dict) and "signature" in s
+            s["signature"] for s in raw_sigs if isinstance(s, dict) and "signature" in s
         ]
 
         # Batch fetch parsed transactions concurrently
@@ -198,9 +195,7 @@ async def fetch_token_ohlc_candles(
                             and raw[:8] == _TRADE_EVENT_DISCRIMINATOR
                         ):
                             sol_amt = struct.unpack_from("<Q", raw, 8 + 32)[0]
-                            tok_amt = struct.unpack_from("<Q", raw, 8 + 32 + 8)[
-                                0
-                            ]
+                            tok_amt = struct.unpack_from("<Q", raw, 8 + 32 + 8)[0]
                             is_buy = bool(raw[8 + 32 + 8 + 8])
                             if sol_amt > 0 and tok_amt > 0:
                                 price = (sol_amt / 1e9) / (tok_amt / 1e6)
@@ -225,9 +220,7 @@ async def fetch_token_ohlc_candles(
             )
 
     except Exception as exc:
-        logger.warning(
-            "Failed to extract on-chain ticks for OHLC: %s", exc
-        )
+        logger.warning("Failed to extract on-chain ticks for OHLC: %s", exc)
     finally:
         await client.close()
 
@@ -249,9 +242,7 @@ async def fetch_token_ohlc_candles(
                 if resp.status == 200:
                     data = json.loads(resp.read().decode())
                     raw_candles = (
-                        data.get("data", {})
-                        .get("attributes", {})
-                        .get("ohlcv_list", [])
+                        data.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
                     )
                     if raw_candles:
                         parsed: list[OHLCCandle] = []

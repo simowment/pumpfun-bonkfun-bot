@@ -79,6 +79,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--trailing", type=float, default=None, help="Trailing stop percentage"
     )
     buy_parser.add_argument(
+        "--max-hold",
+        type=float,
+        default=None,
+        help="Max holding duration in seconds before automated market exit",
+    )
+    buy_parser.add_argument(
         "--routing", choices=["auto", "rpc", "jito"], default="auto"
     )
     buy_parser.add_argument(
@@ -217,6 +223,7 @@ async def run_cli(args: argparse.Namespace) -> int:
             take_profit_pct=args.tp,
             stop_loss_pct=args.sl,
             trailing_stop_pct=args.trailing,
+            max_hold_seconds=args.max_hold,
         )
         print("=" * 60)
         print(" 🚀 PUMP.FUN UNIFIED ORDER: BUY")
@@ -233,6 +240,8 @@ async def run_cli(args: argparse.Namespace) -> int:
             print(f" Take Profit:     +{spec.take_profit_pct:.1f}%")
         if spec.stop_loss_pct:
             print(f" Stop Loss:       -{spec.stop_loss_pct:.1f}%")
+        if spec.max_hold_seconds:
+            print(f" Max Hold Time:   {spec.max_hold_seconds:.1f}s")
         print("-" * 60)
         print("[*] Fetching on-chain bonding curve & calculating CPMM quote...")
 

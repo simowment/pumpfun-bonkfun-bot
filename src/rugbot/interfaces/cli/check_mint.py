@@ -792,12 +792,19 @@ def main(argv: list[str] | None = None) -> int:
                 dex_name, dex_symbol = name2, symbol2
             except Exception:
                 pass
-        if mcap is not None and mcap > 0:
-            rugged = "NO" if mcap >= 5000 else "LIKELY (mcap < $5k)"
+        if market_hist.migrated:
+            rugged = "MIGRATED (PumpSwap)"
+        elif mcap is not None and mcap > 0:
+            if ath_mult is not None and ath_mult >= 2.2 and mcap < 5000:
+                rugged = "HARD RUG (Pumped & Dumped to Floor)"
+            elif ath_mult is not None and ath_mult < 1.3 and mcap < 5000:
+                rugged = "DEAD / FLOP (No Volume)"
+            elif mcap >= 15000:
+                rugged = "NO (Active Market)"
+            else:
+                rugged = "PVP / GRADUAL DECLINE"
         else:
             rugged = "N/A (fail-closed: mcap unavailable)"
-        if market_hist.migrated:
-            rugged += " · MIGRATED (PumpSwap)"
     except Exception:  # noqa: BLE001
         # final fallback to old path
         try:
@@ -806,7 +813,14 @@ def main(argv: list[str] | None = None) -> int:
             fdv = market_cap
             dex_ok = True
             if mcap is not None and mcap > 0:
-                rugged = "NO" if mcap >= 5000 else "LIKELY (mcap < $5k)"
+                if ath is not None and ath >= 2.2 and mcap < 5000:
+                    rugged = "HARD RUG (Pumped & Dumped to Floor)"
+                elif ath is not None and ath < 1.3 and mcap < 5000:
+                    rugged = "DEAD / FLOP (No Volume)"
+                elif mcap >= 15000:
+                    rugged = "NO (Active Market)"
+                else:
+                    rugged = "PVP / GRADUAL DECLINE"
             else:
                 rugged = "N/A (fail-closed: mcap=0)"
         except Exception:

@@ -63,6 +63,7 @@ class BuyOrderSpec:
     take_profit_pct: float | None = None
     stop_loss_pct: float | None = None
     trailing_stop_pct: float | None = None
+    max_hold_seconds: float | None = None
     creator: str | None = None
 
     def validate(self) -> None:
@@ -88,6 +89,8 @@ class BuyOrderSpec:
             raise ValueError("take_profit_pct must be positive")
         if self.stop_loss_pct is not None and self.stop_loss_pct <= 0.0:
             raise ValueError("stop_loss_pct must be positive")
+        if self.max_hold_seconds is not None and self.max_hold_seconds <= 0.0:
+            raise ValueError("max_hold_seconds must be positive")
 
     @property
     def quote_lamports(self) -> int:
@@ -215,6 +218,7 @@ class ActivePosition:
     take_profit_pct: float | None = None
     stop_loss_pct: float | None = None
     trailing_stop_pct: float | None = None
+    max_hold_seconds: float | None = None
     peak_price_sol: float = 0.0
     current_pnl_pct: float = 0.0
     current_value_sol: float = 0.0
@@ -269,6 +273,7 @@ class TradingService:
                         take_profit_pct REAL,
                         stop_loss_pct REAL,
                         trailing_stop_pct REAL,
+                        max_hold_seconds REAL,
                         peak_price_sol REAL NOT NULL,
                         current_pnl_pct REAL NOT NULL,
                         current_value_sol REAL NOT NULL,
@@ -276,6 +281,13 @@ class TradingService:
                         opened_at_ts REAL NOT NULL
                     )
                 """)
+                # Alter table migration check
+                try:
+                    conn.execute(
+                        "ALTER TABLE active_positions ADD COLUMN max_hold_seconds REAL"
+                    )
+                except Exception:
+                    pass
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS closed_trades (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -300,6 +312,10 @@ class TradingService:
             with sqlite3.connect(str(self._db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 for row in conn.execute("SELECT * FROM active_positions"):
+                    keys = row.keys()
+                    max_hold = (
+                        row["max_hold_seconds"] if "max_hold_seconds" in keys else None
+                    )
                     pos = ActivePosition(
                         mint=row["mint"],
                         entry_sol=row["entry_sol"],
@@ -311,6 +327,7 @@ class TradingService:
                         take_profit_pct=row["take_profit_pct"],
                         stop_loss_pct=row["stop_loss_pct"],
                         trailing_stop_pct=row["trailing_stop_pct"],
+                        max_hold_seconds=max_hold,
                         peak_price_sol=row["peak_price_sol"],
                         current_pnl_pct=row["current_pnl_pct"],
                         current_value_sol=row["current_value_sol"],
@@ -332,9 +349,9 @@ class TradingService:
                     INSERT OR REPLACE INTO active_positions (
                         mint, entry_sol, entry_fees_sol, token_amount, entry_price_sol,
                         entry_slot, mode, take_profit_pct, stop_loss_pct, trailing_stop_pct,
-                        peak_price_sol, current_pnl_pct, current_value_sol, unrealized_pnl_sol,
-                        opened_at_ts
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        max_hold_seconds, peak_price_sol, current_pnl_pct, current_value_sol,
+                        unrealized_pnl_sol, opened_at_ts
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         pos.mint,
@@ -347,6 +364,7 @@ class TradingService:
                         pos.take_profit_pct,
                         pos.stop_loss_pct,
                         pos.trailing_stop_pct,
+                        pos.max_hold_seconds,
                         pos.peak_price_sol,
                         pos.current_pnl_pct,
                         pos.current_value_sol,
@@ -609,6 +627,7 @@ class TradingService:
                     take_profit_pct=spec.take_profit_pct,
                     stop_loss_pct=spec.stop_loss_pct,
                     trailing_stop_pct=spec.trailing_stop_pct,
+                    max_hold_seconds=spec.max_hold_seconds,
                     peak_price_sol=price,
                     current_pnl_pct=0.0,
                     current_value_sol=sol,
@@ -930,6 +949,21 @@ class TradingService:
                                 )
                                 triggered_trades.append(sell_res)
                                 continue
+
+                        # Check Max-Hold Timeout Trigger
+                        elapsed_s = time.time() - pos.opened_at_ts
+                        if pos.max_hold_seconds and elapsed_s >= pos.max_hold_seconds:
+                            logger.info(
+                                "MAX-HOLD TIMEOUT reached for %s (%.1fs elapsed >= %.1fs limit). Triggering automated exit.",
+                                pos.mint,
+                                elapsed_s,
+                                pos.max_hold_seconds,
+                            )
+                            sell_res = await self.sell(
+                                pos.mint, percent=100.0, mode=pos.mode
+                            )
+                            triggered_trades.append(sell_res)
+                            continue
                 finally:
                     await port.close()
             except Exception as exc:

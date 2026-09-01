@@ -285,9 +285,9 @@ def export_vectorbt_ohlc_report(
         return out
 
     dates = [
-        datetime.datetime.fromtimestamp(
-            c.timestamp, tz=datetime.timezone.utc
-        ).strftime("%Y-%m-%d %H:%M:%S")
+        datetime.datetime.fromtimestamp(c.timestamp, tz=datetime.UTC).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
         for c in candles
     ]
     opens = [c.open for c in candles]
@@ -404,7 +404,11 @@ def export_vectorbt_ohlc_report(
 
     # 4. Cumulative Equity
     equities = [r.cumulative_equity_sol for r in records] if records else [0.0]
-    eq_x = dates[: len(records)] if len(dates) >= len(records) else [f"T#{r.trade_index}" for r in records]
+    eq_x = (
+        dates[: len(records)]
+        if len(dates) >= len(records)
+        else [f"T#{r.trade_index}" for r in records]
+    )
     fig.add_trace(
         go.Scatter(
             x=eq_x,
@@ -461,6 +465,7 @@ def export_mplfinance_png_chart(
 ) -> Path | None:
     """Export a high-resolution PNG candlestick chart using mplfinance."""
     import datetime
+
     import mplfinance as mpf
     import pandas as pd
 
@@ -473,7 +478,7 @@ def export_mplfinance_png_chart(
     try:
         # Construct Pandas DataFrame for mplfinance
         dates = [
-            datetime.datetime.fromtimestamp(c.timestamp, tz=datetime.timezone.utc)
+            datetime.datetime.fromtimestamp(c.timestamp, tz=datetime.UTC)
             for c in candles
         ]
         df = pd.DataFrame(
@@ -529,7 +534,9 @@ def export_tradingview_html_report(
     out.parent.mkdir(parents=True, exist_ok=True)
 
     if not candles:
-        out.write_text("<html><body><h2>No OHLC data</h2></body></html>", encoding="utf-8")
+        out.write_text(
+            "<html><body><h2>No OHLC data</h2></body></html>", encoding="utf-8"
+        )
         return out
 
     candle_data = [
