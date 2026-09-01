@@ -150,12 +150,19 @@ async def fetch_token_ohlc_candles(
         if not raw_sigs:
             return []
 
+        # Signatures from getSignaturesForAddress are returned in REVERSE chronological order (newest first).
+        # We must reverse to get chronological order from launch -> pump -> dump
+        chronological_sigs = list(reversed(raw_sigs))
+
         # If more than 100 signatures, sample evenly across the lifecycle
-        if len(raw_sigs) > 100:
-            step = max(1, len(raw_sigs) // 100)
-            sampled_items = [raw_sigs[i] for i in range(0, len(raw_sigs), step)][:100]
+        if len(chronological_sigs) > 100:
+            step = max(1, len(chronological_sigs) // 100)
+            sampled_items = [
+                chronological_sigs[i]
+                for i in range(0, len(chronological_sigs), step)
+            ][:100]
         else:
-            sampled_items = raw_sigs
+            sampled_items = chronological_sigs
 
         sigs = [
             s["signature"]
@@ -204,7 +211,9 @@ async def fetch_token_ohlc_candles(
                             and raw[:8] == _TRADE_EVENT_DISCRIMINATOR
                         ):
                             sol_amt = struct.unpack_from("<Q", raw, 8 + 32)[0]
-                            tok_amt = struct.unpack_from("<Q", raw, 8 + 32 + 8)[0]
+                            tok_amt = struct.unpack_from("<Q", raw, 8 + 32 + 8)[
+                                0
+                            ]
                             is_buy = bool(raw[8 + 32 + 8 + 8])
                             if sol_amt > 0 and tok_amt > 0:
                                 price = (sol_amt / 1e9) / (tok_amt / 1e6)
@@ -221,11 +230,13 @@ async def fetch_token_ohlc_candles(
                         continue
 
         if ticks:
+            # Sort chronologically so Open is pre-dump and Close is post-dump
+            ticks.sort(key=lambda t: t.timestamp)
             return build_ohlc_candles(
                 ticks,
                 timeframe_seconds=timeframe_seconds,
                 max_candles=max_candles,
-                fill_empty=True,
+                fill_empty=False,
             )
 
     except Exception as exc:

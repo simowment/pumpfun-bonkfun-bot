@@ -463,12 +463,11 @@ def export_mplfinance_png_chart(
     records: list[TradePerformanceRecord],
     output_path: Path | str,
 ) -> Path | None:
-    """Export a high-resolution PNG financial chart with human-readable Market Cap in USD ($k)."""
+    """Export a high-resolution real OHLC candlestick chart with human-readable Market Cap in USD ($k) and equal-width bars."""
     import datetime
 
-    import matplotlib.dates as mdates
+    import matplotlib.patches as patches
     import matplotlib.pyplot as plt
-    import pandas as pd
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -477,39 +476,52 @@ def export_mplfinance_png_chart(
         return None
 
     try:
-        # Approximate SOL/USD rate for clean market cap scaling
         sol_usd = 145.0
         total_supply = 1_000_000_000.0
 
-        dates = [
-            datetime.datetime.fromtimestamp(c.timestamp, tz=datetime.UTC)
-            for c in candles
-        ]
-        mcaps_k = [
-            (c.close * total_supply * sol_usd) / 1000.0 for c in candles
-        ]
-        highs_k = [(c.high * total_supply * sol_usd) / 1000.0 for c in candles]
-        lows_k = [(c.low * total_supply * sol_usd) / 1000.0 for c in candles]
-        opens_k = [(c.open * total_supply * sol_usd) / 1000.0 for c in candles]
-        volumes = [c.volume for c in candles]
+        # Filter out trailing redundant flatline candles after the rug to keep active trading focused
+        # Find where the rug occurred
+        raw_mcaps = [(c.close * total_supply * sol_usd) / 1000.0 for c in candles]
+        peak_idx = 0
+        max_val = 0.0
+        for i, val in enumerate(raw_mcaps):
+            if val > max_val:
+                max_val = val
+                peak_idx = i
 
-        df = pd.DataFrame(
-            {
-                "date": dates,
-                "open": opens_k,
-                "high": highs_k,
-                "low": lows_k,
-                "close": mcaps_k,
-                "volume": volumes,
-            }
-        )
-        df.sort_values("date", inplace=True)
+        # Find the dump candle after the peak
+        dump_idx = peak_idx
+        max_drop = 0.0
+        for i in range(peak_idx, len(candles)):
+            c_open = (candles[i].open * total_supply * sol_usd) / 1000.0
+            c_close = (candles[i].close * total_supply * sol_usd) / 1000.0
+            drop = c_open - c_close
+            if drop > max_drop:
+                max_drop = drop
+                dump_idx = i
+
+        # Slice candles to keep active run + up to 10 candles after the dump
+        cutoff_idx = min(len(candles), dump_idx + 10)
+        active_candles = candles[:cutoff_idx] if len(candles) > 15 else candles
+
+        n = len(active_candles)
+        indices = list(range(n))
+
+        opens_k = [(c.open * total_supply * sol_usd) / 1000.0 for c in active_candles]
+        highs_k = [(c.high * total_supply * sol_usd) / 1000.0 for c in active_candles]
+        lows_k = [(c.low * total_supply * sol_usd) / 1000.0 for c in active_candles]
+        closes_k = [(c.close * total_supply * sol_usd) / 1000.0 for c in active_candles]
+        volumes = [c.volume for c in active_candles]
+        time_labels = [
+            datetime.datetime.fromtimestamp(c.timestamp, tz=datetime.UTC).strftime("%H:%M:%S")
+            for c in active_candles
+        ]
 
         plt.style.use("dark_background")
         fig, (ax1, ax2) = plt.subplots(
             2,
             1,
-            figsize=(12, 7.5),
+            figsize=(13, 8),
             gridspec_kw={"height_ratios": [3.2, 1]},
             sharex=True,
         )
@@ -517,100 +529,119 @@ def export_mplfinance_png_chart(
         ax1.set_facecolor("#0d1322")
         ax2.set_facecolor("#0d1322")
 
-        # 1. Plot Main Price / Market Cap Curve
-        ax1.plot(
-            df["date"],
-            df["close"],
-            color="#22c55e",
-            linewidth=2.2,
-            label="Market Cap ($k USD)",
-            zorder=3,
-        )
-        ax1.fill_between(
-            df["date"], df["close"], color="#22c55e", alpha=0.12, zorder=2
-        )
+        # 1. Draw Real OHLC Candlesticks
+        width = 0.6
+        for i in range(n):
+            o = opens_k[i]
+            c = closes_k[i]
+            h = highs_k[i]
+            l_val = lows_k[i]
+            is_green = c >= o
+            color = "#22c55e" if is_green else "#ef4444"
 
-        # Draw Candlestick wicks and bodies on top of line for key moves
-        for _, row in df.iterrows():
-            d = row["date"]
-            o = row["open"]
-            c = row["close"]
-            h = row["high"]
-            l_val = row["low"]
-            col = "#22c55e" if c >= o else "#ef4444"
-            ax1.vlines(d, l_val, h, color=col, linewidth=1.0, alpha=0.7, zorder=3)
+            # Draw Wick line (Low to High)
+            ax1.vlines(i, l_val, h, color=color, linewidth=1.2, zorder=3)
+
+            # Draw Candle Body
+            body_bottom = min(o, c)
+            body_height = max(abs(c - o), 0.15)  # min height for visibility
+            rect = patches.Rectangle(
+                (i - width / 2, body_bottom),
+                width,
+                body_height,
+                facecolor=color,
+                edgecolor=color,
+                linewidth=1,
+                zorder=4,
+            )
+            ax1.add_patch(rect)
 
         # 2. Highlight ATH Peak
-        peak_idx = df["high"].idxmax()
-        peak_row = df.loc[peak_idx]
-        peak_val = peak_row["high"]
+        peak_i = min(peak_idx, n - 1)
+        peak_val = highs_k[peak_i]
         ax1.scatter(
-            [peak_row["date"]],
+            [peak_i],
             [peak_val],
             color="#fbbf24",
-            s=90,
-            zorder=5,
+            s=100,
+            zorder=6,
             edgecolor="#ffffff",
             linewidth=1.5,
         )
         ax1.annotate(
             f"ATH Peak: ${peak_val:.1f}k",
-            xy=(peak_row["date"], peak_val),
-            xytext=(0, 14),
+            xy=(peak_i, peak_val),
+            xytext=(0, 15),
             textcoords="offset points",
             ha="center",
             color="#fbbf24",
             fontsize=11,
             fontweight="bold",
-            bbox=dict(boxstyle="round,pad=0.25", fc="#1e293b", ec="#fbbf24", lw=1),
+            bbox=dict(boxstyle="round,pad=0.3", fc="#1e293b", ec="#fbbf24", lw=1.2),
         )
 
-        # 3. Detect and Annotate Big Red Dump / Rug
-        last_row = df.iloc[-1]
-        floor_val = last_row["close"]
-        if peak_val > floor_val * 2.5:
+        # 3. Highlight the EXACT Dump Candle
+        target_dump_i = min(dump_idx, n - 1)
+        dump_open = opens_k[target_dump_i]
+        dump_close = closes_k[target_dump_i]
+        drop_pct = ((dump_open - dump_close) / max(dump_open, 0.01)) * 100.0
+
+        if drop_pct >= 40.0:
             ax1.annotate(
-                f"[RUG DUMP] ➜ ${floor_val:.1f}k Floor",
-                xy=(last_row["date"], floor_val),
-                xytext=(-120, 25),
+                f"[HARD RUG DUMP] -{drop_pct:.0f}% ➜ ${dump_close:.1f}k",
+                xy=(target_dump_i, dump_close),
+                xytext=(-150, 45),
                 textcoords="offset points",
                 color="#ef4444",
                 fontsize=11,
                 fontweight="bold",
                 bbox=dict(
-                    boxstyle="round,pad=0.25", fc="#1e293b", ec="#ef4444", lw=1.2
+                    boxstyle="round,pad=0.35", fc="#1e293b", ec="#ef4444", lw=1.5
                 ),
-                arrowprops=dict(arrowstyle="->", color="#ef4444", lw=2.2),
+                arrowprops=dict(
+                    arrowstyle="->",
+                    color="#ef4444",
+                    lw=2.5,
+                    connectionstyle="arc3,rad=0.15",
+                ),
             )
 
         ax1.set_ylabel("Market Cap ($k USD)", color="#e2e8f0", fontsize=12, fontweight="600")
         ax1.set_title(
-            f"Pump.fun On-Chain Financial Chart — {mint[:14]}... (ATH: ${peak_val:.1f}k | Floor: ${floor_val:.1f}k)",
+            f"Pump.fun Real 1s OHLC Candlestick Chart — {mint[:14]}... (ATH: ${peak_val:.1f}k | Floor: ${closes_k[-1]:.1f}k)",
             color="#38bdf8",
             fontsize=13,
             fontweight="bold",
             pad=14,
         )
+        ax1.set_xlim(-1, n)
+        ax1.set_ylim(bottom=0, top=peak_val * 1.18)
         ax1.grid(True, linestyle="--", alpha=0.2, color="#334155")
-        ax1.legend(loc="upper left", framealpha=0.3)
 
-        # 4. Volume Panel
+        # 4. Volume Panel (Equal-width bars)
         vol_colors = [
             "#22c55e" if c >= o else "#ef4444"
-            for o, c in zip(df["open"], df["close"], strict=False)
+            for o, c in zip(opens_k, closes_k, strict=False)
         ]
         ax2.bar(
-            df["date"],
-            df["volume"],
+            indices,
+            volumes,
             color=vol_colors,
-            width=0.0003,
+            width=width,
             alpha=0.85,
             edgecolor=None,
         )
         ax2.set_ylabel("Volume (SOL)", color="#e2e8f0", fontsize=11, fontweight="600")
         ax2.set_xlabel("Time (UTC)", color="#e2e8f0", fontsize=11, fontweight="600")
         ax2.grid(True, linestyle="--", alpha=0.2, color="#334155")
-        ax2.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+
+        # X-Ticks evenly spaced across candles
+        step = max(1, n // 8)
+        tick_locs = list(range(0, n, step))
+        if (n - 1) not in tick_locs:
+            tick_locs.append(n - 1)
+        ax2.set_xticks(tick_locs)
+        ax2.set_xticklabels([time_labels[i] for i in tick_locs], rotation=30, ha="right")
 
         plt.tight_layout()
         plt.savefig(str(out), dpi=150, facecolor=fig.get_facecolor(), edgecolor="none")
