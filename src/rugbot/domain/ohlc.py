@@ -23,6 +23,15 @@ _TRADE_EVENT_DISCRIMINATOR = bytes([189, 219, 127, 211, 78, 230, 97, 238])
 HTTP_OK = 200
 GECKOTERMINAL_OHLCV_FIELDS = 6
 SECONDS_PER_MINUTE = 60
+TIMEFRAME_1S = 1
+TIMEFRAME_15S = 15
+TIMEFRAME_30S = 30
+TIMEFRAME_1M = 60
+TIMEFRAME_5M = 300
+TIMEFRAME_15M = 900
+TIMEFRAME_30M = 1800
+TIMEFRAME_1H = 3600
+MS_TIMESTAMP_THRESHOLD = 100_000_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,61 +147,73 @@ async def fetch_token_ohlc_candles(
 ) -> list[OHLCCandle]:
     """Fetch OHLCV candles for a Pump.fun token.
 
-    Primary source: Pump.fun REST API (/candlesticks/{mint}) — requires a wallet
-    key for JWT auth.  Falls back to on-chain RPC decode when the API is
-    unavailable or no signing key is configured.
-
-    Note: the Pump.fun API exposes candlesticks in minute-level granularity
-    (minimum 1-minute timeframe).  Sub-minute (1-second) timeframes always use
-    the RPC decode path.
+    Primary source: Pump.fun swap API (/v2/coins/{mint}/candles) supporting
+    native intervals (1s, 15s, 30s, 1m, 5m, 15m, 30m, 1h).
+    Falls back to on-chain RPC decode when API is unavailable.
     """
     resolve_dotenv(include_signing=True)
 
-    # --- Primary: Pump.fun API (1-minute minimum granularity) ---
-    timeframe_minutes = max(1, timeframe_seconds // SECONDS_PER_MINUTE)
-    use_api = (
-        timeframe_seconds >= SECONDS_PER_MINUTE
-    )  # API only covers ≥1-minute candles
+    # Map timeframe_seconds to Pump.fun API interval string
+    if timeframe_seconds <= TIMEFRAME_1S:
+        interval = "1s"
+    elif timeframe_seconds <= TIMEFRAME_15S:
+        interval = "15s"
+    elif timeframe_seconds <= TIMEFRAME_30S:
+        interval = "30s"
+    elif timeframe_seconds <= TIMEFRAME_1M:
+        interval = "1m"
+    elif timeframe_seconds <= TIMEFRAME_5M:
+        interval = "5m"
+    elif timeframe_seconds <= TIMEFRAME_15M:
+        interval = "15m"
+    elif timeframe_seconds <= TIMEFRAME_30M:
+        interval = "30m"
+    elif timeframe_seconds <= TIMEFRAME_1H:
+        interval = "1h"
+    else:
+        interval = "1m"
 
-    if use_api:
-        try:
-            from rugbot.integrations.pumpfun_api import get_client
+    try:
+        from rugbot.integrations.pumpfun_api import get_client
 
-            client = get_client()
-            raw = client.fetch_candlesticks(
-                mint,
-                timeframe_minutes=timeframe_minutes,
-                limit=max_candles,
-            )
-            if raw:
-                candles = [
-                    OHLCCandle(
-                        timestamp=int(c["timestamp"]),
-                        open=float(c["open"]),
-                        high=float(c["high"]),
-                        low=float(c["low"]),
-                        close=float(c["close"]),
-                        volume=float(c["volume"]),
+        client = get_client()
+        raw = client.fetch_candlesticks(
+            mint,
+            interval=interval,
+            limit=max_candles,
+        )
+        if raw:
+            candles = []
+            for c in raw:
+                if all(
+                    k in c
+                    for k in ("timestamp", "open", "high", "low", "close", "volume")
+                ):
+                    raw_ts = int(c["timestamp"])
+                    ts = raw_ts // 1000 if raw_ts > MS_TIMESTAMP_THRESHOLD else raw_ts
+                    candles.append(
+                        OHLCCandle(
+                            timestamp=ts,
+                            open=float(c["open"]),
+                            high=float(c["high"]),
+                            low=float(c["low"]),
+                            close=float(c["close"]),
+                            volume=float(c["volume"]),
+                        )
                     )
-                    for c in raw
-                    if all(
-                        k in c
-                        for k in ("timestamp", "open", "high", "low", "close", "volume")
-                    )
-                ]
-                if candles:
-                    candles.sort(key=lambda c: c.timestamp)
-                    logger.debug(
-                        "Pump.fun API: fetched %d %dm candles for %s",
-                        len(candles),
-                        timeframe_minutes,
-                        mint[:8],
-                    )
-                    return candles[-max_candles:]
-        except Exception as exc:
-            logger.warning(
-                "Pump.fun API candlestick fetch failed, falling back to RPC: %s", exc
-            )
+            if candles:
+                candles.sort(key=lambda c: c.timestamp)
+                logger.debug(
+                    "Pump.fun API: fetched %d %s candles for %s",
+                    len(candles),
+                    interval,
+                    mint[:8],
+                )
+                return candles[-max_candles:]
+    except Exception as exc:
+        logger.warning(
+            "Pump.fun API candlestick fetch failed, falling back to RPC: %s", exc
+        )
 
     # --- Fallback: on-chain RPC decode (supports any timeframe, incl. 1s) ---
     settings = load_provider_settings()
