@@ -20,6 +20,9 @@ logger = get_logger(__name__)
 
 PUMP_PROGRAM_ID_STR = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 _TRADE_EVENT_DISCRIMINATOR = bytes([189, 219, 127, 211, 78, 230, 97, 238])
+HTTP_OK = 200
+GECKOTERMINAL_OHLCV_FIELDS = 6
+SECONDS_PER_MINUTE = 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,10 +136,67 @@ async def fetch_token_ohlc_candles(
     timeframe_seconds: int = 1,
     max_candles: int = 300,
 ) -> list[OHLCCandle]:
-    """Fetch exact on-chain trade ticks and aggregate into 1-second (or custom) OHLCV candles."""
-    resolve_dotenv()
+    """Fetch OHLCV candles for a Pump.fun token.
+
+    Primary source: Pump.fun REST API (/candlesticks/{mint}) — requires a wallet
+    key for JWT auth.  Falls back to on-chain RPC decode when the API is
+    unavailable or no signing key is configured.
+
+    Note: the Pump.fun API exposes candlesticks in minute-level granularity
+    (minimum 1-minute timeframe).  Sub-minute (1-second) timeframes always use
+    the RPC decode path.
+    """
+    resolve_dotenv(include_signing=True)
+
+    # --- Primary: Pump.fun API (1-minute minimum granularity) ---
+    timeframe_minutes = max(1, timeframe_seconds // SECONDS_PER_MINUTE)
+    use_api = (
+        timeframe_seconds >= SECONDS_PER_MINUTE
+    )  # API only covers ≥1-minute candles
+
+    if use_api:
+        try:
+            from rugbot.integrations.pumpfun_api import get_client
+
+            client = get_client()
+            raw = client.fetch_candlesticks(
+                mint,
+                timeframe_minutes=timeframe_minutes,
+                limit=max_candles,
+            )
+            if raw:
+                candles = [
+                    OHLCCandle(
+                        timestamp=int(c["timestamp"]),
+                        open=float(c["open"]),
+                        high=float(c["high"]),
+                        low=float(c["low"]),
+                        close=float(c["close"]),
+                        volume=float(c["volume"]),
+                    )
+                    for c in raw
+                    if all(
+                        k in c
+                        for k in ("timestamp", "open", "high", "low", "close", "volume")
+                    )
+                ]
+                if candles:
+                    candles.sort(key=lambda c: c.timestamp)
+                    logger.debug(
+                        "Pump.fun API: fetched %d %dm candles for %s",
+                        len(candles),
+                        timeframe_minutes,
+                        mint[:8],
+                    )
+                    return candles[-max_candles:]
+        except Exception as exc:
+            logger.warning(
+                "Pump.fun API candlestick fetch failed, falling back to RPC: %s", exc
+            )
+
+    # --- Fallback: on-chain RPC decode (supports any timeframe, incl. 1s) ---
     settings = load_provider_settings()
-    client = SolanaClient(settings.rpc_http)
+    rpc_client = SolanaClient(settings.rpc_http)
 
     try:
         mint_pk = Pubkey.from_string(mint.strip())
@@ -145,8 +205,7 @@ async def fetch_token_ohlc_candles(
             [b"bonding-curve", bytes(mint_pk)], pump_prog
         )
 
-        # Fetch signatures on bonding curve PDA across full lifecycle
-        sig_resp = await client.post_rpc(
+        sig_resp = await rpc_client.post_rpc(
             {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -159,26 +218,22 @@ async def fetch_token_ohlc_candles(
         if not raw_sigs:
             return []
 
-        # Signatures from getSignaturesForAddress are returned in REVERSE chronological order (newest first).
-        # We must reverse to get chronological order from launch -> pump -> dump
+        # Reverse to chronological order (API returns newest-first)
         chronological_sigs = list(reversed(raw_sigs))
-
-        # If more than 1000 signatures, we only take the most recent 1000 to avoid overloading
         sampled_items = chronological_sigs[-1000:]
-
         sigs = [
             s["signature"]
             for s in sampled_items
             if isinstance(s, dict) and "signature" in s
         ]
 
-        # Batch fetch parsed transactions concurrently in chunks of 100 to avoid rate limits
-        results = []
+        # Batch fetch concurrently in chunks of 100
+        results: list = []
         chunk_size = 100
         for i in range(0, len(sigs), chunk_size):
             chunk_sigs = sigs[i : i + chunk_size]
             tasks = [
-                client.post_rpc(
+                rpc_client.post_rpc(
                     {
                         "jsonrpc": "2.0",
                         "id": 1,
@@ -206,9 +261,7 @@ async def fetch_token_ohlc_candles(
             bt = res.get("blockTime")
             if not bt:
                 continue
-
-            logs = res.get("meta", {}).get("logMessages", [])
-            for log in logs:
+            for log in res.get("meta", {}).get("logMessages", []):
                 if log.startswith("Program data: "):
                     try:
                         raw = base64.b64decode(log[14:])
@@ -234,7 +287,6 @@ async def fetch_token_ohlc_candles(
                         continue
 
         if ticks:
-            # Sort chronologically so Open is pre-dump and Close is post-dump
             ticks.sort(key=lambda t: t.timestamp)
             return build_ohlc_candles(
                 ticks,
@@ -244,17 +296,20 @@ async def fetch_token_ohlc_candles(
             )
 
     except Exception as exc:
-        logger.warning("Failed to extract on-chain ticks for OHLC: %s", exc)
+        logger.warning("RPC OHLC decode failed: %s", exc)
     finally:
-        await client.close()
+        await rpc_client.close()
 
-    # Fallback to GeckoTerminal OHLCV if pool exists
+    # --- Last resort: GeckoTerminal (graduated tokens only) ---
     try:
         from rugbot.intelligence.token_resolver import _resolve_pair_address
 
         pair = _resolve_pair_address(mint)
         if pair:
-            url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair}/ohlcv/minute?aggregate=1&limit={max_candles}"
+            url = (
+                f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair}"
+                f"/ohlcv/minute?aggregate=1&limit={max_candles}"
+            )
             req = urllib.request.Request(
                 url,
                 headers={
@@ -262,26 +317,26 @@ async def fetch_token_ohlc_candles(
                     "Accept": "application/json",
                 },
             )
-            with urllib.request.urlopen(req, timeout=4) as resp:
-                if resp.status == 200:
+            with urllib.request.urlopen(req, timeout=4) as resp:  # noqa: S310
+                if resp.status == HTTP_OK:
                     data = json.loads(resp.read().decode())
                     raw_candles = (
                         data.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
                     )
                     if raw_candles:
-                        parsed: list[OHLCCandle] = []
-                        for c in raw_candles:
-                            if isinstance(c, list) and len(c) >= 6:
-                                parsed.append(
-                                    OHLCCandle(
-                                        timestamp=int(c[0]),
-                                        open=float(c[1]),
-                                        high=float(c[2]),
-                                        low=float(c[3]),
-                                        close=float(c[4]),
-                                        volume=float(c[5]),
-                                    )
-                                )
+                        parsed: list[OHLCCandle] = [
+                            OHLCCandle(
+                                timestamp=int(c[0]),
+                                open=float(c[1]),
+                                high=float(c[2]),
+                                low=float(c[3]),
+                                close=float(c[4]),
+                                volume=float(c[5]),
+                            )
+                            for c in raw_candles
+                            if isinstance(c, list)
+                            and len(c) >= GECKOTERMINAL_OHLCV_FIELDS
+                        ]
                         if parsed:
                             parsed.sort(key=lambda x: x.timestamp)
                             return parsed[-max_candles:]
