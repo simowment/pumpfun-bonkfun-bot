@@ -1,13 +1,12 @@
 """Unified CLI to systematically discover cluster tokens, analyze operator patterns, and run Bible backtests."""
 
-# ruff: noqa: C901, PLR0912, PLR0915, BLE001, ANN401, PLR2004, PTH103, PTH120, RUF059
+# ruff: noqa: C901, PLR0912, PLR0915, BLE001, ANN401, PLR2004, RUF059
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
-import os
 import sys
 import time
 from datetime import UTC, datetime
@@ -23,7 +22,12 @@ from rugbot.intelligence.token_resolver import (
     fetch_token_metadata,
     resolve_token_or_wallet,
 )
-from rugbot.runtime.config import load_provider_settings, resolve_dotenv
+from rugbot.runtime.config import (
+    TrackerDbPathError,
+    load_provider_settings,
+    resolve_dotenv,
+    resolve_tracker_db_path,
+)
 from rugbot.storage.database import DatabaseManager
 from rugbot.storage.tracker import SQLiteTrackerRepository
 from rugbot.tracker.models import (
@@ -306,11 +310,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     # 5. Handle Enrollment if requested
     enrolled = False
     if args.enroll and backtest.is_bible_qualified:
-        db_path = os.environ.get(
-            "RUGBOT_DB_PATH",
-            r"C:\Users\got\Documents\code\pumpfun-bonkfun-bot\data\tracker.db",
-        )
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        try:
+            db_path = resolve_tracker_db_path()
+        except TrackerDbPathError as error:
+            print(f"Error: {error}", file=sys.stderr)
+            return 1
         repo = SQLiteTrackerRepository(DatabaseManager(db_path))
         now_iso = datetime.now(UTC).isoformat()
 
@@ -453,10 +457,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         f" 📊 BIBLE BACKTEST OPTIMIZER ({backtest.total_tokens_evaluated} Launches Evaluated):"
     )
     print(
-        f"   • Optimal Take-Profit:  {backtest.optimal_tp_label} ({backtest.optimal_tp_multiplier}x)"
+        "   • Optimal Take-Profit:  "
+        + (
+            f"{backtest.optimal_tp_label} (x{backtest.optimal_tp_multiplier:.2f})"
+            if backtest.optimal_tp_multiplier is not None
+            else f"{backtest.optimal_tp_label} (no profitable target)"
+        )
+    )
+    optimal_eval = backtest.optimal_evaluation
+    print(
+        "   • Historical Win Rate:  "
+        + (
+            f"{optimal_eval.winrate_pct:.1f}%"
+            if optimal_eval is not None
+            else "unmeasured (no profitable TP row)"
+        )
     )
     print(f"   • Net Simulated ROI:    {backtest.optimal_roi_pct:+.1f}%")
     print(f"   • Expected Value (EV):  {backtest.optimal_net_ev_sol:+.4f} SOL / trade")
+    print(
+        "   • Fee Breakdown:        "
+        f"{backtest.jito_tip_sol:.4f} SOL Jito tip · "
+        f"{backtest.gas_fee_sol:.4f} SOL gas/priority · "
+        f"{backtest.dex_fee_pct:.2f}% DEX per leg"
+    )
+    print(
+        "   • Total Fees Deducted:  "
+        + (
+            f"{optimal_eval.total_fees_paid_sol:.4f} SOL"
+            if optimal_eval is not None
+            else "unmeasured (no profitable TP row)"
+        )
+    )
     print(
         f"   • Bible Qualified:      {'✅ YES' if backtest.is_bible_qualified else '❌ NO'} ({backtest.qualification_reason})"
     )

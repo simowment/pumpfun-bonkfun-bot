@@ -2,7 +2,7 @@
 
 # The boundary is intentionally explicit: malformed finalized evidence must
 # abstain at the exact field that cannot be proven.
-# ruff: noqa: C901, PLR0911, PLR0912, PLR0913, PLR2004
+# ruff: noqa: C901, PLR0911, PLR0912, PLR0913
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from struct import unpack_from
 
 import base58
 
@@ -21,42 +20,15 @@ from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.observations import RawChainObservation
 from rugbot.domain.trades import (
     PumpSwapTradeInstructionEvidence,
+    PumpTradeEventProof,
     PumpTradeInstructionEvidence,
     TradeSide,
 )
+from rugbot.ingest.pump.swap_event_decoder import EventReader
 from rugbot.storage.jsonl_observation_store import observation_identity
 
 TRADE_EVENT_DISCRIMINATOR = bytes([189, 219, 127, 211, 78, 230, 97, 238])
-
-
-@dataclass(frozen=True, slots=True)
-class PumpTradeEventProof:
-    """Executed amounts and fees decoded from one finalized Pump event."""
-
-    mint: str
-    user: str
-    sol_amount_base_units: int
-    token_amount_base_units: int
-    is_buy: bool
-    instruction_name: str
-    timestamp: int
-    virtual_sol_reserves_base_units: int
-    virtual_token_reserves_base_units: int
-    real_sol_reserves_base_units: int
-    real_token_reserves_base_units: int
-    protocol_fee_base_units: int
-    creator_fee_base_units: int
-    protocol_fee_basis_points: int
-    creator_fee_basis_points: int
-    cashback_base_units: int
-    encoded_event: bytes
-    buyback_fee_basis_points: int = 0
-    buyback_fee_base_units: int = 0
-    shareholders: tuple[tuple[str, int], ...] = ()
-    quote_mint: str = ""
-    quote_amount_base_units: int = 0
-    virtual_quote_reserves_base_units: int = 0
-    real_quote_reserves_base_units: int = 0
+SHAREHOLDER_ENTRY_BYTES = 32 + 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -694,7 +666,7 @@ def _decode_trade_event(
     payload: bytes,
     as_of_slot: int,
 ) -> PumpTradeEventProof | AbstainResult:
-    reader = _EventReader(payload)
+    reader = _TradeEventReader(payload)
     if reader.read_bytes(8) != TRADE_EVENT_DISCRIMINATOR:
         return _abstain(
             AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
@@ -765,88 +737,21 @@ def _decode_trade_event(
     )
 
 
-class _EventReader:
-    """Small bounded reader for the pinned Anchor event layout."""
+class _TradeEventReader(EventReader):
+    """Pump bonding-curve trade event cursor.
 
-    def __init__(self, payload: bytes) -> None:
-        self._payload = payload
-        self._offset = 0
-        self.error: str | None = None
-
-    @property
-    def remaining(self) -> int:
-        return max(len(self._payload) - self._offset, 0)
-
-    def read_bytes(self, size: int) -> bytes:
-        if self.error is not None or size < 0 or self.remaining < size:
-            self.error = "event payload is truncated"
-            return b""
-        value = self._payload[self._offset : self._offset + size]
-        self._offset += size
-        return value
-
-    def read_u64(self) -> int:
-        value = self.read_bytes(8)
-        return unpack_from("<Q", value)[0] if len(value) == 8 else 0
-
-    def read_i64(self) -> int:
-        value = self.read_bytes(8)
-        return unpack_from("<q", value)[0] if len(value) == 8 else 0
-
-    def read_u16(self) -> int:
-        value = self.read_bytes(2)
-        return unpack_from("<H", value)[0] if len(value) == 2 else 0
-
-    def read_u32(self) -> int:
-        value = self.read_bytes(4)
-        return unpack_from("<I", value)[0] if len(value) == 4 else 0
-
-    def read_pubkey(self) -> str:
-        value = self.read_bytes(32)
-        return base58.b58encode(value).decode("ascii") if len(value) == 32 else ""
-
-    def read_bool(self) -> bool:
-        value = self.read_bytes(1)
-        if len(value) != 1 or value[0] not in (0, 1):
-            self.error = "event boolean is malformed"
-            return False
-        return bool(value[0])
-
-    def read_string(self) -> str:
-        length_bytes = self.read_bytes(4)
-        if len(length_bytes) != 4:
-            return ""
-        length = unpack_from("<I", length_bytes)[0]
-        raw = self.read_bytes(length)
-        if len(raw) != length:
-            return ""
-        try:
-            return raw.decode("utf-8")
-        except UnicodeDecodeError:
-            self.error = "event string is not UTF-8"
-            return ""
+    Adds only the Mayhem shareholder vector to the canonical bounded reader;
+    every primitive read is inherited unchanged from ``EventReader``.
+    """
 
     def read_shareholders(self) -> tuple[tuple[str, int], ...]:
         count = self.read_u32()
         if self.error is not None:
             return ()
-        entry_size = 32 + 2
-        if count > self.remaining // entry_size:
+        if count > self.remaining // SHAREHOLDER_ENTRY_BYTES:
             self.error = "shareholder vector is truncated"
             return ()
         return tuple((self.read_pubkey(), self.read_u16()) for _ in range(count))
-
-    def skip_bool(self) -> None:
-        self.read_bool()
-
-    def skip_i64(self) -> None:
-        self.read_bytes(8)
-
-    def skip_pubkey(self) -> None:
-        self.read_bytes(32)
-
-    def skip_u64(self, count: int = 1) -> None:
-        self.read_bytes(8 * count)
 
 
 def _evidence_root(observation: RawChainObservation) -> str:
@@ -899,7 +804,6 @@ def _abstain(
 __all__ = [
     "TRADE_EVENT_DISCRIMINATOR",
     "FinalizedTradeJoin",
-    "PumpTradeEventProof",
     "build_finalized_pump_swap_trade",
     "build_finalized_pump_trade",
     "build_finalized_trades_from_observations",

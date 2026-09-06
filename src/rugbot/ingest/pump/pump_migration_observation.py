@@ -22,9 +22,9 @@ from rugbot.domain.migration import (
     PUMP_MIGRATION_DECODER_VERSION,
     PUMP_PROGRAM_ID,
     CompiledPumpMigrationInstruction,
+    PumpMigrationInstructionEvidence,
     verify_pump_migration_instruction,
 )
-from rugbot.domain.migrations import PumpMigrationInstructionEvidence
 from rugbot.domain.observations import RawChainObservation
 from rugbot.ingest.rpc_observer import JSON_TRANSACTION_FORMAT
 

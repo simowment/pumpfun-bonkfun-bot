@@ -16,7 +16,6 @@ from rugbot.backtest.cases.production_case_adapter import (
 from rugbot.backtest.cases.rpc_case_acquisition import FinalizedRpcCaseAcquisition
 from rugbot.backtest.dataset import FinalizedTrade
 from rugbot.backtest.trajectory.finalized_trade_builder import (
-    PumpTradeEventProof,
     decode_pump_trade_event_proofs,
 )
 from rugbot.backtest.trajectory.trade_event_trajectory import (
@@ -41,7 +40,7 @@ from rugbot.domain.quote_engine import (
     executable_buy_quote,
 )
 from rugbot.domain.quotes import QuotePath
-from rugbot.domain.trades import TradeSide
+from rugbot.domain.trades import PumpTradeEventProof, TradeSide
 from rugbot.ingest.pump.bonding_curve_account import (
     PINNED_PUMP_IDL_SHA256,
     PUMP_PROGRAM_ID,
@@ -453,6 +452,7 @@ def _fee_config(
         ),
         protocol_fee_bps=event.protocol_fee_basis_points,
         creator_fee_bps=event.creator_fee_basis_points,
+        lp_fee_bps=event.lp_fee_basis_points,
         is_known=True,
         program_config_version=(
             CANONICAL_PUMP_PROGRAM_CONFIG_VERSION
@@ -504,6 +504,8 @@ def _swap_event_as_trade_event(event: object, mint: str) -> PumpTradeEventProof:
         quote_amount_base_units=int(event.user_quote_amount_base_units),
         virtual_quote_reserves_base_units=int(event.virtual_quote_reserves_base_units),
         real_quote_reserves_base_units=int(event.pool_quote_reserves_base_units),
+        lp_fee_basis_points=int(event.lp_fee_basis_points),
+        lp_fee_base_units=int(event.lp_fee_base_units),
     )
 
 

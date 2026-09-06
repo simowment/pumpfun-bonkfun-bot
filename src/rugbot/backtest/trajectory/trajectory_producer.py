@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from rugbot.backtest.trajectory.finalized_trade_builder import PumpTradeEventProof
 from rugbot.backtest.trajectory.outcome_builder import (
     FinalizedOutcomePointInput,
     build_outcome_observation_point,
@@ -41,6 +40,7 @@ from rugbot.domain.outcome_labels import (
     build_launch_outcome_labels,
 )
 from rugbot.domain.quotes import QuotePath
+from rugbot.domain.trades import PumpTradeEventProof
 from rugbot.domain.version_registry import PumpProtocolVersionSnapshot
 
 

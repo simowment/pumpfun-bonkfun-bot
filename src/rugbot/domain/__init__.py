@@ -49,7 +49,7 @@ from rugbot.domain.intents import (
     compute_buy_intent_id,
     compute_exit_intent_id,
 )
-from rugbot.domain.migrations import PumpMigrationInstructionEvidence
+from rugbot.domain.migration import PumpMigrationInstructionEvidence
 from rugbot.domain.observations import (
     CanonicalStatus,
     Commitment,

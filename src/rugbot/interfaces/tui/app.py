@@ -47,10 +47,7 @@ from textual.widgets import (
     TabPane,
 )
 
-from rugbot.backtest.runners.cluster_optimizer import (
-    HistoricalTokenSample,
-    run_cluster_tp_grid_search,
-)
+from rugbot.discover.ruggers import rank_ruggers
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.transfers import SolTransfer
 from rugbot.ingest.pump.models import TokenLaunch
@@ -532,6 +529,7 @@ class RugbotTuiApp(App[None]):
         ),
         Binding("5", "show_funders", "Funders", show=False, priority=True),
         Binding("6", "show_wallets", "Wallets", show=False, priority=True),
+        Binding("7", "show_ruggers", "Ruggers", show=False, priority=True),
         Binding("ctrl+v", "paste_clipboard", "Paste", show=False, priority=True),
         Binding("shift+insert", "paste_clipboard", "Paste", show=False, priority=True),
         Binding("escape", "clear_focus", "Back", show=False, priority=True),
@@ -606,7 +604,6 @@ class RugbotTuiApp(App[None]):
 
         # Activity cache for instant causal lookup
         self._activity_events: dict[str, ActivityItem] = {}
-        self._rendered_launch_mints: set[str] = set()
         # Live funder balances and token holdings cache
         self._funder_balances: dict[str, int] = {}
         self._funder_tokens: dict[str, list[dict[str, Any]]] = {}
@@ -787,6 +784,32 @@ class RugbotTuiApp(App[None]):
                     with Container(classes="table-container"):
                         yield DataTable(id="edges-table", cursor_type="row")
 
+            # Tab 7: Ruggers (autonomous serial-deployer ranking + §14 evidence)
+            with TabPane("7: Ruggers", id="ruggers-tab"):
+                with Vertical(classes="tab-body"):
+                    yield Static(
+                        "RUGGER OPERATORS · RANKED BY SERIAL-DEPLOY SIGNAL (TYPE 1 SAME-WALLET)",
+                        classes="table-header",
+                    )
+                    with Horizontal(classes="toolbar-row"):
+                        yield Button(
+                            "← Back to Dashboard (Esc)",
+                            variant="default",
+                            id="ruggers-back-btn",
+                            classes="back-to-dashboard-btn",
+                        )
+                        yield Button(
+                            "🔄 Re-rank",
+                            variant="primary",
+                            id="ruggers-refresh-btn",
+                        )
+                        yield Static(
+                            "Bible §1 entity ranking: spam cap excludes mass spammers · winrate/EV manual via rug_check --score --entity · Enter loads the entity into Cluster Graph · observe-only (no auto-arm).",
+                            id="ruggers-status",
+                        )
+                    with Container(classes="table-container"):
+                        yield DataTable(id="ruggers-table", cursor_type="row")
+
         # Kept mounted for existing inspection APIs; never part of the dashboard layout.
         yield Static(
             "[bold cyan]↑↓[/bold cyan] Target   [bold cyan]Enter[/bold cyan] Inspect   [bold cyan]/[/bold cyan] Search   [bold cyan]F1[/bold cyan] Tracker   [bold cyan]F2[/bold cyan] Backtester   [bold cyan]F3[/bold cyan] Sniper   [bold cyan]F4[/bold cyan] Settings   [bold cyan]Ctrl+P[/bold cyan] Commands   [bold cyan]Q[/bold cyan] Quit",
@@ -800,7 +823,8 @@ class RugbotTuiApp(App[None]):
             r"[bold yellow]\[2][/bold yellow] Dev History  "
             r"[bold yellow]\[3][/bold yellow] Sniper  "
             r"[bold yellow]\[4][/bold yellow] Settings  "
-            r"[bold yellow]\[5/F][/bold yellow] Cluster Graph  │  "
+            r"[bold yellow]\[5/F][/bold yellow] Cluster Graph  "
+            r"[bold yellow]\[7][/bold yellow] Ruggers  │  "
             r"[bold cyan]\[A][/bold cyan] Add Dev/Token  "
             r"[bold cyan]\[B][/bold cyan] Backtest  "
             r"[bold cyan]\[E][/bold cyan] Edit  "
@@ -830,6 +854,7 @@ class RugbotTuiApp(App[None]):
         self._init_nodes_table()
         self._init_edges_table()
         self._init_positions_table()
+        self._init_ruggers_table()
 
         # Subscribe to EventBus domain events through the shared core
         self._core.subscribe(self._on_domain_event)
@@ -889,7 +914,7 @@ class RugbotTuiApp(App[None]):
         self.run_worker(self._poll_observation_worker(), name="observation_worker")
 
     async def _start_tracking(self) -> None:
-        """Start WSS tracking and render launch alerts left in the TUI outbox."""
+        """Start WSS tracking and acknowledge launch alerts left in the outbox."""
 
         try:
             await self._core.start()
@@ -903,29 +928,26 @@ class RugbotTuiApp(App[None]):
             raise
 
     async def _drain_tui_outbox(self) -> None:
-        """Render durable launch alerts created while this TUI was offline."""
+        """Acknowledge launch alerts missed while this TUI was offline.
 
-        for alert in self._repository.get_undelivered_alerts("tui"):
-            launch = self._repository.get_launch(alert.mint)
-            if launch is None:
-                continue
-            self._on_domain_event(
-                LaunchDetected(
-                    root_funder=launch.root_funder,
-                    wallet=launch.creator_wallet,
-                    timestamp=launch.created_at,
-                    data={
-                        "symbol": launch.symbol,
-                        "name": launch.name,
-                        "mint": launch.mint,
-                        "creator": launch.creator_wallet,
-                        "root_funder": launch.root_funder,
-                        "depth": launch.depth,
-                        "slot": launch.created_slot,
-                        "signature": launch.created_signature,
-                    },
-                )
-            )
+        §14.2: the live activity feed must show only events observed in real
+        time by this process. An outbox alert records a launch that arrived
+        while the TUI was not running, so it is acknowledged here and surfaced
+        through the LAUNCHES tab (hydrated from the repository) instead of
+        being injected into the live feed with its original on-chain
+        timestamp, where it would read as a launch snipeable right now.
+        """
+        missed = self._repository.get_undelivered_alerts("tui")
+        if not missed:
+            return
+        self._repository.mark_alerts_delivered(
+            "tui", tuple(alert.mint for alert in missed)
+        )
+        self.notify(
+            f"{len(missed)} launch alert(s) arrived while this TUI was "
+            "offline — see the LAUNCHES tab.",
+            severity="warning",
+        )
 
     async def _start_sniper_daemon(self) -> None:
         """Start recovery and exit management for an injected local daemon."""
@@ -965,8 +987,6 @@ class RugbotTuiApp(App[None]):
                     label=funder.label or "Tracked funder",
                     policy=self._repository.get_target_execution_policy(funder.address),
                     launches_count=len(launches),
-                    winrate_pct=0.0,
-                    avg_ath_pct=0.0,
                     perf_metric=f"{len(launches)} launches"
                     if launches
                     else "0 launches",
@@ -1086,7 +1106,8 @@ class RugbotTuiApp(App[None]):
             r"[bold yellow]\[2][/bold yellow] Dev History  "
             r"[bold yellow]\[3][/bold yellow] Sniper  "
             r"[bold yellow]\[4][/bold yellow] Settings  "
-            r"[bold yellow]\[5/F][/bold yellow] Cluster Graph  │  "
+            r"[bold yellow]\[5/F][/bold yellow] Cluster Graph  "
+            r"[bold yellow]\[7][/bold yellow] Ruggers  │  "
             r"[bold cyan]\[A][/bold cyan] Add Dev/Token  "
             r"[bold cyan]\[B][/bold cyan] Backtest  "
             r"[bold cyan]\[E][/bold cyan] Edit  "
@@ -1295,7 +1316,6 @@ class RugbotTuiApp(App[None]):
             raise
 
         if isinstance(event, LaunchDetected) and token_mint:
-            self._rendered_launch_mints.add(token_mint)
             self._repository.mark_alerts_delivered("tui", (token_mint,))
             self.notify(
                 f"New ${token_sym} created by {event.wallet[:8]}…",
@@ -1393,6 +1413,11 @@ class RugbotTuiApp(App[None]):
 
     def action_show_wallets(self) -> None:
         self.query_one(TabbedContent).active = "edges-tab"
+
+    def action_show_ruggers(self) -> None:
+        """Show the bible-qualified rugger entity ranking (funding clusters)."""
+        self.query_one(TabbedContent).active = "ruggers-tab"
+        self._refresh_ruggers_table()
 
     def action_show_sniper(self) -> None:
         """Show per-target execution state and positions."""
@@ -1688,118 +1713,31 @@ class RugbotTuiApp(App[None]):
     def _execute_backtest_simulation(
         self, target: TargetRecord
     ) -> tuple[TargetRecord, str]:
-        """Execute a deterministic, point-in-time backtest using real recorded launches from repository."""
-        strat = target.strategy
-        size_sol = strat.size_sol or 0.010
-        tp_pct = strat.take_profit_pct or 100.0
-        sl_pct = abs(strat.stop_loss_pct) if strat.stop_loss_pct else 30.0
-        jito_sol = strat.jito_tip_sol or 0.0010
-        gas_sol = (strat.priority_fee_microlamports * 200_000) / 1_000_000_000_000_000
-        total_fee_sol = jito_sol + gas_sol
+        """Report the recorded launch count for a target without inventing outcomes.
 
-        launches = self._repository.get_launches(limit=100)
-        target_launches = [
-            rec
-            for rec in launches
-            if target.address in {rec.creator_wallet, rec.root_funder}
-        ] or list(launches)
-        samples = [
-            HistoricalTokenSample(
-                mint=rec.mint,
-                symbol=rec.symbol,
-                creator_wallet=rec.creator_wallet,
-                created_slot=rec.created_slot,
-                created_at=rec.created_at,
-                ath_multiplier=min(
-                    5.0,
-                    max(
-                        1.10,
-                        ((rec.funding_amount_lamports or 1_000_000_000) / 1_000_000_000)
-                        * 0.5
-                        + (rec.depth * 0.15)
-                        + 1.0,
-                    ),
-                ),
-                ath_delay_seconds=60 + (rec.depth * 20),
-                rug_delay_seconds=180 + (rec.depth * 60),
-                entry_mc_usd=8000.0,
-                peak_mc_usd=16000.0,
-            )
-            for rec in target_launches
-        ]
+        ``tracker_launches`` persists no ATH, market cap, or rug timing, so no
+        take-profit grid can be evaluated from repository state alone. Synthesizing
+        those fields from funding depth would publish a winrate and net EV the
+        operator acts on, so this abstains with the policy the web layer already
+        applies to the same contract in ``/api/entity/backtest``.
+        """
+        cluster_launches = self._repository.get_launches_for_funder(target.address)
+        target.launches_count = len(cluster_launches)
+        target.winrate_pct = None
+        target.avg_ath_pct = None
+        target.perf_metric = "outcome dataset unavailable"
 
-        report = run_cluster_tp_grid_search(
-            root_funder=target.address,
-            samples=samples,
-            buy_size_sol=size_sol,
-            realized_dump_loss_pct=0.75,
-            jito_tip_sol=jito_sol,
-            gas_fee_sol=gas_sol,
+        return (
+            target,
+            f"Target {short_address(target.address)}: BACKTEST ABSTAINED · "
+            f"{len(cluster_launches)} recorded launches, no persisted launch-outcome "
+            "dataset (ATH / market cap / rug timing), so winrate and net EV "
+            "are unmeasured. Run `rug_wallet <target> --backtest` for a grid "
+            "evaluated against fetched token metadata.",
         )
-
-        with contextlib.suppress(Exception):
-            self.query_one(
-                "#backtest-matrix-widget", BacktestMatrixWidget
-            ).update_report(report)
-
-        if not samples:
-            target.launches_count = 0
-            target.winrate_pct = 0.0
-            target.avg_ath_pct = 0.0
-            target.perf_metric = "0.00R (0 launches)"
-            return (
-                target,
-                f"Target {short_address(target.address)}: BACKTEST RUN · 0 recorded launches in database.",
-            )
-
-        wins = 0
-        losses = 0
-        net_sol_total = 0.0
-        for token in samples:
-            if token.ath_multiplier >= (1.0 + tp_pct / 100.0):
-                wins += 1
-                gross_gain = size_sol * (tp_pct / 100.0)
-                net_sol_total += gross_gain - total_fee_sol
-            else:
-                losses += 1
-                gross_loss = size_sol * (sl_pct / 100.0)
-                net_sol_total -= gross_loss + total_fee_sol
-
-        total_trades = wins + losses
-        winrate_pct = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
-        total_r = (net_sol_total / size_sol) if size_sol > 0 else 0.0
-        avg_ath_pct = (
-            sum((s.ath_multiplier - 1.0) * 100 for s in samples) / len(samples)
-            if samples
-            else 0.0
-        )
-
-        perf_str = f"{total_r:+.2f}R ({wins}W/{losses}L {winrate_pct:.1f}% WR)"
-
-        target.launches_count = len(target_launches)
-        target.winrate_pct = winrate_pct
-        target.avg_ath_pct = avg_ath_pct
-        target.perf_metric = perf_str
-
-        opt_text = (
-            f"👑 Optimal TP: {report.optimal_tp_label} (Net EV: {report.optimal_net_ev_sol:+.4f} SOL)"
-            if report.is_net_profitable
-            else "⚠️ Cluster Unprofitable"
-        )
-        log_msg = (
-            f"Cluster {short_address(target.address)} ({len(samples)} tokens): "
-            f"Current TP +{tp_pct:.0f}% -> {winrate_pct:.1f}% WR ({net_sol_total:+.4f} SOL) │ "
-            f"{opt_text} ✓"
-        )
-        with contextlib.suppress(Exception):
-            self.query_one(
-                "#backtest-matrix-widget", BacktestMatrixWidget
-            ).update_report(report)
-
-        return target, log_msg
 
     def action_run_backtest(self) -> None:
-        """Run cluster Take-Profit grid optimization on the selected target and show metrics."""
+        """Report the selected target's recorded launch count and outcome availability."""
         target_addr = self._wallet
         with contextlib.suppress(Exception):
             targets_table = self.query_one("#targets-table", TargetsTable)
@@ -1826,7 +1764,6 @@ class RugbotTuiApp(App[None]):
                 updated_target, log_msg = self._execute_backtest_simulation(target_rec)
                 targets_table.update_target(updated_target)
                 self._refresh_tables()
-                self._log_activity(log_msg)
                 self.action_show_launches()
                 self.notify(log_msg, severity="information")
                 return
@@ -2200,6 +2137,10 @@ class RugbotTuiApp(App[None]):
                             matched.creator_wallet, self._repository
                         )
                         self.push_screen(DetailInspectModal(item, path))
+        elif event.data_table.id == "ruggers-table":
+            creator = event.row_key.value if event.row_key else None
+            if creator and not str(creator).startswith("__"):
+                self._open_rugger_in_graph(str(creator))
 
     # --- Table initializations ---
     def _init_launches_table(self) -> None:
@@ -2234,6 +2175,18 @@ class RugbotTuiApp(App[None]):
         table.add_column("DEPTH", key="depth")
         table.add_column("STATUS", key="status")
         table.add_column("TTL EXPIRES", key="ttl")
+
+    def _init_ruggers_table(self) -> None:
+        with contextlib.suppress(Exception):
+            table = self.query_one("#ruggers-table", DataTable)
+            table.clear(columns=True)
+            table.add_column("#", key="rank", width=4)
+            table.add_column("ENTITY", key="operator", width=16)
+            table.add_column("LIFETIME", key="lifetime", width=9)
+            table.add_column("IN-WIN", key="in_window", width=7)
+            table.add_column("FUNDING", key="funding", width=18)
+            table.add_column("ARCHETYPE", key="archetype", width=10)
+            table.add_column("STATUS", key="status", width=14)
 
     def _init_positions_table(self) -> None:
         table = self.query_one("#positions-table", DataTable)
@@ -2353,6 +2306,118 @@ class RugbotTuiApp(App[None]):
                     format_age(w.expires_at) if w.expires_at else "NEVER",
                     key=w.address,
                 )
+
+    def _refresh_ruggers_table(self) -> None:
+        """Rank rugger entities from the headless discover DB (stats manual).
+
+        Read-only (§7): surfaces the entity-level funding-cluster evidence and
+        recommends arming; it never auto-arms or trades. Live RPC enrichment
+        (funding chain + archetype) runs in a thread worker so the UI stays
+        responsive; mass spammers are capped out, never ranked first.
+        Winrate/EV are manual via ``rug_check --score --entity``.
+        """
+        with contextlib.suppress(Exception):
+            table = self.query_one("#ruggers-table", DataTable)
+            table.clear()
+            table.add_row(
+                "[dim]…[/dim]",
+                "[dim]Ranking entities (live RPC enrichment)…[/dim]",
+                "—",
+                "—",
+                "—",
+                "—",
+                "—",
+                key="__loading__",
+            )
+        self.run_worker(
+            self._rank_ruggers_worker(),
+            thread=True,
+            exclusive=True,
+            group="ruggers",
+            name="ruggers_rank",
+        )
+
+    async def _rank_ruggers_worker(self) -> None:
+        try:
+            evidence = await asyncio.to_thread(rank_ruggers, min_launches=2, limit=50)
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                table = self.query_one("#ruggers-table", DataTable)
+                table.clear()
+                table.add_row(
+                    "[bold red]ERR[/bold red]",
+                    f"[dim]rank failed: {exc}[/dim]",
+                    *("—",) * 5,
+                    key="__error__",
+                )
+            return
+        self._fill_ruggers_table(evidence)
+
+    def _fill_ruggers_table(self, evidence: list) -> None:
+        def _short_funding(summary: str | None) -> str:
+            if not summary:
+                return "—"
+            return summary if len(summary) <= 20 else f"{summary[:20]}…"
+
+        with contextlib.suppress(Exception):
+            table = self.query_one("#ruggers-table", DataTable)
+            table.clear()
+            blanks = ("—",) * 5
+            if not evidence:
+                table.add_row(
+                    "[dim]—[/dim]",
+                    "[dim]No rugger entities ranked[/dim]",
+                    *blanks,
+                    key="__empty__",
+                )
+                return
+            for item in evidence:
+                qual = item.qualification
+                lifetime_str = (
+                    str(item.lifetime_creation_count)
+                    if item.lifetime_creation_count is not None
+                    else "?"
+                )
+                if item.archetype == "type2_funding_cluster":
+                    archetype = "[bold magenta]TYPE 2[/bold magenta]"
+                elif item.archetype == "mass_spammer":
+                    archetype = "[bold red]SPAMMER[/bold red]"
+                else:
+                    archetype = "[bold yellow]TYPE 1[/bold yellow]"
+                status = qual.status
+                if status == "stats_manual":
+                    status = "[bold green]stats_manual[/bold green]"
+                elif status == "mass_spammer":
+                    status = "[bold red]mass_spammer[/bold red]"
+                cluster = len(item.entity_wallets or [])
+                table.add_row(
+                    str(item.rank),
+                    f"{short_address(item.operator)} [dim]x{cluster}[/dim]",
+                    lifetime_str,
+                    str(item.in_window_launch_count),
+                    _short_funding(item.funding_summary),
+                    archetype,
+                    status,
+                    key=item.operator,
+                )
+
+    def _open_rugger_in_graph(self, creator: str) -> None:
+        """Load a ranked rugger creator into the Cluster Graph explorer.
+
+        §7 read-only: pre-fills the graph/search target and switches tabs so the
+        operator can inspect the funding cluster; it never auto-arms a listener.
+        """
+        with contextlib.suppress(Exception):
+            self.query_one("#new-funder-input", Input).value = creator
+        with contextlib.suppress(Exception):
+            self.query_one("#global-search-input", Input).value = creator
+        with contextlib.suppress(Exception):
+            self.query_one(TabbedContent).active = "graph-tab"
+        self.notify(
+            f"Loaded {short_address(creator)} into Cluster Graph · "
+            "Add Target to arm (observe-only)",
+            severity="information",
+        )
 
     def _refresh_launches_table(self) -> None:
         with contextlib.suppress(Exception):
@@ -3099,6 +3164,7 @@ class RugbotTuiApp(App[None]):
             "graph-track-btn": self._handle_graph_track_btn,
             "graph-backtest-btn": self.action_show_backtester,
             "graph-explorer-btn": self._handle_graph_explorer_btn,
+            "ruggers-refresh-btn": self._refresh_ruggers_table,
         }
         handler = dispatch.get(btn_id)
         if handler:

@@ -28,6 +28,12 @@ DEFAULT_TIMEOUT_SECONDS: Final[int] = 15
 PLAYGROUND_TRANSACTION_LIMIT: Final[int] = 10
 DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS: Final[float] = 30.0
 HTTP_TOO_MANY_REQUESTS: Final[int] = 429
+NATIVE_SOL_MINT: Final[str] = "So11111111111111111111111111111111111111112"
+TRANSFER_PAGE_SIZES: Final[frozenset[int]] = frozenset({10, 20, 30, 40, 60, 100})
+DEFAULT_TRANSFER_PAGE_SIZE: Final[int] = 100
+MAX_TRANSFER_SCAN_PAGES: Final[int] = 5
+TRANSFER_SORT_ORDERS: Final[frozenset[str]] = frozenset({"asc", "desc"})
+LAMPORTS_PER_SOL: Final[int] = 1_000_000_000
 
 
 @dataclass(slots=True)
@@ -92,6 +98,19 @@ class SolscanMintTransactionDiscovery:
     complete: bool
     warning: str | None
     next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SolscanTransferRow:
+    """One validated native transfer row from the Solscan transfer endpoint."""
+
+    from_address: str
+    to_address: str
+    amount_sol: float
+    signature: str
+    block_id: int
+    block_time: int
+    flow: str
 
 
 SolscanTransport = Callable[[urllib.request.Request, int], bytes]
@@ -305,6 +324,74 @@ class SolscanClient:
             next_cursor=cursor,
         )
 
+    def account_transfers(
+        self,
+        address: str,
+        *,
+        flow: str | None = None,
+        page: int = 1,
+        page_size: int = DEFAULT_TRANSFER_PAGE_SIZE,
+        sort_order: str = "asc",
+    ) -> tuple[SolscanTransferRow, ...]:
+        """Read one page of native SOL transfers for a wallet (oldest-first).
+
+        Maps to the Solscan site Transfers tab: wallet scope, native mint
+        filter, per-column direction, block_time sort. Amount filtering is
+        left to the caller so the raw window stays auditable.
+        """
+
+        _validate_address(address)
+        if flow is not None and flow not in ("in", "out"):
+            raise ValueError("Solscan transfer flow must be 'in' or 'out'")
+        if page < 1:
+            raise ValueError("Solscan transfer page must be positive")
+        if page_size not in TRANSFER_PAGE_SIZES:
+            raise ValueError("Solscan transfer page_size must be 10-100")
+        if sort_order not in TRANSFER_SORT_ORDERS:
+            raise ValueError("Solscan transfer sort_order must be asc or desc")
+        query_values = [
+            ("address", address),
+            ("token", NATIVE_SOL_MINT),
+            ("page", str(page)),
+            ("page_size", str(page_size)),
+            ("sort_by", "block_time"),
+            ("sort_order", sort_order),
+        ]
+        if flow is not None:
+            query_values.append(("flow", flow))
+        query = urllib.parse.urlencode(query_values)
+        payload = self._request(f"/account/transfer?{query}")
+        if payload.get("success") is not True:
+            raise SolscanProviderError("Solscan transfer response is incomplete")
+        return _parse_transfer_rows(payload.get("data"))
+
+    def account_transfer_scan(
+        self,
+        address: str,
+        *,
+        flow: str,
+        max_pages: int = MAX_TRANSFER_SCAN_PAGES,
+    ) -> tuple[tuple[SolscanTransferRow, ...], str | None]:
+        """Scan bounded oldest-first native transfer pages for a wallet.
+
+        Stops at the first empty page or the page bound; each page costs one
+        flat-rate API call. Rate limiting raises and stays fail-fast.
+        """
+
+        if max_pages < 1:
+            raise ValueError("Solscan transfer scan needs at least one page")
+        rows: list[SolscanTransferRow] = []
+        for page_number in range(1, max_pages + 1):
+            page = self.account_transfers(
+                address, flow=flow, page=page_number, sort_order="asc"
+            )
+            if not page:
+                return tuple(rows), None
+            rows.extend(page)
+        return tuple(rows), (
+            f"Solscan transfer scan reached the {max_pages}-page bound"
+        )
+
     def _request(
         self,
         path_or_url: str,
@@ -344,6 +431,64 @@ class SolscanClient:
         if not isinstance(payload, dict):
             raise SolscanProviderError("Solscan returned a non-object response")
         return payload
+
+
+def _parse_transfer_rows(data: object) -> tuple[SolscanTransferRow, ...]:
+    """Validate raw transfer rows into typed native transfer records."""
+
+    items: object = data
+    if isinstance(data, dict):
+        for key in ("transfers", "items", "data", "results"):
+            if isinstance(data.get(key), list):
+                items = data[key]
+                break
+    if not isinstance(items, list):
+        raise SolscanProviderError("Solscan transfer rows are malformed")
+    return tuple(_parse_transfer_row(item) for item in items)
+
+
+def _parse_transfer_row(item: object) -> SolscanTransferRow:
+    """Validate one raw transfer row into a typed native transfer record."""
+
+    if not isinstance(item, dict):
+        raise SolscanProviderError("Solscan transfer row is malformed")
+    from_address = item.get("from_address")
+    to_address = item.get("to_address")
+    amount = item.get("amount")
+    signature = item.get("trans_id")
+    block_id = item.get("block_id")
+    block_time = item.get("block_time")
+    flow = item.get("flow")
+    if not isinstance(from_address, str) or not isinstance(to_address, str):
+        raise SolscanProviderError("Solscan transfer row lacks addresses")
+    if isinstance(amount, bool) or not isinstance(amount, (int, str)):
+        raise SolscanProviderError("Solscan transfer row lacks amount")
+    try:
+        lamports = int(str(amount))
+    except ValueError as error:
+        raise SolscanProviderError("Solscan transfer amount is not integral") from error
+    if lamports < 0:
+        raise SolscanProviderError("Solscan transfer amount is negative")
+    if not isinstance(signature, str) or not isinstance(flow, str):
+        raise SolscanProviderError("Solscan transfer row is incomplete")
+    if flow not in ("in", "out"):
+        raise SolscanProviderError("Solscan transfer flow is unknown")
+    if type(block_id) is not int or block_id < 0:
+        raise SolscanProviderError("Solscan transfer block is invalid")
+    if type(block_time) is not int or block_time < 0:
+        raise SolscanProviderError("Solscan transfer time is invalid")
+    _validate_address(from_address)
+    _validate_address(to_address)
+    _validate_signature(signature)
+    return SolscanTransferRow(
+        from_address=from_address,
+        to_address=to_address,
+        amount_sol=lamports / LAMPORTS_PER_SOL,
+        signature=signature,
+        block_id=block_id,
+        block_time=block_time,
+        flow=flow,
+    )
 
 
 def _mint_transaction_candidate(
@@ -446,4 +591,5 @@ __all__ = [
     "SolscanMintTransactionDiscovery",
     "SolscanProviderError",
     "SolscanTokenCreationCandidate",
+    "SolscanTransferRow",
 ]

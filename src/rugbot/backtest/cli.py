@@ -40,12 +40,19 @@ from rugbot.backtest.trajectory.finalized_trade_builder import (
 from rugbot.backtest.trajectory.observation_trade_join import (
     derive_finalized_trade_joins,
 )
-from rugbot.domain.amounts import Slot
+from rugbot.domain.amounts import PROBABILITY_PPM_DENOMINATOR, Slot
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.storage.jsonl_observation_store import JsonlObservationStore
 
 MAX_RPC_TRANSACTIONS = 1000
 MIN_RPC_LAUNCHES_FOR_SPLIT = 2
+
+# This offline arm models no Jito tip, so it must stay incapable of claiming a
+# positive net EV. A full haircut zeroes every executable exit output, leaving
+# net PnL at -(entry cost + exit fee). Lowering the haircut therefore requires
+# supplying the tip through additional_execution_cost_quote_base_units.
+FULL_EXIT_OUTPUT_HAIRCUT_PPM = PROBABILITY_PPM_DENOMINATOR
+UNMODELED_JITO_TIP_QUOTE_BASE_UNITS = 0
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -248,8 +255,10 @@ async def run_rpc_dataset(  # noqa: PLR0913
             backtest_config=backtest_config,
             stress=FullExitStressConfig(
                 as_of_slot=end_slot,
-                output_haircut_ppm=1_000_000,
-                additional_execution_cost_quote_base_units=0,
+                output_haircut_ppm=FULL_EXIT_OUTPUT_HAIRCUT_PPM,
+                additional_execution_cost_quote_base_units=(
+                    UNMODELED_JITO_TIP_QUOTE_BASE_UNITS
+                ),
             ),
         ),
     )

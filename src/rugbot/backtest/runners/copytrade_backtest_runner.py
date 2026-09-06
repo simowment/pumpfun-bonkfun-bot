@@ -425,57 +425,31 @@ def run_copytrade_tp_sl_grid_search(
 
 def _fetch_onchain_copytrade_samples(wallet: str) -> tuple[CopytradeSample, ...]:
     """Fetch on-chain trade history from RPC and reconstruct completed roundtrips."""
-    import json
-    import os
-    import urllib.request
-
-    from rugbot.runtime.config import load_provider_settings, resolve_dotenv
-
-    resolve_dotenv()
-    providers = load_provider_settings()
-
-    candidate_endpoints = []
-    if providers and providers.rpc_http:
-        candidate_endpoints.append(providers.rpc_http)
-    if providers and providers.rpc_http_fallbacks:
-        candidate_endpoints.extend(providers.rpc_http_fallbacks)
-    if os.environ.get("SOLANA_RPC_HTTP"):
-        candidate_endpoints.append(os.environ["SOLANA_RPC_HTTP"])
-    candidate_endpoints.extend(
-        [
-            "https://solana-rpc.publicnode.com",
-            "https://rpc.ankr.com/solana",
-            "https://api.mainnet-beta.solana.com",
-        ]
+    from rugbot.integrations.rpc_access import (
+        RpcAccessError,
+        resolve_rpc_endpoints,
+        sync_rpc_result,
     )
 
-    # Deduplicate preserving order
-    endpoints = []
-    for ep in candidate_endpoints:
-        if ep and ep not in endpoints:
-            endpoints.append(ep)
+    endpoints = resolve_rpc_endpoints()
+    if not endpoints.ordered:
+        return ()
 
     def _call_rpc(method: str, params: list[object]) -> object | None:
-        payload = json.dumps(
-            {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        ).encode("utf-8")
-        for ep in endpoints:
-            try:
-                req = urllib.request.Request(
-                    ep,
-                    data=payload,
-                    headers={
-                        "Content-Type": "application/json",
-                        "User-Agent": "Mozilla/5.0",
-                    },
-                )
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    if "result" in data and data["result"] is not None:
-                        return data["result"]
-            except Exception:
-                continue
-        return None
+        """Delegate one JSON-RPC call through the shared health-aware pool.
+
+        Args:
+            method: JSON-RPC method name.
+            params: JSON-RPC params array.
+
+        Returns:
+            The decoded result payload, or None when every provider failed or
+            is cooling down.
+        """
+        try:
+            return sync_rpc_result(method, params, endpoints=endpoints)
+        except RpcAccessError:
+            return None
 
     sigs_raw = _call_rpc("getSignaturesForAddress", [wallet, {"limit": 100}])
     if not isinstance(sigs_raw, list) or not sigs_raw:

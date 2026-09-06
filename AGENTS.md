@@ -126,6 +126,18 @@ Every target MUST be classified immediately into one of two distinct operational
    - **Definition**: The operator creates a brand new, clean disposable burner wallet for each individual token (1 token per wallet, 0 prior history on the deployer itself).
    - **Operational Strategy**: The deployer address cannot be predicted beforehand; the system MUST watch upstream funding nodes (mother / relay / CEX) in real-time to detect the staging transfer (0.2 - 3.0 SOL) and dynamically arm the listener on the newly funded burner before `pump::create`.
 
+### 🎯 Delivered Scope (S1): Type 1 Only — Type 2 Auto-Arm Deferred
+
+`ASSERT: S1 = Type 1 (Serial Same-Wallet Deployer). Type 2 automated arming is DEFERRED and MUST NOT be built without separate explicit user authorization.`
+
+**In scope (Type 1)** — classify the target, score launch cadence / ATH / exit profile from the wallet's own finalized signatures, and re-arm an observer on the known dev wallet. `TargetKind` is exactly `{WALLET, TOKEN}` (`runtime/config.py`); `runtime/matcher.py` fail-closes on any other kind.
+
+**Deferred (Type 2)** — watching upstream funding nodes for a 0.2 - 3.0 SOL staging transfer, resolving the freshly funded burner via `tracker/point_in_time.py`, and dynamically arming a `pump::create` listener on it before launch. No `TargetKind.FUNDER` exists, so this requires new domain surface; it is not a permitted incremental change.
+
+Type 2 targets remain **classifiable and reportable** under the Reporting Contract below. `discover/ruggers.py::_next_action` already returns the honest manual instruction `arm listener on funding source <funder> to detect staged burners (observe-only; no auto-arm)`. Reporting a Type 2 target with that instruction is correct behavior; implying automated arming is not.
+
+An agent MUST NOT add speculative Type 2 arming code to "complete" this section. Under R1/YAGNI the absence of a funder watcher is the intended state, not a gap to fill.
+
 ### 📋 Systematic Target Reporting Contract
 Every target analysis MUST systematically extract and report:
 1. **Archetype Sorting**: Explicitly declare whether the target is **Type 1 (Same-Wallet Serial Dev)** or **Type 2 (Burner-per-Launch Cluster)**.

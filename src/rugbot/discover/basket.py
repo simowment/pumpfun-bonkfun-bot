@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from rugbot.backtest.trajectory.finalized_trade_builder import (
-    PumpTradeEventProof,
     decode_pump_trade_event_proofs,
 )
 from rugbot.discover.store import (
@@ -28,6 +28,9 @@ from rugbot.intelligence.token_resolver import PUMP_PROGRAM_ID
 from rugbot.runtime.config import load_provider_settings, resolve_dotenv
 from rugbot.storage.database import DatabaseManager
 from rugbot.storage.jsonl_observation_store import JsonlObservationStore
+
+if TYPE_CHECKING:
+    from rugbot.domain.trades import PumpTradeEventProof
 
 MAX_LAUNCH_WINDOW_SLOTS = 300
 MAX_LAUNCH_WINDOWS = 15

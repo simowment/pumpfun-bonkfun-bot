@@ -60,7 +60,10 @@ class BacktestMatrixWidget(Static):
         )
         table.add_column("CLUSTER TAKE-PROFIT BACKTEST & RISK MATRIX", justify="center")
         table.add_row(
-            "[dim]Press [bold cyan]'B'[/bold cyan] or click [bold cyan]'Run Backtest (B)'[/bold cyan] to run multi-token grid search with realistic -75% dump modeling.[/dim]"
+            "[dim]No persisted launch-outcome dataset: [bold]tracker_launches[/bold] stores no ATH, "
+            "market cap, or rug timing, so no grid can be evaluated from tracker state. "
+            "Run [bold cyan]`rug_wallet <target> --backtest`[/bold cyan] for a grid scored "
+            "against fetched token metadata.[/dim]"
         )
         return table
 
@@ -77,7 +80,7 @@ class BacktestMatrixWidget(Static):
             style="bold gold1",
         )
         header_text.append(
-            f"• Buy Size: {rep.buy_size_sol:.3f} SOL (~${rep.buy_size_sol * 150:.2f})  │  ",
+            f"• Buy Size: {rep.buy_size_sol:.3f} SOL  │  ",
             style="white",
         )
         header_text.append(

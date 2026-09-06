@@ -471,6 +471,7 @@ def _score_mints_sync(
         }
     rows: list[dict[str, object]] = []
     wins = 0
+    unresolved = 0
     ath_vals: list[float] = []
     for cand in sliced:
         try:
@@ -488,8 +489,13 @@ def _score_mints_sync(
         try:
             _, _, mcap, ath_mult = fetch_token_metadata(cand.mint)
         except Exception:  # noqa: BLE001
-            mcap, ath_mult = 0.0, 1.0
-        ath_mult = float(ath_mult) if ath_mult else 1.0
+            mcap, ath_mult = 0.0, None
+        if not ath_mult:
+            # Fail-closed: an unknown ATH is NOT a loss. Fabricating ath=1.0
+            # here silently turned every metadata failure into a 0% winrate.
+            unresolved += 1
+            continue
+        ath_mult = float(ath_mult)
         ath_vals.append(ath_mult)
         floor_usd = float(mcap) if mcap else 0.0
         # floor: if rugged (<5k) else current mcap as floor proxy
@@ -508,6 +514,20 @@ def _score_mints_sync(
                 "win": bool(is_win),
             }
         )
+    if unresolved:
+        return {
+            "status": "abstain",
+            "reason": (
+                f"ath_unresolved: {unresolved}/{sample_count} launches lack ATH "
+                "data (fail-closed; retry or score manually)"
+            ),
+            "operator_wallet": wallets[0] if wallets else "",
+            "entity_wallets": wallets,
+            "deduped_mints": deduped_mints,
+            "sample_count": sample_count,
+            "found": sample_count - unresolved,
+            "rows": rows,
+        }
     losses = sample_count - wins
     net_ev_pct = wins * 100.0 - losses * _SCORE_LOSS_PCT
     # optimal TP among candidates net of fees/slippage
@@ -754,13 +774,13 @@ def main(argv: list[str] | None = None) -> int:
         from rugbot.domain.market_data import build_token_market_history as _build_hist
 
         market_hist = _build_hist(mint, rpc_url=rpc)
-        # derive mcap/fdv from on-chain entry if available, else fallback current
+        # ``mcap`` here holds an on-chain market-cap expressed in QUOTE LAMPORTS
+        # (SOL lamports), NOT USD. It is only a rough magnitude proxy for the
+        # rugged heuristic below; the honest unit is preserved on emit as
+        # ``entry_mc_quote_lamports``. The dex fallback (``market_cap2``) is a
+        # genuine USD figure and is surfaced separately via ``fdv_usd``.
         if market_hist.entry_mc_quote_lamports is not None:
-            # lamports SOL -> USD approx via current mcap fallback? keep lamports display elsewhere
-            # for legacy mcap field, use quote lamports as USD proxy if needed
-            mcap = float(
-                market_hist.entry_mc_quote_lamports
-            )  # keep raw for display compatibility
+            mcap = float(market_hist.entry_mc_quote_lamports)
         if market_hist.floor_mc_quote_lamports is not None and mcap is None:
             mcap = float(market_hist.floor_mc_quote_lamports)
         # peak mult data-based
@@ -1066,7 +1086,11 @@ def main(argv: list[str] | None = None) -> int:
             for b in buys
         ],
         "mc_proxy_1s": mc_proxy,
-        "mcap_usd": mcap,
+        # Honest unit: on-chain entry market-cap in quote lamports (SOL), never
+        # USD. The dex-sourced USD figure is carried separately by ``fdv_usd``.
+        "entry_mc_quote_lamports": (
+            market_hist.entry_mc_quote_lamports if market_hist is not None else None
+        ),
         "fdv_usd": fdv,
         "ath_multiplier": ath_mult,
         "rugged": rugged,

@@ -229,9 +229,18 @@ class TargetProfileCard(Widget):
             status_badge = "[bold cyan]● DRY RUN[/bold cyan]"
             mode_badge = "[bold cyan]● SIMULATED (DRY RUN)[/bold cyan]"
 
+        outcome_cells = [f"[white]{t.launches_count} recorded launches[/white]"]
+        if t.winrate_pct is not None:
+            outcome_cells.append(f"[green]{t.winrate_pct:.1f}% WR[/green]")
+        if t.avg_ath_pct is not None:
+            outcome_cells.append(f"[green]+{t.avg_ath_pct:.0f}% avg ATH[/green]")
+        if t.winrate_pct is None and t.avg_ath_pct is None:
+            outcome_cells.append("[dim]winrate/ATH unmeasured[/dim]")
+        outcome_cells.append(f"[cyan]{t.perf_metric}[/cyan]")
+
         lines: list[str] = [
             f"[bold cyan]{short_address(t.address)}[/bold cyan] [dim]({t.label})[/dim]                                  {status_badge}",
-            f"[dim]TRACK RECORD:[/dim]  [white]{t.launches_count} recorded launches[/white] · [green]{t.winrate_pct:.1f}% WR[/green] · [green]+{t.avg_ath_pct:.0f}% avg ATH[/green] · [cyan]{t.perf_metric}[/cyan]",
+            f"[dim]TRACK RECORD:[/dim]  {' · '.join(outcome_cells)}",
             f"[dim]STRATEGY:[/dim]      [bold white]{'MONITORING ON' if strat.monitoring_enabled else 'MONITORING OFF'}[/bold white] · {mode_badge}",
             f"[dim]ENTRY RULES:[/dim]   [green]Winrate > {strat.min_winrate_pct:.0f}%[/green] · [white]MC < ${strat.max_entry_mc_usd / 1000:.0f}k[/white] · [white]{'Block 0 required' if strat.required_block_zero else 'Any Block'}[/white] · [white]{'Pattern Match required' if strat.funding_match_required else 'Any Funding'}[/white]",
             f"[dim]FEES & SPEED:[/dim]  [white]{strat.priority_fee_microlamports:,} µL/CU Prio[/white] · [white]{strat.jito_tip_sol:.4f} Jito[/white] · [white]{strat.slippage_bps} bps Slippage[/white] · [white]{strat.max_gas_sol:.4f} SOL Max[/white]",

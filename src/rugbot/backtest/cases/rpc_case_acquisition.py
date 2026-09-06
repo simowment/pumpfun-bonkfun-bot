@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from rugbot.domain.metadata_resolver import (
         PumpFinalizedMintMetadataEvidence,
     )
-    from rugbot.domain.migrations import PumpMigrationInstructionEvidence
+    from rugbot.domain.migration import PumpMigrationInstructionEvidence
     from rugbot.domain.trades import PumpSwapTradeEventEvidence
 
 

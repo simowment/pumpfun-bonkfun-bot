@@ -23,7 +23,13 @@ from solders.transaction import Transaction
 from rugbot.integrations.rpc_rate_limiter import TokenBucketRateLimiter
 from rugbot.utils.logger import get_logger
 
+try:
+    from rugbot.integrations.rpc_cache import RpcResponseCache
+except Exception:  # noqa: BLE001 - cache is optional, transport works without it.
+    RpcResponseCache = None  # type: ignore[assignment,misc]
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from solders.keypair import Keypair
 
 logger = get_logger(__name__)
@@ -102,6 +108,7 @@ class SolanaClient:
         self._rate_limiter = TokenBucketRateLimiter(max_rps=max_rps)
         self._session: aiohttp.ClientSession | None = None
         self._session_lock = asyncio.Lock()
+        self._rpc_cache: RpcResponseCache | None = None
 
     def start_blockhash_polling(self) -> None:
         """Start the background blockhash updater if not already running."""
@@ -201,6 +208,10 @@ class SolanaClient:
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
+
+        if self._rpc_cache is not None:
+            self._rpc_cache.close()
+            self._rpc_cache = None
 
     async def get_health(self) -> str | None:
         body = {
@@ -521,11 +532,29 @@ class SolanaClient:
 
         return result
 
+    def _get_rpc_cache(self) -> RpcResponseCache | None:
+        """Return the response cache, lazily creating the default instance."""
+        if RpcResponseCache is None:
+            return None
+        if self._rpc_cache is None:
+            try:
+                self._rpc_cache = RpcResponseCache()
+            except Exception:  # noqa: BLE001 - transport works without cache.
+                logger.debug("RPC cache unavailable, continuing without it")
+                return None
+        return self._rpc_cache
+
     async def post_rpc(
         self, body: dict[str, Any], max_retries: int = 3, max_429_retries: int = 5
     ) -> dict[str, Any] | None:
         """Send a raw RPC request with multi-endpoint failover and rate limiting."""
         method = body.get("method", "unknown")
+        params = body.get("params")
+        cache = self._get_rpc_cache()
+        if cache is not None:
+            cached = cache.lookup(str(method), params)
+            if cached is not None:
+                return cached
         endpoints = [self.rpc_endpoint] + list(self._fallbacks)
 
         for endpoint in endpoints:
@@ -546,7 +575,10 @@ class SolanaClient:
                         continue
 
                     response.raise_for_status()
-                    return await response.json()
+                    payload = await response.json()
+                    if cache is not None and isinstance(payload, dict):
+                        cache.store(str(method), params, payload)
+                    return payload
 
             except (aiohttp.ContentTypeError, aiohttp.ClientError, Exception) as exc:
                 logger.debug(

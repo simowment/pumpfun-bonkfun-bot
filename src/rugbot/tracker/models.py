@@ -8,8 +8,6 @@ from enum import StrEnum
 from rugbot.domain.entities import (
     LAMPORTS_PER_SOL,
     AlertOutboxRecord,
-    DecisionEvent,
-    DecisionKind,
     FunderRecord,
     FundingEdge,
     FundingHop,
@@ -105,8 +103,6 @@ __all__ = [
     "LAMPORTS_PER_SOL",
     "AlertOutboxRecord",
     "BundleParticipationRecord",
-    "DecisionEvent",
-    "DecisionKind",
     "EntityBackfillRecord",
     "EntityBackfillStatus",
     "FunderRecord",

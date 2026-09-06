@@ -176,6 +176,15 @@ def ensure_discover_schema(db: DatabaseManager) -> None:
         """
     )
     conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS discover_rugger_cache (
+            wallet TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            enriched_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_discover_launches_creator ON discover_launches(creator)"
     )
     conn.execute(
@@ -651,41 +660,6 @@ def upsert_wallet_launch_participation(
     db.connection.commit()
 
 
-def fetch_candidates(
-    db: DatabaseManager,
-    *,
-    since_iso: str | None = None,
-    limit: int = 50,
-) -> list[dict[str, object]]:
-    """Return candidates joined with recent launch stats; empty if none."""
-
-    conn = db.connection
-    rows = conn.execute(
-        "SELECT * FROM discover_candidates ORDER BY updated_at DESC LIMIT ?", (limit,)
-    ).fetchall()
-    result: list[dict[str, object]] = []
-    for r in rows:
-        result.append(dict(r))
-    # if no candidates yet but launches exist, synthesize from launches for presentation
-    if not result and since_iso is not None:
-        launches = conn.execute(
-            "SELECT creator, COUNT(*) as cnt, MIN(created_slot) as first_slot FROM discover_launches WHERE (? IS NULL OR created_at >= ?) GROUP BY creator ORDER BY cnt DESC LIMIT ?",
-            (since_iso, since_iso, limit),
-        ).fetchall()
-        for row in launches:
-            result.append(
-                {
-                    "wallet": row["creator"],
-                    "first_seen_slot": row["first_slot"],
-                    "launch_count": row["cnt"],
-                    "winrate": None,
-                    "best_tp": None,
-                    "updated_at": since_iso,
-                }
-            )
-    return result
-
-
 def fetch_dossier(
     db: DatabaseManager,
     wallet: str,
@@ -699,6 +673,52 @@ def fetch_dossier(
     if row is None:
         return None
     return dict(row)
+
+
+def save_rugger_cache(
+    db: DatabaseManager,
+    *,
+    wallet: str,
+    payload_json: str,
+) -> None:
+    """Persist the entity-level rugger enrichment cache for one operator wallet.
+
+    Kept separate from ``discover_dossier`` so bulk ``rank_ruggers`` caching never
+    clobbers an explicit ``enrich`` dossier report for the same wallet.
+    """
+
+    conn = db.connection
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            INSERT INTO discover_rugger_cache (wallet, payload_json, enriched_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(wallet) DO UPDATE SET
+                payload_json=excluded.payload_json,
+                enriched_at=excluded.enriched_at
+            """,
+            (wallet, payload_json, dt.datetime.now(dt.UTC).isoformat()),
+        )
+        conn.execute("COMMIT")
+    except sqlite3.Error:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
+
+
+def fetch_rugger_cache(
+    db: DatabaseManager,
+    wallet: str,
+) -> dict[str, object] | None:
+    """Return the persisted rugger enrichment cache row for a wallet."""
+
+    row = db.connection.execute(
+        "SELECT * FROM discover_rugger_cache WHERE wallet = ?", (wallet,)
+    ).fetchone()
+    return dict(row) if row is not None else None
 
 
 def fetch_launches_for_wallet(

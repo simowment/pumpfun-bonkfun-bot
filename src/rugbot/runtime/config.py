@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from urllib.parse import urlsplit
 
 import base58
@@ -40,10 +40,17 @@ MAX_JITO_TIP_LAMPORTS = 100_000_000
 MAX_COMPUTE_UNIT_LIMIT = 1_400_000
 MAX_LOADED_ACCOUNTS_DATA_SIZE = 64_000_000
 SUPPORTED_ROUTING_POLICIES = {"rpc", "jito"}
+TRACKER_DB_FILENAME: Final[str] = "rugbot.db"
+DEFAULT_MAX_RPC_CALLS_PER_COMMAND: Final[int] = 25
+MAX_RPC_CALLS_ENV_VAR: Final[str] = "RUGBOT_MAX_RPC_CALLS"
 
 
 class SniperConfigError(ValueError):
     """Raised when the watcher configuration is malformed."""
+
+
+class TrackerDbPathError(ValueError):
+    """Raised when the tracker database location cannot be resolved safely."""
 
 
 class TargetKind(StrEnum):
@@ -181,6 +188,30 @@ class ProviderSettings:
     pumpportal_api_key: str | None
 
 
+def resolve_max_rpc_calls_per_command(
+    environment: Mapping[str, str] | None = None,
+) -> int:
+    """Resolve the per-command RPC call budget, fail-closed to the default.
+
+    Reads ``RUGBOT_MAX_RPC_CALLS``; missing, non-integer, or non-positive
+    values return ``DEFAULT_MAX_RPC_CALLS_PER_COMMAND`` instead of raising
+    so a garbage env value degrades to the safe budget rather than
+    disabling the guard or crashing the command.
+    """
+
+    values = os.environ if environment is None else environment
+    raw = values.get(MAX_RPC_CALLS_ENV_VAR)
+    if raw is None or not raw.strip():
+        return DEFAULT_MAX_RPC_CALLS_PER_COMMAND
+    try:
+        parsed = int(raw.strip())
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_RPC_CALLS_PER_COMMAND
+    if parsed <= 0:
+        return DEFAULT_MAX_RPC_CALLS_PER_COMMAND
+    return parsed
+
+
 def load_provider_settings(
     environment: Mapping[str, str] | None = None,
 ) -> ProviderSettings:
@@ -289,6 +320,37 @@ def resolve_state_dir(path: Path | None = None) -> Path:
     return candidate
 
 
+def resolve_tracker_db_path(state_dir: Path | str | None = None) -> Path:
+    """Resolve the canonical tracker SQLite path, failing closed on bad input.
+
+    ``RUGBOT_DB_PATH`` wins when it names a writable file. Otherwise the
+    tracker database is ``<state_dir>/rugbot.db``, the location already used by
+    the watch runtime, the sniper runtime, and the config store. No
+    host-specific default exists: a malformed override raises instead of
+    silently redirecting persisted tracker state to an unintended file.
+    """
+
+    override = os.environ.get("RUGBOT_DB_PATH")
+    if override is not None and override.strip():
+        candidate = Path(override.strip()).expanduser()
+        if candidate.is_dir():
+            raise TrackerDbPathError(
+                "RUGBOT_DB_PATH must name a database file, not a directory"
+            )
+        if not candidate.is_absolute():
+            candidate = Path.cwd() / candidate
+    else:
+        resolved = Path(state_dir) if isinstance(state_dir, str) else state_dir
+        candidate = resolve_state_dir(resolved) / TRACKER_DB_FILENAME
+    try:
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise TrackerDbPathError(
+            f"tracker database directory is not writable: {candidate.parent}"
+        ) from error
+    return candidate
+
+
 def resolve_dotenv(*, include_signing: bool = False) -> None:
     """Load only environment values needed by the current execution mode."""
 
@@ -302,6 +364,8 @@ def resolve_dotenv(*, include_signing: bool = False) -> None:
         "DISCORD_TOKEN",
         "DISCORD_CHANNEL_ID",
         "DISCORD_ALLOWED_USER_IDS",
+        "DISCORD_ENTITY_WEBHOOK_URL",
+        "RUGBOT_MAX_RPC_CALLS",
     }
 
     if include_signing:
@@ -311,6 +375,10 @@ def resolve_dotenv(*, include_signing: bool = False) -> None:
         if not env_path.exists():
             continue
         for key, value in dotenv_values(env_path).items():
+            # The saved file is authoritative over inherited process env
+            # (e.g. harness-injected defaults): operators configure
+            # endpoints by editing .env. Per-run switching belongs to an
+            # explicit CLI flag (--rpc), never to ambient environment.
             if key in allowed and value is not None:
                 os.environ[key] = value
 

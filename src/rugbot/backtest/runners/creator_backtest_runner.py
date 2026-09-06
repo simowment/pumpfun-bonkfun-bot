@@ -364,7 +364,6 @@ def resolve_tp_sl_matrix(
 _DISCOVER_DB_CANDIDATES = [
     Path(".state/discover/rugbot.db"),
     Path(".state/rugbot.db"),
-    Path("data/tracker.db"),
 ]
 
 MAX_SAMPLES_CAP = 40

@@ -13,10 +13,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 import base58
 from sol_trade_sdk.pump import derive_bonding_curve_pda
-from sol_trade_sdk.solana.provider_pool import RpcProviderPool
 from solders.pubkey import Pubkey
 
 from rugbot.application.commands import COMMAND_REGISTRY, BotCommand, CommandResult
+from rugbot.discover.ruggers import rank_ruggers
 from rugbot.domain.decisions import AbstainResult
 from rugbot.domain.entities import TargetRecord
 from rugbot.domain.observations import RawChainObservation
@@ -26,6 +26,7 @@ from rugbot.ingest.pump.pump_create_observation import (
 )
 from rugbot.ingest.pump.pump_stream import PumpPortalLaunchStream
 from rugbot.ingest.rpc_observer import observe_address, observe_finalized_transaction
+from rugbot.integrations.rpc_access import shared_async_pool
 from rugbot.integrations.solscan import (
     SolscanClient,
     SolscanProviderError,
@@ -83,6 +84,7 @@ if TYPE_CHECKING:
 
     from sol_trade_sdk.solana.provider_pool import RpcHttpTransport
 
+    from rugbot.discover.ruggers import RuggerEvidence
     from rugbot.execution.position_runtime import PaperPositionState
     from rugbot.runtime.sniper_runtime import SniperRuntime
     from rugbot.runtime.workers.sniper_daemon import (
@@ -368,7 +370,7 @@ class RugbotApp:
         store = JsonlObservationStore(
             self._state_dir / "entity_cache" / f"{creator}.jsonl"
         )
-        transport = RpcProviderPool((self._endpoint, *self._fallback_endpoints))
+        transport = shared_async_pool((self._endpoint, *self._fallback_endpoints))
         observation = await observe_finalized_transaction(
             creation.creation_signature,
             expected_slot=None,
@@ -498,7 +500,7 @@ class RugbotApp:
             self._repository.save_entity_backfill(running)
             remaining = requested - cached_count
             batch_size = min(ENTITY_BACKFILL_BATCH_SIZE, max(remaining, 1))
-            transport = RpcProviderPool(
+            transport = shared_async_pool(
                 (self._endpoint, *self._fallback_endpoints),
                 minimum_interval_seconds=0.125,
             )
@@ -1061,6 +1063,34 @@ class RugbotApp:
             "transfers_count": len(self._repository.get_transfers()),
         }
 
+    def discover_ruggers(
+        self,
+        *,
+        since: str | None = None,
+        min_launches: int = 2,
+        limit: int = 50,
+        max_creations: int = 10,
+        use_rpc: bool = True,
+    ) -> list[RuggerEvidence]:
+        """Rank rugger entities from the headless discover DB (stats manual).
+
+        Reads the ``rug_discover`` database at the canonical ``.state/discover``
+        location — separate from this app's watch/tracker DB — and delegates
+        entity resolution (funding chain) and the lifetime spam cap to
+        :func:`rugbot.discover.ruggers.rank_ruggers`, which loads provider
+        settings (SOLANA_RPC_HTTP + fallbacks) itself. Winrate/EV are not
+        auto-computed; each row carries the manual ``rug_check`` command.
+        Read-only (§7): the result recommends arming a listener but never
+        auto-arms or trades.
+        """
+        return rank_ruggers(
+            since=since,
+            min_launches=min_launches,
+            limit=limit,
+            max_creations=max_creations,
+            use_rpc=use_rpc,
+        )
+
     def targets(self) -> list[TargetRecord]:
         """Return all target entities with their execution policy and performance."""
         funders = self._repository.get_funders()
@@ -1249,7 +1279,7 @@ def build_ui_runtime(  # noqa: PLR0913
         transport
         if transport is not None
         else (
-            RpcProviderPool((resolved_endpoint, *resolved_fallback_endpoints))
+            shared_async_pool((resolved_endpoint, *resolved_fallback_endpoints))
             if resolved_endpoint and resolved_fallback_endpoints
             else None
         )

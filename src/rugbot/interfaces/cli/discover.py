@@ -8,9 +8,14 @@ import argparse
 import asyncio
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from rugbot.discover.collector import run_collect
+
+if TYPE_CHECKING:
+    from rugbot.discover.ruggers import RuggerEvidence
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -124,6 +129,46 @@ def build_parser() -> argparse.ArgumentParser:
         help="bible max creations per dev/bundler (default: 5, 0=disable, 1..100)",
     )
     cand.add_argument(
+        "--state-dir",
+        type=Path,
+        default=Path(".state/discover"),
+        help="state directory (default: .state/discover)",
+    )
+
+    ruggers = sub.add_parser(
+        "ruggers",
+        help="rank rugger entities (bible 1 spam cap, funding-cluster archetype); stats manual via rug_check",
+    )
+    ruggers.add_argument(
+        "--since",
+        type=str,
+        default=None,
+        help="only rank launches created within window e.g. 24h, 7d, 30d (default: all)",
+    )
+    ruggers.add_argument(
+        "--min-launches",
+        type=int,
+        default=2,
+        help="minimum in-window launches by one creator to seed (default: 2)",
+    )
+    ruggers.add_argument(
+        "--limit", type=int, default=50, help="max ranked rows (default: 50, max 500)"
+    )
+    ruggers.add_argument(
+        "--max-creations",
+        type=int,
+        default=10,
+        help="bible 1 spam cap: lifetime creations above this exclude the wallet as mass_spammer (default: 10, ceiling 100)",
+    )
+    ruggers.add_argument(
+        "--no-rpc",
+        action="store_true",
+        help="collected-DB-only fallback: honest in-window counts, no entity resolution (labeled no_rpc)",
+    )
+    ruggers.add_argument(
+        "--json", action="store_true", help="emit JSON evidence contract"
+    )
+    ruggers.add_argument(
         "--state-dir",
         type=Path,
         default=Path(".state/discover"),
@@ -269,6 +314,48 @@ def _print_status(state_dir: Path, as_json: bool) -> int:
             "note: collect runs headless; Web may remain closed (WAL concurrent reads)"
         )
     return 0
+
+
+def _print_ruggers_table(evidence: list[RuggerEvidence]) -> None:
+    """Print the entity discovery ranking as a human-readable table."""
+
+    if not evidence:
+        print("no rugger entities ranked (widen --since or lower --min-launches)")
+        return
+    print(
+        f"{'#':>3} {'entity (operator wallet)':<52} {'life':>5} {'in-win':>6} "
+        f"{'archetype':<24} {'status':<14}"
+    )
+    spam_excluded = 0
+    for item in evidence:
+        if item.archetype == "mass_spammer":
+            spam_excluded += 1
+        qual = item.qualification
+        life_str = (
+            str(item.lifetime_creation_count)
+            if item.lifetime_creation_count is not None
+            else "?"
+        )
+        entity_str = f"{item.operator[:44]:<44} x{len(item.entity_wallets)}"
+        print(
+            f"{item.rank:>3} {entity_str[:52]:<52} {life_str:>5} "
+            f"{item.in_window_launch_count:>6} "
+            f"{item.archetype:<24} {qual.status:<14}"
+        )
+        if item.funding_summary:
+            print(f"     funding: {item.funding_summary}")
+        if qual.status != "stats_manual":
+            print(f"     reason: {qual.reason}")
+        print(f"     next: {item.next_action}")
+    if spam_excluded:
+        print(
+            f"\nspam_excluded: {spam_excluded} mass spammers ranked last "
+            "(bible 1: lifetime creations > cap are excluded)"
+        )
+    print(
+        "\nstats: winrate/EV are manual - run "
+        "`uv run rug_check <wallet> --score --entity` per target"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -431,6 +518,46 @@ def main(argv: list[str] | None = None) -> int:
                     else "spam_bundlers_excluded"
                 )
                 print(f"{label}: {spam_excluded} (max_creations={max_creations})")
+        return 0
+    if args.command == "ruggers":
+        state_dir: Path = args.state_dir
+        as_json: bool = bool(args.json)
+        since = getattr(args, "since", None)
+        min_launches = int(getattr(args, "min_launches", 2))
+        limit: int = int(getattr(args, "limit", 50))
+        max_creations: int = int(getattr(args, "max_creations", 10))
+        use_rpc: bool = not bool(getattr(args, "no_rpc", False))
+        try:
+            from rugbot.discover.ruggers import TYPE2_NOTE, rank_ruggers
+
+            evidence = rank_ruggers(
+                state_dir,
+                since=since,
+                min_launches=min_launches,
+                limit=limit,
+                max_creations=max_creations,
+                use_rpc=use_rpc,
+            )
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"ruggers ranking failed: {exc}", file=sys.stderr)
+            return 1
+        if as_json:
+            print(
+                json.dumps(
+                    {
+                        "ruggers": [asdict(item) for item in evidence],
+                        "type2_note": TYPE2_NOTE,
+                    },
+                    sort_keys=True,
+                )
+            )
+        else:
+            _print_ruggers_table(evidence)
+            print()
+            print(f"type2: {TYPE2_NOTE}")
         return 0
     if args.command == "dossier":
         state_dir: Path = args.state_dir

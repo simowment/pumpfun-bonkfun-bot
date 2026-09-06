@@ -59,6 +59,44 @@ class PumpTradeInstructionEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class PumpTradeEventProof:
+    """Executed amounts and fees decoded from one finalized Pump event.
+
+    ``lp_fee_*`` and the ``quote_*`` legs are PumpSwap AMM only; the bonding
+    curve charges protocol and creator fees alone. ``lp_fee_basis_points``
+    participates in ``FeeConfig.swap_total_fee_bps``, so dropping it silently
+    undercharges every AMM exit quote.
+    """
+
+    mint: str
+    user: str
+    sol_amount_base_units: int
+    token_amount_base_units: int
+    is_buy: bool
+    instruction_name: str
+    timestamp: int
+    virtual_sol_reserves_base_units: int
+    virtual_token_reserves_base_units: int
+    real_sol_reserves_base_units: int
+    real_token_reserves_base_units: int
+    protocol_fee_base_units: int
+    creator_fee_base_units: int
+    protocol_fee_basis_points: int
+    creator_fee_basis_points: int
+    cashback_base_units: int
+    encoded_event: bytes
+    buyback_fee_basis_points: int = 0
+    buyback_fee_base_units: int = 0
+    shareholders: tuple[tuple[str, int], ...] = ()
+    quote_mint: str = ""
+    quote_amount_base_units: int = 0
+    virtual_quote_reserves_base_units: int = 0
+    real_quote_reserves_base_units: int = 0
+    lp_fee_basis_points: int = 0
+    lp_fee_base_units: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class PumpSwapTradeInstructionEvidence:
     """Decoded PumpSwap instruction evidence before fill reconstruction."""
 

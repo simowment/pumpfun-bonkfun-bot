@@ -39,33 +39,6 @@ class TargetExecutionPolicy:
     updated_at: str
 
 
-class DecisionKind(StrEnum):
-    """Canonical qualification and execution decision kinds."""
-
-    PASS = "PASS"  # noqa: S105
-    SKIP = "SKIP"
-    EXEC = "EXEC"
-    FAIL = "FAIL"
-
-
-@dataclass(frozen=True, slots=True)
-class DecisionEvent:
-    """Canonical domain-evaluated decision event emitted when evaluating a launch candidate."""
-
-    kind: DecisionKind
-    token_symbol: str
-    token_mint: str
-    creator_wallet: str
-    root_funder: str
-    reason: str
-    timestamp: str
-    market_cap_usd: float | None = None
-    winrate_pct: float | None = None
-    block_number: int | None = None
-    latency_summary: str | None = None
-    order_size_sol: float | None = None
-
-
 @dataclass(slots=True)
 class TargetStrategy:
     """Target-specific execution, qualification strategy rules, and fee configuration."""
@@ -105,15 +78,20 @@ class TargetStrategy:
 
 @dataclass(slots=True)
 class TargetRecord:
-    """Tracked target dev/funder wallet entity with assigned strategy and track record."""
+    """Tracked target dev/funder wallet entity with assigned strategy and track record.
+
+    ``winrate_pct`` and ``avg_ath_pct`` stay ``None`` until a launch-outcome
+    dataset measures them. ``None`` means unmeasured; ``0.0`` would read as a
+    measured zero and is the fabrication the tracker must not report.
+    """
 
     address: str
     label: str = "Target Dev"
     policy: TargetExecutionPolicy | None = None
     strategy: TargetStrategy = field(default_factory=TargetStrategy)
     launches_count: int = 0
-    winrate_pct: float = 0.0
-    avg_ath_pct: float = 0.0
+    winrate_pct: float | None = None
+    avg_ath_pct: float | None = None
     perf_metric: str = "—"
 
 
@@ -312,8 +290,6 @@ class FundingPath:
 __all__ = [
     "LAMPORTS_PER_SOL",
     "AlertOutboxRecord",
-    "DecisionEvent",
-    "DecisionKind",
     "EntityEdge",
     "EntityRelation",
     "EntityRole",

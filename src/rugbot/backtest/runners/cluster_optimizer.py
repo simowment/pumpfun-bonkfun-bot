@@ -98,6 +98,17 @@ class ClusterBacktestReport:
     avg_inter_launch_minutes: float = 0.0
     min_inter_launch_minutes: float = 0.0
 
+    @property
+    def optimal_evaluation(self) -> TpGridEvaluation | None:
+        """Return the row the optimizer selected, or None when none is profitable.
+
+        No row is flagged optimal when the best expected value is not positive,
+        so callers must treat a missing row as "no optimal strategy" instead of
+        substituting the first grid row. Substituting reports a winrate and fee
+        total for a strategy the same report declares UNPROFITABLE.
+        """
+        return next((row for row in self.evaluations if row.is_optimal), None)
+
 
 def _eval_tp(  # noqa: PLR0913
     tp: float,

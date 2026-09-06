@@ -1,13 +1,12 @@
 """Unified CLI for token/wallet resolution, cluster intelligence, and backtest optimization."""
 
-# ruff: noqa: C901, PLR0912, PLR0915, PTH103, PTH120
+# ruff: noqa: C901, PLR0912, PLR0915, PLR0911
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
-import os
 import sys
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
@@ -16,6 +15,8 @@ from rugbot.backtest.runners.cluster_optimizer import (
     HistoricalTokenSample,
     run_cluster_tp_grid_search,
 )
+from rugbot.decision.lite_profiler import profile_launches
+from rugbot.integrations.pumpfun_api import PumpFunApiClient, get_client
 from rugbot.intelligence.token_resolver import (
     fetch_token_metadata,
     resolve_token_or_wallet,
@@ -25,10 +26,22 @@ from rugbot.intelligence.wallet_intelligence import (
     abstention_to_json,
     scan_wallet_intelligence,
 )
-from rugbot.runtime.config import load_provider_settings, resolve_dotenv
+from rugbot.runtime.config import (
+    TrackerDbPathError,
+    load_provider_settings,
+    resolve_dotenv,
+    resolve_tracker_db_path,
+)
 from rugbot.storage.database import DatabaseManager
 from rugbot.storage.tracker import SQLiteTrackerRepository
 from rugbot.tracker.cluster_graph_model import build_cluster_intelligence_model
+from rugbot.tracker.funder_discovery import (
+    get_shared_rpc_cache,
+    inbound_staged_to_json,
+    outbound_staged_to_json,
+    scan_inbound_staging,
+    scan_outbound_staging,
+)
 from rugbot.tracker.models import (
     FunderRecord,
     LaunchRecord,
@@ -37,6 +50,10 @@ from rugbot.tracker.models import (
     TransferRecord,
     WalletRecord,
     WalletStatus,
+)
+from rugbot.tracker.operator_graph import (
+    find_operator_links,
+    operator_links_to_json,
 )
 
 if TYPE_CHECKING:
@@ -111,7 +128,220 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=True,
         help="Format human-readable terminal report (default: True).",
     )
+    parser.add_argument(
+        "--lite-profile",
+        action="store_true",
+        help="REST-only lite TP profile over recent launches (estimate).",
+    )
+    parser.add_argument(
+        "--trace-funding",
+        action="store_true",
+        help="walk funding transfers for staged deployers (extra RPC calls)",
+    )
+    parser.add_argument(
+        "--rpc",
+        type=str,
+        default=None,
+        help="override SOLANA_RPC_HTTP for this call (top precedence).",
+    )
     return parser
+
+
+LITE_PROFILE_MAX_MINTS: Final[int] = 20
+# Fixed round-trip cost estimate in basis points (not measured per trade).
+LITE_PROFILE_FEE_BPS: Final[int] = 60
+# USD threshold above which the MCAP line compacts values to $K.
+USD_COMPACT_THOUSAND: Final[float] = 1000.0
+
+
+def _format_usd_compact(usd_value: float) -> str:
+    """Format a USD value compactly for the lite-profile MCAP line.
+
+    Args:
+        usd_value: Value in USD.
+
+    Returns:
+        Compact string such as ``"$3.5K"``, ``"$42.50"``, or ``"$0.5000"``.
+    """
+    if usd_value >= USD_COMPACT_THOUSAND:
+        return f"${usd_value / USD_COMPACT_THOUSAND:.1f}K"
+    if usd_value >= 1:
+        return f"${usd_value:.2f}"
+    return f"${usd_value:.4f}"
+
+
+def _lite_mint_mcap_sol(
+    client: PumpFunApiClient,
+    mint: str,
+    candles: list[dict],
+    sol_price: float,
+) -> tuple[float, float] | None:
+    """Return ``(entry, ATH)`` mcap in SOL for one mint.
+
+    Scaling (pinned 2026-09-03 with live read-only GETs): swap-api candle
+    prices are USD per token (last close x 1e9 equalled ``market_cap_usd``),
+    so ``mcap_sol = price_usd * supply_tokens / sol_price`` with
+    ``supply_tokens = total_supply / 10**base_decimals`` from ``fetch_token``.
+    Entry uses the first-candle close (first buyable print; the open is the
+    fixed curve-start constant). ATH is recomputed from max candle high
+    because ``ath_market_cap`` units are ambiguous.
+
+    Args:
+        client: REST client for the per-mint token fetch.
+        mint: Token mint address.
+        candles: Candle dicts carrying ``open``/``high``/``close`` prices.
+        sol_price: USD per SOL from ``fetch_sol_price``.
+
+    Returns:
+        Entry/ATH mcap pair in SOL, or None when unknown (fail-soft).
+    """
+    try:
+        token = client.fetch_token(mint)
+    except Exception:  # noqa: BLE001 — per-mint mcap is fail-soft
+        return None
+    if not isinstance(token, dict):
+        return None
+    supply_raw = token.get("total_supply", 0)
+    decimals = token.get("base_decimals", 6)
+    if isinstance(supply_raw, bool) or not isinstance(supply_raw, (int, float)):
+        return None
+    if isinstance(decimals, bool) or not isinstance(decimals, (int, float)):
+        return None
+    supply_tokens = float(supply_raw) / (10 ** int(decimals))
+    if not supply_tokens > 0:
+        return None
+    try:
+        entry_usd = float(candles[0].get("close"))
+        peak_usd = max(float(candle.get("high")) for candle in candles)
+    except (ValueError, TypeError, AttributeError, IndexError):
+        return None
+    if not (entry_usd > 0 and peak_usd > 0):
+        return None
+    entry_mcap = entry_usd * supply_tokens / sol_price
+    ath_mcap = peak_usd * supply_tokens / sol_price
+    return (entry_mcap, ath_mcap)
+
+
+def _run_lite_profile(target_input: str) -> int:
+    """Run the REST-only lite TP profile and print the compact table.
+
+    Args:
+        target_input: Token mint or creator wallet address.
+
+    Returns:
+        Process exit code (always 0; failures abstain without traceback).
+    """
+    try:
+        client = get_client()
+        token = client.fetch_token(target_input)
+        creator = token.get("creator") if token else None
+        creator_wallet = (
+            str(creator) if isinstance(creator, str) and creator else target_input
+        )
+        page = client.fetch_user_created_coins(creator_wallet, limit=50, offset=0)
+        coins = page.get("coins", []) if isinstance(page, dict) else []
+        mints: list[str] = []
+        for coin in coins:
+            if not isinstance(coin, dict):
+                continue
+            mint = coin.get("mint") or coin.get("address")
+            if isinstance(mint, str) and mint and mint not in mints:
+                mints.append(mint)
+            if len(mints) >= LITE_PROFILE_MAX_MINTS:
+                break
+        if not mints:
+            print(f"Lite profile abstained: no launches for {creator_wallet}")
+            return 0
+        candles_by_mint = {
+            mint: client.fetch_candlesticks(mint, interval="1s", limit=300)
+            for mint in mints
+        }
+        sol_quote = client.fetch_sol_price()
+        sol_price = sol_quote.get("solPrice") if isinstance(sol_quote, dict) else None
+        mcap_sol_by_mint: dict[str, tuple[float, float]] = {}
+        mcap_missing = 0
+        if isinstance(sol_price, (int, float)) and sol_price > 0:
+            for mint, candles in candles_by_mint.items():
+                pair = _lite_mint_mcap_sol(client, mint, candles, float(sol_price))
+                if pair is None:
+                    mcap_missing += 1
+                else:
+                    mcap_sol_by_mint[mint] = pair
+        else:
+            mcap_missing = len(candles_by_mint)
+        report = profile_launches(
+            candles_by_mint,
+            fee_bps=LITE_PROFILE_FEE_BPS,
+            mcap_sol_by_mint=mcap_sol_by_mint,
+        )
+        if report.launch_count == 0 or report.optimal_tp is None:
+            print(f"Lite profile abstained: no usable candles for {creator_wallet}")
+            return 0
+        optimal = report.optimal_tp
+        print(f"Lite profile for {creator_wallet} (N={report.launch_count})")
+        sol_usd = (
+            float(sol_price)
+            if isinstance(sol_price, (int, float)) and sol_price > 0
+            else None
+        )
+        if report.mcap_scored_count and sol_usd:
+            missing_note = f", {mcap_missing} without mcap" if mcap_missing else ""
+            print(
+                f"MCAP — entry avg "
+                f"{_format_usd_compact(report.entry_mcap_sol_avg * sol_usd)} "
+                f"(~{report.entry_mcap_sol_avg:.1f} SOL), ATH avg "
+                f"{_format_usd_compact(report.ath_mcap_sol_avg * sol_usd)} "
+                f"(~{report.ath_mcap_sol_avg:.1f} SOL), median "
+                f"{_format_usd_compact(report.ath_mcap_sol_median * sol_usd)}, "
+                f"max {_format_usd_compact(report.ath_mcap_sol_max * sol_usd)}, "
+                f"min {_format_usd_compact(report.ath_mcap_sol_min * sol_usd)} "
+                f"(N={report.mcap_scored_count} scored{missing_note})"
+            )
+        elif report.mcap_scored_count:
+            # sol_price fetch failed after mcap stats were scored: keep the
+            # SOL-only line rather than converting USD with a stale price.
+            missing_note = f", {mcap_missing} without mcap" if mcap_missing else ""
+            print(
+                f"MCAP SOL — entry avg (1st-close) "
+                f"{report.entry_mcap_sol_avg:.2f}, "
+                f"min {report.entry_mcap_sol_min:.2f}, "
+                f"max {report.entry_mcap_sol_max:.2f}; ATH avg "
+                f"{report.ath_mcap_sol_avg:.2f}, "
+                f"median {report.ath_mcap_sol_median:.2f}, "
+                f"max {report.ath_mcap_sol_max:.2f}, "
+                f"min {report.ath_mcap_sol_min:.2f} "
+                f"(N={report.mcap_scored_count} scored{missing_note})"
+            )
+        else:
+            print(
+                f"ATH x — avg {report.ath_avg:.2f}, "
+                f"median {report.ath_median:.2f}, "
+                f"max {report.ath_max:.2f}, min {report.ath_min:.2f} "
+                f"(N={report.launch_count} scored)"
+            )
+        exit_note = ""
+        if report.entry_mcap_sol_avg > 0:
+            exit_sol = optimal.tp_multiple * report.entry_mcap_sol_avg
+            if sol_usd:
+                exit_note = (
+                    f" (~{_format_usd_compact(exit_sol * sol_usd)} at avg entry)"
+                )
+            else:
+                exit_note = f" (~{exit_sol:.1f} SOL at avg entry)"
+        qualify_note = (
+            "QUALIFIED" if optimal.qualifies else "needs N>=10 — NOT QUALIFIED"
+        )
+        print(
+            f"OPTIMAL TP — {optimal.tp_multiple:.2f}x{exit_note}, "
+            f"winrate {optimal.winrate_pct:.0f}%, "
+            f"EV {optimal.ev_multiple:+.2f}x, N={optimal.launch_count} "
+            f"({qualify_note})"
+        )
+        print("ESTIMATE — not executable proof")
+        return 0  # noqa: TRY300
+    except Exception:  # noqa: BLE001
+        print(f"Lite profile abstained: lookup failed for {target_input}")
+        return 0
 
 
 def _parse_timestamp(val: int | str | None, fallback: int) -> int:
@@ -148,16 +378,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     target_input = target_input.strip()
+    if args.lite_profile:
+        return _run_lite_profile(target_input)
     providers = load_provider_settings()
-    endpoint = providers.rpc_http
+    # Explicit CLI flag beats the saved file; the saved file beats any
+    # inherited process default. See runtime.config.resolve_dotenv.
+    endpoint = args.rpc or providers.rpc_http
     if endpoint is None:
         print("Error: SOLANA_RPC_HTTP is required.", file=sys.stderr)
         return 1
-    db_path = os.environ.get(
-        "RUGBOT_DB_PATH",
-        r"C:\Users\got\Documents\code\pumpfun-bonkfun-bot\data\tracker.db",
-    )
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    try:
+        db_path = resolve_tracker_db_path()
+    except TrackerDbPathError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
     db_mgr = DatabaseManager(db_path)
     repo = SQLiteTrackerRepository(db_mgr)
 
@@ -171,6 +405,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     root_funder = resolved.root_funder or wallet_address
     now_iso = datetime.now(UTC).isoformat()
     now_ts = int(datetime.now(UTC).timestamp())
+
+    # 1b. Funding-edge staging scans run BEFORE the heavy intelligence scan
+    # below. The handoff proof is a few RPC calls away on a fresh quota
+    # window, while the intelligence scan can exhaust burst quota first and
+    # leave staging to fail-fast abstain on leftovers. Results are assigned
+    # to the cluster model in 4b; every call is cached, so repeats are free.
+    trace_enabled = bool(args.trace_funding)
+    _staged_outbound: list = []
+    _staged_inbound: list = []
+    _outbound_warning: str | None = None
+    _inbound_warning: str | None = None
+    _staging_rpc_calls = 0
+    if trace_enabled:
+        try:
+            _staged_outbound, _outbound_warning, _calls = scan_outbound_staging(
+                wallet_address,
+                endpoint,
+                solscan_api_key=providers.solscan_api_key,
+            )
+            _staging_rpc_calls += _calls
+        except Exception:  # noqa: BLE001 — staging scan is additive fail-soft
+            _staged_outbound = []
+        try:
+            _staged_inbound, _inbound_warning, _calls = scan_inbound_staging(
+                wallet_address,
+                endpoint,
+                solscan_api_key=providers.solscan_api_key,
+            )
+            _staging_rpc_calls += _calls
+        except Exception:  # noqa: BLE001 — staging scan is additive fail-soft
+            _staged_inbound = []
 
     # 2. Scan finalized on-chain wallet intelligence before mutating tracking.
     scan_target = root_funder if root_funder != wallet_address else wallet_address
@@ -289,6 +554,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     # 4. Build Cluster Intelligence Model
     model = build_cluster_intelligence_model(repo, root_funder, target_label)
 
+    # 4b. Staging assignment (scans already ran in 1b on fresh quota).
+    # Opt-in via --trace-funding only; the default path issues no staging
+    # RPC calls. The operator graph stays here: it is REST-based and
+    # unaffected by RPC burst quota.
+    staging_skipped = not trace_enabled
+    staging_warning = _outbound_warning or _inbound_warning
+    staging_rpc_calls = _staging_rpc_calls
+    operator_linked: list[dict[str, object]] = []
+    operator_graph_warning: str | None = None
+    operator_graph_calls = 0
+    if staging_skipped:
+        model.outbound_staged = []
+        model.inbound_staged = []
+    else:
+        model.outbound_staged = outbound_staged_to_json(_staged_outbound)
+        model.inbound_staged = inbound_staged_to_json(_staged_inbound)
+        try:
+            graph_client = PumpFunApiClient(page_cache=get_shared_rpc_cache())
+            operator_links, operator_graph_warning, operator_graph_calls = (
+                find_operator_links(wallet_address, client=graph_client)
+            )
+            operator_linked = operator_links_to_json(operator_links)
+        except Exception:  # noqa: BLE001 — operator graph is additive fail-soft
+            operator_linked = []
+            operator_graph_warning = "operator graph failed"
+
     # 5. Run Cluster Backtest & Optimizer if requested
     cluster_launches = repo.get_launches_for_funder(root_funder)
     if not cluster_launches and wallet_address != root_funder:
@@ -334,9 +625,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # 6. Enroll policy if requested
     if enrolled:
+        optimal_tp_multiplier = (
+            backtest_report.optimal_tp_multiplier if backtest_report else None
+        )
         optimal_tp_ppm = (
-            int((backtest_report.optimal_tp_multiplier - 1.0) * 1_000_000)
-            if backtest_report
+            int((optimal_tp_multiplier - 1.0) * 1_000_000)
+            if optimal_tp_multiplier is not None
             else 1_000_000
         )
         repo.save_target_execution_policy(
@@ -355,17 +649,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     # 7. Output Format
-    if backtest_report:
-        optimal_eval = next(
-            (e for e in backtest_report.evaluations if e.is_optimal),
-            backtest_report.evaluations[0] if backtest_report.evaluations else None,
-        )
-        optimal_winrate = optimal_eval.winrate_pct if optimal_eval else 0.0
-        total_fees = optimal_eval.total_fees_paid_sol if optimal_eval else 0.0
-    else:
-        optimal_eval = None
-        optimal_winrate = 0.0
-        total_fees = 0.0
+    optimal_eval = backtest_report.optimal_evaluation if backtest_report else None
+    optimal_winrate = optimal_eval.winrate_pct if optimal_eval else None
+    total_fees = optimal_eval.total_fees_paid_sol if optimal_eval else None
 
     if args.json:
         out_dict = {
@@ -377,6 +663,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "cluster_tokens": model.token_count,
             "staged_wallets_count": model.staged_wallets_count,
             "next_deployer_candidate": model.next_deployer_candidate,
+            "outbound_staged": model.outbound_staged,
+            "inbound_staged": model.inbound_staged,
+            "staging_skipped": staging_skipped,
+            "staging_warning": staging_warning,
+            "staging_rpc_calls": staging_rpc_calls,
+            "operator_linked_wallets": operator_linked,
+            "operator_graph_warning": operator_graph_warning,
+            "operator_graph_calls": operator_graph_calls,
             "next_deployer_funding_sol": model.next_deployer_funding_sol,
             "enrolled": enrolled,
             "enrollment_rejection_reason": enrollment_rejection_reason,
@@ -522,14 +816,43 @@ def main(argv: Sequence[str] | None = None) -> int:
             f" 📊 ANALYTICAL BACKTEST & TP OPTIMIZER ({backtest_report.total_tokens_evaluated} Launches Evaluated):"
         )
         print(
-            f"   • Optimal Take-Profit:  {backtest_report.optimal_tp_label} (x{backtest_report.optimal_tp_multiplier:.2f})"
+            "   • Optimal Take-Profit:  "
+            + (
+                f"{backtest_report.optimal_tp_label} "
+                f"(x{backtest_report.optimal_tp_multiplier:.2f})"
+                if backtest_report.optimal_tp_multiplier is not None
+                else f"{backtest_report.optimal_tp_label} (no profitable target)"
+            )
         )
-        print(f"   • Historical Win Rate:  {optimal_winrate:.1f}%")
+        print(
+            "   • Historical Win Rate:  "
+            + (
+                f"{optimal_winrate:.1f}%"
+                if optimal_winrate is not None
+                else "unmeasured (no profitable TP row)"
+            )
+        )
         print(f"   • Net Simulated ROI:    {backtest_report.optimal_roi_pct:+.1f}%")
         print(
             f"   • Expected Value (EV):  {backtest_report.optimal_net_ev_sol:+.4f} SOL / trade"
         )
-        print(f"   • Total Fees Deducted:  {total_fees:.4f} SOL")
+        print(
+            "   • Fee Breakdown:        "
+            f"{backtest_report.jito_tip_sol:.4f} SOL Jito tip · "
+            f"{backtest_report.gas_fee_sol:.4f} SOL gas/priority · "
+            f"{backtest_report.dex_fee_pct:.2f}% DEX per leg"
+        )
+        print(
+            "   • Total Fees Deducted:  "
+            + (
+                f"{total_fees:.4f} SOL"
+                if total_fees is not None
+                else "unmeasured (no profitable TP row)"
+            )
+        )
+        print(
+            f"   • Bible Qualified:      {'✅ YES' if backtest_report.is_bible_qualified else '❌ NO'} ({backtest_report.qualification_reason})"
+        )
 
     if enrolled:
         print("\n" + "=" * 78)

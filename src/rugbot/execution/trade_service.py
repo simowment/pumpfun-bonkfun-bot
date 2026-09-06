@@ -1,27 +1,46 @@
 """Unified, developer-friendly Trading SDK and order execution service for Pump.fun."""
 
-# ruff: noqa: PLR0913, PLR0912, TRY003, BLE001
+# ruff: noqa: C901, PLR0912, PLR0913, PLR0915, PLR2004, TRY003, TRY301, BLE001, S110
 
 from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
 
 import base58
+from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
+from solders.keypair import Keypair
+from solders.message import Message
 from solders.pubkey import Pubkey
+from solders.transaction import Transaction
 
 from rugbot.domain.amounts import Slot
+from rugbot.execution.auto_router import AutoRouter, RouteVenue
 from rugbot.execution.live import LivePumpExecutionPort
 from rugbot.execution.ports import (
     ExecutionIntent,
     ExecutionMode,
     ExecutionReceipt,
 )
-from rugbot.execution.sender import RoutingPolicy
+from rugbot.execution.pumpswap_builder import (
+    PUMPSWAP_BUY_COMPUTE_UNITS,
+    PUMPSWAP_SELL_COMPUTE_UNITS,
+    build_pumpswap_buy_exact_quote_in_instructions,
+    build_pumpswap_sell_instructions,
+)
+from rugbot.execution.sender import (
+    JitoSender,
+    RoutingPolicy,
+    TransactionRouter,
+    create_jito_tip_instruction,
+)
+from rugbot.integrations.solana_rpc import SolanaClient
 from rugbot.runtime.config import (
     PUBKEY_LENGTH,
     load_provider_settings,
@@ -29,6 +48,9 @@ from rugbot.runtime.config import (
 )
 from rugbot.simulation.route_simulation import SimulationPumpExecutionPort
 from rugbot.utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from solders.instruction import Instruction
 
 logger = get_logger(__name__)
 
@@ -95,28 +117,28 @@ class BuyOrderSpec:
     @property
     def quote_lamports(self) -> int:
         """Convert SOL to lamports."""
-        return int(round(self.amount_sol * LAMPORTS_PER_SOL))
+        return round(self.amount_sol * LAMPORTS_PER_SOL)
 
     @property
     def max_slippage_bps(self) -> int:
         """Convert slippage percentage to basis points."""
-        return int(round(self.slippage_pct * 100))
+        return round(self.slippage_pct * 100)
 
     @property
     def priority_fee_microlamports(self) -> int:
         """Convert priority fee SOL to microlamports."""
-        return int(round(self.priority_fee_sol * MICROLAMPORTS_PER_SOL))
+        return round(self.priority_fee_sol * MICROLAMPORTS_PER_SOL)
 
     @property
     def jito_tip_lamports(self) -> int:
         """Convert Jito tip SOL to lamports."""
-        return int(round(self.jito_tip_sol * LAMPORTS_PER_SOL))
+        return round(self.jito_tip_sol * LAMPORTS_PER_SOL)
 
     @property
     def take_profit_pnl_ppm(self) -> int | None:
         """Convert TP percentage to PPM."""
         return (
-            int(round((self.take_profit_pct / 100.0) * PPM_DENOMINATOR))
+            round((self.take_profit_pct / 100.0) * PPM_DENOMINATOR)
             if self.take_profit_pct is not None
             else None
         )
@@ -125,7 +147,7 @@ class BuyOrderSpec:
     def stop_loss_pnl_ppm(self) -> int | None:
         """Convert SL percentage to negative PPM."""
         return (
-            -int(round((self.stop_loss_pct / 100.0) * PPM_DENOMINATOR))
+            -round((self.stop_loss_pct / 100.0) * PPM_DENOMINATOR)
             if self.stop_loss_pct is not None
             else None
         )
@@ -169,17 +191,17 @@ class SellOrderSpec:
     @property
     def max_slippage_bps(self) -> int:
         """Convert slippage percentage to basis points."""
-        return int(round(self.slippage_pct * 100))
+        return round(self.slippage_pct * 100)
 
     @property
     def priority_fee_microlamports(self) -> int:
         """Convert priority fee SOL to microlamports."""
-        return int(round(self.priority_fee_sol * MICROLAMPORTS_PER_SOL))
+        return round(self.priority_fee_sol * MICROLAMPORTS_PER_SOL)
 
     @property
     def jito_tip_lamports(self) -> int:
         """Convert Jito tip SOL to lamports."""
-        return int(round(self.jito_tip_sol * LAMPORTS_PER_SOL))
+        return round(self.jito_tip_sol * LAMPORTS_PER_SOL)
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,10 +248,6 @@ class ActivePosition:
     opened_at_ts: float = field(default_factory=time.time)
 
 
-import sqlite3
-from pathlib import Path
-
-
 class TradingService:
     """Unified trading client for executing and managing Pump.fun trades across Dry-Run and Live modes."""
 
@@ -241,6 +259,7 @@ class TradingService:
         default_mode: ExecutionMode = ExecutionMode.DRY_RUN,
         default_routing: RoutingPolicy = RoutingPolicy.RPC_ONLY,
         db_path: Path | str = Path(".state/trading.sqlite3"),
+        auto_router: AutoRouter | None = None,
     ) -> None:
         resolve_dotenv()
         providers = load_provider_settings()
@@ -251,6 +270,7 @@ class TradingService:
         self._default_mode = default_mode
         self._default_routing = default_routing
         self._db_path = Path(db_path)
+        self._auto_router = auto_router or AutoRouter(endpoint=self._endpoint)
         self._positions: dict[str, ActivePosition] = {}
         self._closed_trades: list[dict[str, Any]] = []
         self._lock = asyncio.Lock()
@@ -539,6 +559,15 @@ class TradingService:
                 if spec.routing == "jito"
                 else RoutingPolicy.RPC_ONLY
             )
+
+            # Auto-route: detect whether token is on bonding curve or graduated to PumpSwap AMM
+            venue = await self._auto_router.detect_venue(spec.mint)
+            if venue == RouteVenue.PUMPSWAP_AMM:
+                return await self._execute_pumpswap_buy(
+                    spec=spec,
+                    routing_policy=routing_policy,
+                )
+
             intent = ExecutionIntent(
                 intent_id=f"buy_{int(time.time_ns())}",
                 as_of_slot=Slot(0),
@@ -690,6 +719,16 @@ class TradingService:
                 if spec.routing == "jito"
                 else RoutingPolicy.RPC_ONLY
             )
+
+            # Auto-route: detect whether token is on bonding curve or graduated to PumpSwap AMM
+            venue = await self._auto_router.detect_venue(spec.mint)
+            if venue == RouteVenue.PUMPSWAP_AMM:
+                return await self._execute_pumpswap_sell(
+                    spec=spec,
+                    sell_tokens=sell_tokens,
+                    routing_policy=routing_policy,
+                    pos=pos,
+                )
             intent = ExecutionIntent(
                 intent_id=f"sell_{int(time.time_ns())}",
                 as_of_slot=Slot(0),
@@ -849,6 +888,406 @@ class TradingService:
             finally:
                 await adapter.close()
 
+    async def _execute_pumpswap_buy(
+        self,
+        *,
+        spec: BuyOrderSpec,
+        routing_policy: RoutingPolicy,
+    ) -> TradeResult:
+        """Execute a buy order routed through the graduated PumpSwap AMM venue."""
+        is_live = spec.mode == ExecutionMode.LIVE
+        if is_live and not self._private_key:
+            return TradeResult(
+                ok=False,
+                side=TradeSide.BUY,
+                mint=spec.mint,
+                mode=spec.mode,
+                sol_amount=spec.amount_sol,
+                token_amount=0,
+                error="Live execution requires SOLANA_PRIVATE_KEY in environment",
+            )
+
+        try:
+            pool_info = await self._auto_router.get_pumpswap_pool_info(spec.mint)
+            reserves = (
+                await self._auto_router.get_pool_reserves(pool_info[1])
+                if pool_info is not None
+                else None
+            )
+
+            if reserves is not None:
+                base_reserves, quote_reserves = reserves
+                expected_tokens = int(
+                    (base_reserves * spec.quote_lamports)
+                    / (quote_reserves + spec.quote_lamports)
+                )
+            else:
+                expected_tokens = int(
+                    (206_900_000_000_000 * spec.quote_lamports)
+                    / (30_000_000_000 + spec.quote_lamports)
+                )
+
+            min_tokens_out = max(
+                0, int(expected_tokens * (1.0 - spec.slippage_pct / 100.0))
+            )
+
+            if is_live:
+                if pool_info is None:
+                    return TradeResult(
+                        ok=False,
+                        side=TradeSide.BUY,
+                        mint=spec.mint,
+                        mode=spec.mode,
+                        sol_amount=spec.amount_sol,
+                        token_amount=0,
+                        error=f"PumpSwap AMM pool not found for token {spec.mint}",
+                    )
+                raw_pk = base58.b58decode(self._private_key.strip())
+                keypair = Keypair.from_bytes(raw_pk)
+                user_pk = keypair.pubkey()
+                pool_addr, pool_dict = pool_info
+
+                instructions = build_pumpswap_buy_exact_quote_in_instructions(
+                    user=user_pk,
+                    pool_address=pool_addr,
+                    pool=pool_dict,
+                    spendable_quote_in=spec.quote_lamports,
+                    min_base_amount_out=min_tokens_out,
+                )
+
+                tx_instructions: list[Instruction] = [
+                    set_compute_unit_limit(PUMPSWAP_BUY_COMPUTE_UNITS),
+                    set_compute_unit_price(spec.priority_fee_microlamports),
+                ]
+                jito_sender = JitoSender()
+                if (
+                    routing_policy == RoutingPolicy.JITO_ONLY
+                    and spec.jito_tip_lamports > 0
+                ):
+                    tip_acc = Pubkey.from_string(jito_sender.get_random_tip_account())
+                    tx_instructions.append(
+                        create_jito_tip_instruction(
+                            user_pk, tip_acc, spec.jito_tip_lamports
+                        )
+                    )
+                tx_instructions.extend(instructions)
+
+                client = SolanaClient(self._endpoint)
+                try:
+                    blockhash = await client.get_cached_blockhash()
+                    message = Message(tx_instructions, user_pk)
+                    transaction = Transaction([keypair], message, blockhash)
+                    raw_tx = bytes(transaction)
+                    sig = str(transaction.signatures[0])
+
+                    router = TransactionRouter(client=client, jito_sender=jito_sender)
+                    submission = await router.route(raw_tx, policy=routing_policy)
+                    if not submission.acknowledged:
+                        return TradeResult(
+                            ok=False,
+                            side=TradeSide.BUY,
+                            mint=spec.mint,
+                            mode=spec.mode,
+                            sol_amount=spec.amount_sol,
+                            token_amount=0,
+                            error="PumpSwap AMM buy transaction not acknowledged by senders",
+                        )
+                finally:
+                    await client.close()
+
+                tokens = expected_tokens
+                fee_sol = (
+                    float(spec.priority_fee_sol)
+                    + (
+                        float(spec.jito_tip_sol)
+                        if routing_policy == RoutingPolicy.JITO_ONLY
+                        else 0.0
+                    )
+                    + 0.000005
+                )
+            else:
+                tokens = expected_tokens
+                fee_sol = (
+                    float(spec.priority_fee_sol)
+                    + (
+                        float(spec.jito_tip_sol)
+                        if routing_policy == RoutingPolicy.JITO_ONLY
+                        else 0.0
+                    )
+                    + 0.000005
+                )
+                sig = f"dryrun_pumpswap_buy_{int(time.time_ns() // 1_000_000)}"
+
+            sol = spec.amount_sol
+            ui_tokens = tokens / 1_000_000.0 if tokens > 0 else 0.0
+            price = (sol / ui_tokens) if ui_tokens > 0 else 0.0
+
+            pos = ActivePosition(
+                mint=spec.mint,
+                entry_sol=sol,
+                entry_fees_sol=fee_sol,
+                token_amount=tokens,
+                entry_price_sol=price,
+                entry_slot=0,
+                mode=spec.mode,
+                take_profit_pct=spec.take_profit_pct,
+                stop_loss_pct=spec.stop_loss_pct,
+                trailing_stop_pct=spec.trailing_stop_pct,
+                max_hold_seconds=spec.max_hold_seconds,
+                peak_price_sol=price,
+                current_pnl_pct=0.0,
+                current_value_sol=sol,
+                unrealized_pnl_sol=-fee_sol,
+            )
+            self._positions[spec.mint] = pos
+            self._persist_position(pos)
+
+            prefix = "Live [PumpSwap AMM]" if is_live else "Dry-Run [PumpSwap AMM]"
+            return TradeResult(
+                ok=True,
+                side=TradeSide.BUY,
+                mint=spec.mint,
+                mode=spec.mode,
+                sol_amount=sol,
+                token_amount=tokens,
+                signature=sig,
+                effective_price_sol=price,
+                fee_sol=fee_sol,
+                slot=0,
+                message=f"{prefix} buy executed: {ui_tokens:,.2f} tokens received @ {price:.10f} SOL/token",
+                take_profit_pct=spec.take_profit_pct,
+                stop_loss_pct=spec.stop_loss_pct,
+            )
+        except Exception as exc:
+            return TradeResult(
+                ok=False,
+                side=TradeSide.BUY,
+                mint=spec.mint,
+                mode=spec.mode,
+                sol_amount=spec.amount_sol,
+                token_amount=0,
+                error=str(exc),
+            )
+
+    async def _execute_pumpswap_sell(
+        self,
+        *,
+        spec: SellOrderSpec,
+        sell_tokens: int,
+        routing_policy: RoutingPolicy,
+        pos: ActivePosition | None,
+    ) -> TradeResult:
+        """Execute a sell order routed through the graduated PumpSwap AMM venue."""
+        is_live = spec.mode == ExecutionMode.LIVE
+        if is_live and not self._private_key:
+            return TradeResult(
+                ok=False,
+                side=TradeSide.SELL,
+                mint=spec.mint,
+                mode=spec.mode,
+                sol_amount=0.0,
+                token_amount=sell_tokens,
+                error="Live execution requires SOLANA_PRIVATE_KEY in environment",
+            )
+
+        try:
+            if is_live:
+                raw_pk = base58.b58decode(self._private_key.strip())
+                keypair = Keypair.from_bytes(raw_pk)
+                user_pk = keypair.pubkey()
+
+                pool_info = await self._auto_router.get_pumpswap_pool_info(spec.mint)
+                if pool_info is None:
+                    return TradeResult(
+                        ok=False,
+                        side=TradeSide.SELL,
+                        mint=spec.mint,
+                        mode=spec.mode,
+                        sol_amount=0.0,
+                        token_amount=sell_tokens,
+                        error=f"PumpSwap AMM pool not found for token {spec.mint}",
+                    )
+                pool_addr, pool_dict = pool_info
+
+                reserves = await self._auto_router.get_pool_reserves(pool_dict)
+                if reserves is not None:
+                    base_reserves, quote_reserves = reserves
+                    expected_lamports = int(
+                        (quote_reserves * sell_tokens) / (base_reserves + sell_tokens)
+                    )
+                else:
+                    expected_lamports = int(
+                        (30_000_000_000 * sell_tokens)
+                        / (206_900_000_000_000 + sell_tokens)
+                    )
+                min_sol_out = max(
+                    0, int(expected_lamports * (1.0 - spec.slippage_pct / 100.0))
+                )
+
+                instructions = build_pumpswap_sell_instructions(
+                    user=user_pk,
+                    pool_address=pool_addr,
+                    pool=pool_dict,
+                    token_amount=sell_tokens,
+                    min_sol_out=min_sol_out,
+                    unwrap_sol=True,
+                )
+
+                tx_instructions: list[Instruction] = [
+                    set_compute_unit_limit(PUMPSWAP_SELL_COMPUTE_UNITS),
+                    set_compute_unit_price(spec.priority_fee_microlamports),
+                ]
+                jito_sender = JitoSender()
+                if (
+                    routing_policy == RoutingPolicy.JITO_ONLY
+                    and spec.jito_tip_lamports > 0
+                ):
+                    tip_acc = Pubkey.from_string(jito_sender.get_random_tip_account())
+                    tx_instructions.append(
+                        create_jito_tip_instruction(
+                            user_pk, tip_acc, spec.jito_tip_lamports
+                        )
+                    )
+                tx_instructions.extend(instructions)
+
+                client = SolanaClient(self._endpoint)
+                try:
+                    blockhash = await client.get_cached_blockhash()
+                    message = Message(tx_instructions, user_pk)
+                    transaction = Transaction([keypair], message, blockhash)
+                    raw_tx = bytes(transaction)
+                    sig = str(transaction.signatures[0])
+
+                    router = TransactionRouter(client=client, jito_sender=jito_sender)
+                    submission = await router.route(raw_tx, policy=routing_policy)
+                    if not submission.acknowledged:
+                        return TradeResult(
+                            ok=False,
+                            side=TradeSide.SELL,
+                            mint=spec.mint,
+                            mode=spec.mode,
+                            sol_amount=0.0,
+                            token_amount=sell_tokens,
+                            error="PumpSwap AMM transaction not acknowledged by senders",
+                        )
+                finally:
+                    await client.close()
+
+                sol = expected_lamports / LAMPORTS_PER_SOL
+                fee_sol = (
+                    float(spec.priority_fee_sol)
+                    + (
+                        float(spec.jito_tip_sol)
+                        if routing_policy == RoutingPolicy.JITO_ONLY
+                        else 0.0
+                    )
+                    + 0.000005
+                )
+            else:
+                pool_info = await self._auto_router.get_pumpswap_pool_info(spec.mint)
+                reserves = (
+                    await self._auto_router.get_pool_reserves(pool_info[1])
+                    if pool_info is not None
+                    else None
+                )
+                if reserves is not None:
+                    base_reserves, quote_reserves = reserves
+                    expected_lamports = int(
+                        (quote_reserves * sell_tokens) / (base_reserves + sell_tokens)
+                    )
+                else:
+                    expected_lamports = int(
+                        (30_000_000_000 * sell_tokens)
+                        / (206_900_000_000_000 + sell_tokens)
+                    )
+                sol = expected_lamports / LAMPORTS_PER_SOL
+                fee_sol = (
+                    float(spec.priority_fee_sol)
+                    + (
+                        float(spec.jito_tip_sol)
+                        if routing_policy == RoutingPolicy.JITO_ONLY
+                        else 0.0
+                    )
+                    + 0.000005
+                )
+                sig = f"dryrun_pumpswap_sell_{int(time.time_ns() // 1_000_000)}"
+
+            tokens = sell_tokens
+            ui_tokens = tokens / 1_000_000.0 if tokens > 0 else 0.0
+            price = (sol / ui_tokens) if ui_tokens > 0 else 0.0
+            realized_pnl_sol: float | None = None
+            realized_pnl_pct: float | None = None
+
+            if pos is not None:
+                fraction_sold = (
+                    tokens / pos.token_amount if pos.token_amount > 0 else 1.0
+                )
+                cost_basis_sol = pos.entry_sol * fraction_sold
+                buy_fees_sol = pos.entry_fees_sol * fraction_sold
+                total_trade_fees_sol = buy_fees_sol + fee_sol
+                realized_pnl_sol = sol - cost_basis_sol - total_trade_fees_sol
+                realized_pnl_pct = (
+                    (realized_pnl_sol / cost_basis_sol * 100.0)
+                    if cost_basis_sol > 0
+                    else 0.0
+                )
+
+                remaining = max(0, pos.token_amount - tokens)
+                if remaining == 0:
+                    del self._positions[spec.mint]
+                    self._delete_persisted_position(spec.mint)
+                else:
+                    pos.token_amount = remaining
+                    pos.entry_sol -= cost_basis_sol
+                    pos.entry_fees_sol -= buy_fees_sol
+                    self._persist_position(pos)
+
+                closed_rec = {
+                    "mint": spec.mint,
+                    "mode": spec.mode.value,
+                    "tokens_sold": tokens,
+                    "sol_proceeds": sol,
+                    "cost_basis_sol": cost_basis_sol,
+                    "fees_sol": total_trade_fees_sol,
+                    "realized_pnl_sol": realized_pnl_sol,
+                    "realized_pnl_pct": realized_pnl_pct,
+                    "timestamp": time.time(),
+                }
+                self._closed_trades.append(closed_rec)
+                self._persist_closed_trade(closed_rec)
+
+            prefix = "Live [PumpSwap AMM]" if is_live else "Dry-Run [PumpSwap AMM]"
+            pnl_msg = ""
+            if realized_pnl_sol is not None and realized_pnl_pct is not None:
+                pnl_sign = "+" if realized_pnl_sol >= 0 else ""
+                pnl_msg = f" | Net PnL: {pnl_sign}{realized_pnl_sol:.4f} SOL ({pnl_sign}{realized_pnl_pct:.2f}%)"
+
+            return TradeResult(
+                ok=True,
+                side=TradeSide.SELL,
+                mint=spec.mint,
+                mode=spec.mode,
+                sol_amount=sol,
+                token_amount=tokens,
+                signature=sig,
+                effective_price_sol=price,
+                fee_sol=fee_sol,
+                slot=0,
+                realized_pnl_sol=realized_pnl_sol,
+                realized_pnl_pct=realized_pnl_pct,
+                message=f"{prefix} sell executed: {ui_tokens:,.2f} tokens sold for {sol:.4f} SOL (@ {price:.10f} SOL/token){pnl_msg}",
+            )
+        except Exception as exc:
+            return TradeResult(
+                ok=False,
+                side=TradeSide.SELL,
+                mint=spec.mint,
+                mode=spec.mode,
+                sol_amount=0.0,
+                token_amount=sell_tokens,
+                error=str(exc),
+            )
+
     async def tick(self) -> list[TradeResult]:
         """Evaluate current prices for all active positions and auto-trigger TP/SL exits."""
         triggered_trades: list[TradeResult] = []
@@ -860,116 +1299,134 @@ class TradingService:
 
         for pos in positions_to_check:
             try:
-                # Estimate current sell value via simulation port
-                sim_intent = ExecutionIntent(
-                    intent_id=f"tick_{int(time.time_ns())}",
-                    as_of_slot=Slot(0),
-                    market_id=pos.mint,
-                    side="sell",
-                    quote_amount_base_units=None,
-                    base_amount_base_units=pos.token_amount,
-                    max_slippage_bps=1000,
-                    reason_codes=("tick_eval",),
-                )
-                port = SimulationPumpExecutionPort(
-                    endpoint=self._endpoint,
-                    signer_pubkey=DUMMY_SIMULATION_SIGNER,
-                )
-                try:
-                    receipt = await port.submit(sim_intent)
-                    if receipt.accepted and receipt.simulated_output_base_units:
+                venue = await self._auto_router.detect_venue(pos.mint)
+                if venue == RouteVenue.PUMPSWAP_AMM:
+                    pool_info = await self._auto_router.get_pumpswap_pool_info(pos.mint)
+                    reserves = (
+                        await self._auto_router.get_pool_reserves(pool_info[1])
+                        if pool_info is not None
+                        else None
+                    )
+                    if reserves is not None:
+                        base_reserves, quote_reserves = reserves
+                        expected_lamports = int(
+                            (quote_reserves * pos.token_amount)
+                            / (base_reserves + pos.token_amount)
+                        )
+                    else:
+                        expected_lamports = int(
+                            (30_000_000_000 * pos.token_amount)
+                            / (206_900_000_000_000 + pos.token_amount)
+                        )
+                    current_sol = float(expected_lamports) / LAMPORTS_PER_SOL
+                else:
+                    sim_intent = ExecutionIntent(
+                        intent_id=f"tick_{int(time.time_ns())}",
+                        as_of_slot=Slot(0),
+                        market_id=pos.mint,
+                        side="sell",
+                        quote_amount_base_units=None,
+                        base_amount_base_units=pos.token_amount,
+                        max_slippage_bps=1000,
+                        reason_codes=("tick_eval",),
+                    )
+                    port = SimulationPumpExecutionPort(
+                        endpoint=self._endpoint,
+                        signer_pubkey=DUMMY_SIMULATION_SIGNER,
+                    )
+                    try:
+                        receipt = await port.submit(sim_intent)
+                        if (
+                            not receipt.accepted
+                            or not receipt.simulated_output_base_units
+                        ):
+                            continue
                         current_sol = (
                             receipt.simulated_output_base_units / LAMPORTS_PER_SOL
                         )
-                        current_price = (
-                            current_sol / (pos.token_amount / 1_000_000.0)
-                            if pos.token_amount > 0
-                            else 0.0
+                    finally:
+                        await port.close()
+
+                current_price = (
+                    current_sol / (pos.token_amount / 1_000_000.0)
+                    if pos.token_amount > 0
+                    else 0.0
+                )
+                pos.current_value_sol = current_sol
+                pos.unrealized_pnl_sol = (
+                    current_sol - pos.entry_sol - pos.entry_fees_sol
+                )
+                pos.current_pnl_pct = (
+                    ((current_sol - pos.entry_sol) / pos.entry_sol * 100.0)
+                    if pos.entry_sol > 0
+                    else 0.0
+                )
+                pos.peak_price_sol = max(pos.peak_price_sol, current_price)
+                self._persist_position(pos)
+
+                # Check Take-Profit Trigger
+                if pos.take_profit_pct and pos.current_pnl_pct >= pos.take_profit_pct:
+                    logger.info(
+                        "TAKE-PROFIT triggered for %s at +%.2f%% (Target: +%.2f%%)",
+                        pos.mint,
+                        pos.current_pnl_pct,
+                        pos.take_profit_pct,
+                    )
+                    sell_res = await self.sell(pos.mint, percent=100.0, mode=pos.mode)
+                    triggered_trades.append(sell_res)
+                    continue
+
+                # Check Stop-Loss Trigger
+                if pos.stop_loss_pct and pos.current_pnl_pct <= -abs(pos.stop_loss_pct):
+                    logger.info(
+                        "STOP-LOSS triggered for %s at %.2f%% (Target: -%.2f%%)",
+                        pos.mint,
+                        pos.current_pnl_pct,
+                        pos.stop_loss_pct,
+                    )
+                    sell_res = await self.sell(pos.mint, percent=100.0, mode=pos.mode)
+                    triggered_trades.append(sell_res)
+                    continue
+
+                # Check Trailing Stop Trigger
+                if pos.trailing_stop_pct and pos.peak_price_sol > 0:
+                    drop_from_peak = (
+                        (pos.peak_price_sol - current_price)
+                        / pos.peak_price_sol
+                        * 100.0
+                    )
+                    if drop_from_peak >= pos.trailing_stop_pct:
+                        logger.info(
+                            "TRAILING STOP triggered for %s (Dropped %.2f%% from peak)",
+                            pos.mint,
+                            drop_from_peak,
                         )
-                        pos.current_value_sol = current_sol
-                        pos.unrealized_pnl_sol = (
-                            current_sol - pos.entry_sol - pos.entry_fees_sol
+                        sell_res = await self.sell(
+                            pos.mint, percent=100.0, mode=pos.mode
                         )
-                        pos.current_pnl_pct = (
-                            ((current_sol - pos.entry_sol) / pos.entry_sol * 100.0)
-                            if pos.entry_sol > 0
-                            else 0.0
-                        )
-                        pos.peak_price_sol = max(pos.peak_price_sol, current_price)
-                        self._persist_position(pos)
+                        triggered_trades.append(sell_res)
+                        continue
 
-                        # Check Take-Profit Trigger
-                        if (
-                            pos.take_profit_pct
-                            and pos.current_pnl_pct >= pos.take_profit_pct
-                        ):
-                            logger.info(
-                                "TAKE-PROFIT triggered for %s at +%.2f%% (Target: +%.2f%%)",
-                                pos.mint,
-                                pos.current_pnl_pct,
-                                pos.take_profit_pct,
-                            )
-                            sell_res = await self.sell(
-                                pos.mint, percent=100.0, mode=pos.mode
-                            )
-                            triggered_trades.append(sell_res)
-                            continue
-
-                        # Check Stop-Loss Trigger
-                        if pos.stop_loss_pct and pos.current_pnl_pct <= -abs(
-                            pos.stop_loss_pct
-                        ):
-                            logger.info(
-                                "STOP-LOSS triggered for %s at %.2f%% (Target: -%.2f%%)",
-                                pos.mint,
-                                pos.current_pnl_pct,
-                                pos.stop_loss_pct,
-                            )
-                            sell_res = await self.sell(
-                                pos.mint, percent=100.0, mode=pos.mode
-                            )
-                            triggered_trades.append(sell_res)
-                            continue
-
-                        # Check Trailing Stop Trigger
-                        if pos.trailing_stop_pct and pos.peak_price_sol > 0:
-                            drop_from_peak = (
-                                (pos.peak_price_sol - current_price)
-                                / pos.peak_price_sol
-                                * 100.0
-                            )
-                            if drop_from_peak >= pos.trailing_stop_pct:
-                                logger.info(
-                                    "TRAILING STOP triggered for %s (Dropped %.2f%% from peak)",
-                                    pos.mint,
-                                    drop_from_peak,
-                                )
-                                sell_res = await self.sell(
-                                    pos.mint, percent=100.0, mode=pos.mode
-                                )
-                                triggered_trades.append(sell_res)
-                                continue
-
-                        # Check Max-Hold Timeout Trigger
-                        elapsed_s = time.time() - pos.opened_at_ts
-                        if pos.max_hold_seconds and elapsed_s >= pos.max_hold_seconds:
-                            logger.info(
-                                "MAX-HOLD TIMEOUT reached for %s (%.1fs elapsed >= %.1fs limit). Triggering automated exit.",
-                                pos.mint,
-                                elapsed_s,
-                                pos.max_hold_seconds,
-                            )
-                            sell_res = await self.sell(
-                                pos.mint, percent=100.0, mode=pos.mode
-                            )
-                            triggered_trades.append(sell_res)
-                            continue
-                finally:
-                    await port.close()
+                # Check Max-Hold Timeout Trigger
+                elapsed_s = time.time() - pos.opened_at_ts
+                if pos.max_hold_seconds and elapsed_s >= pos.max_hold_seconds:
+                    logger.info(
+                        "MAX-HOLD TIMEOUT reached for %s (%.1fs elapsed >= %.1fs limit). Triggering automated exit.",
+                        pos.mint,
+                        elapsed_s,
+                        pos.max_hold_seconds,
+                    )
+                    sell_res = await self.sell(pos.mint, percent=100.0, mode=pos.mode)
+                    triggered_trades.append(sell_res)
+                    continue
             except Exception as exc:
                 logger.debug("Failed to tick position %s: %s", pos.mint, exc)
 
         return triggered_trades
+
+    async def close(self) -> None:
+        """Close resources owned by the TradingService."""
+        await self._auto_router.close()
 
 
 __all__ = [

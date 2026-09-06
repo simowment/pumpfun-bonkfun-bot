@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from rugbot.discover.ruggers import TYPE2_NOTE
 from rugbot.execution.ports import ExecutionMode
 from rugbot.interfaces.web.adapter import JsonValue, jsonable
 from rugbot.utils.logger import get_logger
@@ -26,6 +27,9 @@ SCAN_TIMEOUT_SECONDS = 120
 ENTITY_QUERY_MIN_LENGTH = 32
 ENTITY_QUERY_MAX_LENGTH = 64
 SCAN_HISTORY_MAX_LIMIT = 1000
+RUGGERS_MIN_LAUNCHES_MAX = 100
+RUGGERS_LIMIT_MAX = 500
+RUGGERS_MAX_CREATIONS_CEILING = 100
 
 
 class ScanEntityRequest(BaseModel):
@@ -111,6 +115,47 @@ def create_fastapi_app(  # noqa: C901, PLR0915
     @app.get("/api/state")
     async def api_state() -> dict[str, object]:
         return state_payload()
+
+    @app.get("/api/discover/ruggers")
+    async def api_discover_ruggers(
+        since: str | None = None,
+        min_launches: int = 2,
+        limit: int = 50,
+        max_creations: int = 10,
+        no_rpc: bool = False,  # noqa: FBT001, FBT002
+    ) -> dict[str, object]:
+        """Rank rugger entities with funding-cluster evidence (stats manual).
+
+        Read-only (§7): the ranking recommends arming a listener on the funding
+        source or dev wallet but never auto-arms or trades. Winrate/EV are not
+        auto-computed — each row carries the manual ``rug_check`` command;
+        ``no_rpc`` falls back to honest in-window counts only.
+        """
+        if not 1 <= min_launches <= RUGGERS_MIN_LAUNCHES_MAX:
+            raise HTTPException(status_code=422, detail="invalid min_launches")
+        if not 1 <= limit <= RUGGERS_LIMIT_MAX:
+            raise HTTPException(status_code=422, detail="invalid limit")
+        if not 1 <= max_creations <= RUGGERS_MAX_CREATIONS_CEILING:
+            raise HTTPException(status_code=422, detail="invalid max_creations")
+        normalized_since = (
+            since.strip() if isinstance(since, str) and since.strip() else None
+        )
+        try:
+            ruggers = await asyncio.to_thread(
+                core.discover_ruggers,
+                since=normalized_since,
+                min_launches=min_launches,
+                limit=limit,
+                max_creations=max_creations,
+                use_rpc=not no_rpc,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "ruggers": jsonable(ruggers),
+            "type2_note": TYPE2_NOTE,
+        }
 
     @app.get("/api/entity/{address}/scans")
     async def api_entity_scan_history(

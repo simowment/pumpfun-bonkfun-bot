@@ -182,6 +182,9 @@ scratch/
 # Deepwork orchestrator state
 .slim/deepwork/
 
+# Desloppify local state (machine-generated audit state, do not commit)
+.desloppify/
+
 # Frontend dependencies & build artifacts
 frontend/node_modules/
 frontend/dist/

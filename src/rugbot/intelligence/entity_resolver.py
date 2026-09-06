@@ -135,7 +135,7 @@ class EntityResolver:
         stats = compute_operator_stats(launch_metrics)
 
         opt_multiplier = report.optimal_tp_multiplier or 1.0
-        opt_ev = next((ev for ev in report.evaluations if ev.is_optimal), None)
+        opt_ev = report.optimal_evaluation
         winrate = opt_ev.winrate_pct if opt_ev else 0.0
 
         creator_wallets = (dev_wallet,) if dev_wallet else ()

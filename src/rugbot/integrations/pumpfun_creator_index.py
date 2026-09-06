@@ -40,12 +40,23 @@ def fetch_pumpfun_created_tokens(
     creator: str,
     *,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    stop_after: int | None = None,
 ) -> tuple[PumpfunCreatedTokenCandidate, ...]:
-    """Return every indexed Pump.fun token for one creator wallet."""
+    """Return every indexed Pump.fun token for one creator wallet.
+
+    When ``stop_after`` is a positive int, pagination stops as soon as at least
+    ``stop_after`` tokens have been collected (a whole page is appended first, so
+    the returned tuple may be slightly larger). This lets a caller answer "does
+    this wallet exceed N lifetime creations?" with a single page instead of
+    paging through thousands of tokens — the bible §1 spam cap only needs to know
+    that a mass deployer is over the threshold, not its exact 2000+ count.
+    """
 
     _validate_address(creator)
     if timeout_seconds <= 0:
         raise ValueError("Pump.fun creator-index timeout must be positive")
+    if stop_after is not None and stop_after <= 0:
+        raise ValueError("stop_after must be positive when provided")
     tokens: list[PumpfunCreatedTokenCandidate] = []
     for offset in range(0, MAX_CREATOR_TOKENS, PAGE_SIZE):
         query = urllib.parse.urlencode(
@@ -80,6 +91,8 @@ def fetch_pumpfun_created_tokens(
         page = tuple(_parse_token(item, creator) for item in payload)
         tokens.extend(page)
         if len(page) < PAGE_SIZE:
+            return tuple(tokens)
+        if stop_after is not None and len(tokens) >= stop_after:
             return tuple(tokens)
     raise PumpfunCreatorIndexError("Pump.fun creator index exceeded 5,000 tokens")
 

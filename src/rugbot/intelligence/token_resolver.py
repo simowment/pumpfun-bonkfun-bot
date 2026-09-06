@@ -6,18 +6,13 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import time
 import urllib.request
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import base58
-from sol_trade_sdk.solana.provider_pool import (
-    SyncRpcProviderPool,
-    SyncRpcTransport,
-)
 from solders.pubkey import Pubkey
 
 from rugbot.ingest.pump.bonding_curve_account import (
@@ -35,6 +30,14 @@ from rugbot.ingest.pump.trade_decoder import (
     BUY_V2_ACCOUNT_NAMES,
     BUY_V2_DISCRIMINATOR,
 )
+from rugbot.integrations.rpc_access import (
+    resolve_rpc_endpoints,
+    shared_sync_pool,
+    sync_rpc_result,
+)
+
+if TYPE_CHECKING:
+    from sol_trade_sdk.solana.provider_pool import SyncRpcTransport
 
 PUMP_PROGRAM_ID = Pubkey.from_string("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
 MAX_PAGE_SIGNATURES = 1000
@@ -104,72 +107,29 @@ def _rpc_call(
     params: list[object],
     transport: SyncRpcTransport | None = None,
 ) -> object:
-    """Perform one raw JSON-RPC call against the configured evidence authority."""
-    payload = json.dumps(
-        {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-    ).encode()
-    rpc_transport = transport or SyncRpcProviderPool((rpc_url,))
-    try:
-        for attempt in range(4):
-            response = rpc_transport(rpc_url, payload)
-            if 200 <= response.status < 300:
-                data = json.loads(response.body)
-                if (
-                    isinstance(data, Mapping)
-                    and "error" not in data
-                    and "result" in data
-                ):
-                    return data["result"]
-            if response.status == 429 and attempt < 3:
-                time.sleep(1.0 * (attempt + 1))
-                continue
-            break
-    except Exception:
-        pass
+    """Perform one raw JSON-RPC call through the shared health-aware pool.
 
-    # Direct HTTP fallback if pool is on cooldown or returned error
-    fallback_params = list(params)
-    if (
-        method == "getSignaturesForAddress"
-        and len(fallback_params) > 1
-        and isinstance(fallback_params[1], dict)
-    ):
-        cfg = dict(fallback_params[1])
-        if cfg.get("limit", 0) > 100:
-            cfg["limit"] = 100
-        fallback_params[1] = cfg
-    fallback_payload = json.dumps(
-        {"jsonrpc": "2.0", "id": 1, "method": method, "params": fallback_params}
-    ).encode()
+    Args:
+        rpc_url: Per-call endpoint override. It only seeds precedence
+            resolution; the shared pool still owns the failover order.
+        method: JSON-RPC method name.
+        params: JSON-RPC params array.
+        transport: Test seam replacing the pooled transport.
 
-    fallback_urls = [
-        "https://solana-rpc.publicnode.com",
-        "https://rpc.ankr.com/solana",
-        "https://api.mainnet-beta.solana.com",
-    ]
-    for fb_url in fallback_urls:
-        try:
-            req = urllib.request.Request(
-                fb_url,
-                data=fallback_payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                },
-            )
-            with urllib.request.urlopen(req, timeout=8) as res:
-                if 200 <= res.status < 300:
-                    data = json.loads(res.read())
-                    if (
-                        isinstance(data, Mapping)
-                        and "error" not in data
-                        and "result" in data
-                    ):
-                        return data["result"]
-        except Exception:
-            continue
+    Returns:
+        The decoded ``result`` payload.
 
-    raise RuntimeError(f"RPC {method} failed across all provider endpoints")
+    Raises:
+        RpcAccessError: When every configured provider failed or is cooling
+            down. It subclasses ``RuntimeError``, so callers catching
+            ``RuntimeError`` keep working unchanged.
+    """
+    return sync_rpc_result(
+        method,
+        params,
+        endpoints=resolve_rpc_endpoints(primary=rpc_url),
+        transport=transport,
+    )
 
 
 def _fetch_current_metadata(mint: str) -> tuple[str, str, float]:
@@ -622,10 +582,11 @@ def resolve_token_or_wallet(
     cleaned = input_str.strip()
     mint_pubkey = Pubkey.from_string(cleaned)
 
-    endpoint = rpc_url or os.environ.get("SOLANA_RPC_HTTP")
-    if not endpoint:
+    endpoints = resolve_rpc_endpoints(primary=rpc_url, fallbacks=fallback_endpoints)
+    if not endpoints.ordered:
         raise ValueError("SOLANA_RPC_HTTP is required to resolve a token or wallet")
-    rpc_transport = SyncRpcProviderPool((endpoint, *fallback_endpoints))
+    endpoint = endpoints.primary
+    rpc_transport = shared_sync_pool(endpoints)
 
     bonding_curve_pda, _ = Pubkey.find_program_address(
         [b"bonding-curve", bytes(mint_pubkey)], PUMP_PROGRAM_ID
@@ -658,17 +619,26 @@ def resolve_token_or_wallet(
                 rpc_transport,
             )
         if not signatures and creator_from_account:
+            # Degraded path: creator read from the finalized bonding-curve
+            # account, but no finalized signature history is available.
+            if skip_metadata:
+                fallback_name, fallback_symbol = "Pump Token", "PUMP"
+            else:
+                try:
+                    fallback_name, fallback_symbol, _, _ = fetch_token_metadata(cleaned)
+                except Exception:
+                    fallback_name, fallback_symbol = "Pump Token", "PUMP"
             return ResolvedTarget(
-                is_token=True,
+                input_address=cleaned,
                 target_wallet=creator_from_account,
+                is_token=True,
+                symbol=fallback_symbol,
+                name=fallback_name,
                 creation_signature=None,
                 creation_slot=None,
-                creation_block_time=None,
-                symbol=token_symbol,
-                name=token_name,
-                market_cap=usd_market_cap,
                 bonding_curve=str(bonding_curve_pda),
-                associated_bonding_curve=str(associated_bonding_curve_pda),
+                default_label=custom_label
+                or f"Dev of {fallback_name} (${fallback_symbol})",
                 bundle_wallets=(),
                 bundle_buys=(),
             )

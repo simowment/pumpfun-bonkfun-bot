@@ -713,6 +713,14 @@ def _validate_attempted_launch_pnl(
         return _unsupported(
             "attempted launch execution cost must be non-negative", config
         )
+    if launch.fill_status is BacktestFillStatus.FILLED and not _positive_int(
+        launch.execution_cost_quote_base_units
+    ):
+        return _unsupported(
+            "filled launch execution cost must be positive because every "
+            "executable Pump quote charges a fee",
+            config,
+        )
     return None
 
 

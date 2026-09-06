@@ -1,9 +1,13 @@
 """Settings DOM integrity: every spec-referenced widget id must exist in the TUI."""
 
 import asyncio
+from pathlib import Path
 
-from textual.widgets import DataTable
+from textual.widgets import DataTable, TabbedContent, TabPane
 
+import rugbot.interfaces.tui.app as tui_mod
+from rugbot.discover.ruggers import rank_ruggers
+from rugbot.discover.store import ensure_discover_schema, upsert_launch
 from rugbot.interfaces.tui.app import RugbotTuiApp
 from rugbot.interfaces.tui.settings_spec import (
     BIG_BUY_LEVEL_COUNT,
@@ -13,6 +17,7 @@ from rugbot.interfaces.tui.settings_spec import (
     build_settings_document,
 )
 from rugbot.interfaces.tui.widgets import TargetsTable
+from rugbot.storage.database import DatabaseManager
 
 INPUT_IDS = [
     "target-wallet",
@@ -104,6 +109,7 @@ def test_composed_dom_contains_every_settings_widget():  # noqa: C901
                 "#positions-table",
                 "#nodes-table",
                 "#edges-table",
+                "#ruggers-table",
             ):
                 app.query_one(selector, DataTable)
 
@@ -166,3 +172,59 @@ def test_settings_round_trip_on_default_widget_values():
     assert (
         document["rules"]["sell"]["stop_loss_levels"][0]["trigger_pnl_ppm"] == -300_000
     )
+
+
+_RUGGER_DEV = "CvoPbuS2AghzVBYJx7HfQGhALiqif4YwWgHvXmhehuJZ"
+
+
+def test_ruggers_tab_renders_ranked_rows(tmp_path: Path, monkeypatch) -> None:
+    """The '7: Ruggers' tab mounts a DataTable that renders ranked entities.
+
+    Read-only (§7): the tab surfaces the bible-qualified entity ranking from the
+    headless discover DB (``.state/discover/rugbot.db``, CWD-relative) and
+    recommends arming; it never auto-arms. Ranking runs in a thread worker, so
+    the test drains workers before asserting rows.
+    """
+
+    monkeypatch.chdir(tmp_path)
+    discover_dir = tmp_path / ".state" / "discover"
+    discover_dir.mkdir(parents=True, exist_ok=True)
+    db = DatabaseManager(discover_dir / "rugbot.db")
+    ensure_discover_schema(db)
+    for index, slot in enumerate([100, 200, 300], start=1):
+        upsert_launch(
+            db,
+            mint=f"MNT{index}",
+            creator=_RUGGER_DEV,
+            created_signature=f"sig{index}",
+            created_slot=slot,
+            created_at=f"2026-08-26T08:{index * 10:02d}:00+00:00",
+        )
+    db.close()
+
+    # Mocked RPC: honest no-rpc in-window ranking keeps the test network-free.
+    monkeypatch.setattr(
+        tui_mod,
+        "rank_ruggers",
+        lambda **kwargs: rank_ruggers(use_rpc=False, **kwargs),
+    )
+
+    async def run() -> None:
+        app = RugbotTuiApp()
+        async with app.run_test(size=(120, 36)) as pilot:
+            # The tab and its ranking table are mounted in the DOM.
+            app.query_one("#ruggers-tab", TabPane)
+            table = app.query_one("#ruggers-table", DataTable)
+
+            # The bound action switches to the tab and ranks from the seeded DB.
+            app.action_show_ruggers()
+            assert app.query_one(TabbedContent).active == "ruggers-tab"
+            await pilot.pause()
+            worker = next((w for w in app.workers if w.name == "ruggers_rank"), None)
+            if worker is not None:
+                await worker.wait()
+                await pilot.pause()
+            assert table.row_count >= 1
+            assert any(str(row_key.value) == _RUGGER_DEV for row_key in table.rows)
+
+    asyncio.run(run())

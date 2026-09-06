@@ -34,8 +34,8 @@ def generate_terminal_equity_chart(
         return "No trade records to plot."
 
     equities = [r.cumulative_equity_sol for r in records]
-    min_eq = min(min(equities), 0.0)
-    max_eq = max(max(equities), 0.01)
+    min_eq = min(*equities, 0.0)
+    max_eq = max(*equities, 0.01)
     span = max_eq - min_eq if max_eq != min_eq else 1.0
 
     lines: list[str] = []
@@ -513,7 +513,9 @@ def export_mplfinance_png_chart(
         closes_k = [(c.close * total_supply * sol_usd) / 1000.0 for c in active_candles]
         volumes = [c.volume for c in active_candles]
         time_labels = [
-            datetime.datetime.fromtimestamp(c.timestamp, tz=datetime.UTC).strftime("%H:%M:%S")
+            datetime.datetime.fromtimestamp(c.timestamp, tz=datetime.UTC).strftime(
+                "%H:%M:%S"
+            )
             for c in active_candles
         ]
 
@@ -606,7 +608,9 @@ def export_mplfinance_png_chart(
                 ),
             )
 
-        ax1.set_ylabel("Market Cap ($k USD)", color="#e2e8f0", fontsize=12, fontweight="600")
+        ax1.set_ylabel(
+            "Market Cap ($k USD)", color="#e2e8f0", fontsize=12, fontweight="600"
+        )
         ax1.set_title(
             f"Pump.fun Real 1s OHLC Candlestick Chart — {mint[:14]}... (ATH: ${peak_val:.1f}k | Floor: ${closes_k[-1]:.1f}k)",
             color="#38bdf8",
@@ -641,7 +645,9 @@ def export_mplfinance_png_chart(
         if (n - 1) not in tick_locs:
             tick_locs.append(n - 1)
         ax2.set_xticks(tick_locs)
-        ax2.set_xticklabels([time_labels[i] for i in tick_locs], rotation=30, ha="right")
+        ax2.set_xticklabels(
+            [time_labels[i] for i in tick_locs], rotation=30, ha="right"
+        )
 
         plt.tight_layout()
         plt.savefig(str(out), dpi=150, facecolor=fig.get_facecolor(), edgecolor="none")

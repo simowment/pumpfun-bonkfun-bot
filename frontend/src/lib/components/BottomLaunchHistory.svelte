@@ -2,6 +2,7 @@
   import BacktestAnalytics from './BacktestAnalytics.svelte';
   import CopytradeCandidates from './CopytradeCandidates.svelte';
   import LiveCopytradeFeed from './LiveCopytradeFeed.svelte';
+  import RuggerCandidates from './RuggerCandidates.svelte';
 
   let {
     tokens = [],
@@ -18,6 +19,10 @@
     liveLaunches = [],
     onLiveInspect = null,
     onLiveTrack = null,
+    ruggers = [],
+    ruggersLoading = false,
+    ruggersError = '',
+    type2Note = '',
   } = $props();
 
   let tokenFilter = $state('all'); // 'all', 'launch', 'buy'
@@ -109,6 +114,12 @@
         onclick={() => onTabChange && onTabChange('live')}
       >
         LIVE {liveLaunches.length ? `(${liveLaunches.length})` : ''}
+      </button>
+      <button
+        class="tab-btn {activeTab === 'ruggers' ? 'active' : ''}"
+        onclick={() => onTabChange && onTabChange('ruggers')}
+      >
+        RUGGERS {ruggers.length ? `(${ruggers.length})` : ''}
       </button>
     </div>
 
@@ -316,6 +327,16 @@
   {:else if activeTab === 'live'}
     <div style="padding: 10px;">
       <LiveCopytradeFeed liveLaunches={liveLaunches} report={report} onInspect={onLiveInspect} onTrack={onLiveTrack} />
+    </div>
+  {:else if activeTab === 'ruggers'}
+    <div style="padding: 10px;">
+      <RuggerCandidates
+        ruggers={ruggers}
+        loading={ruggersLoading}
+        error={ruggersError}
+        type2Note={type2Note}
+        onScan={onSelectTarget}
+      />
     </div>
   {/if}
 

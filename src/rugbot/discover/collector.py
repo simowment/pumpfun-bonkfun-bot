@@ -43,8 +43,14 @@ RECONNECT_MIN_SECONDS = 1.0
 RECONNECT_MAX_SECONDS = 30.0
 STALE_RETRY_SECONDS = 0.5
 STALE_TIMEOUT_SECONDS = 60
+# Rate-limit/transport abstains are transient: back off and retry within a
+# bounded budget so throttled launches eventually hydrate instead of being
+# dropped forever (previously 282 launches lost to RpcProviderPoolError).
+RATE_LIMIT_BACKOFF_MAX_SECONDS = 8.0
+RATE_LIMIT_RETRY_BUDGET_SECONDS = 120.0
 SEMAPHORE_LIMIT = 4
 RPC_MINIMUM_INTERVAL_SECONDS = 0.25
+TRADE_POLL_MIN_INTERVAL_SECONDS = 5
 TRADE_HISTORY_LIMIT = 10
 TRADE_MONITOR_SECONDS = 15 * 60
 # Trade polling cost: ~2 req per mint per POLL_TRADES_SECONDS while active.
@@ -133,6 +139,24 @@ def _trade_event_json(event: object) -> str:
     return json.dumps(fields, sort_keys=True)
 
 
+def _is_rate_limit_abstain(result: object) -> bool:
+    """Return True when an abstain was caused by RPC throttling or transport loss.
+
+    The RPC layer emits MISSING_FEATURE abstains with messages shaped like
+    "<method> was rate-limited by the available RPC providers" or
+    "<method> transport failed: RpcProviderPoolError". Both are transient and
+    worth retrying with backoff rather than dropping the launch permanently.
+    """
+
+    if getattr(result, "reason", None) is not AbstainReason.MISSING_FEATURE:
+        return False
+    message = getattr(result, "message", None)
+    if not isinstance(message, str):
+        return False
+    lowered = message.lower()
+    return "rate-limited" in lowered or "transport failed" in lowered
+
+
 async def _observe_finalized_with_retry(
     signature: str,
     *,
@@ -142,6 +166,7 @@ async def _observe_finalized_with_retry(
     transport: RpcHttpTransport | None,
 ) -> object:
     start = time.monotonic()
+    rate_limit_attempts = 0
     async with semaphore:
         while True:
             result = await observe_finalized_transaction(
@@ -175,11 +200,27 @@ async def _observe_finalized_with_retry(
                     return result
                 await asyncio.sleep(STALE_RETRY_SECONDS)
                 continue
+            if _is_rate_limit_abstain(result):
+                if time.monotonic() - start > RATE_LIMIT_RETRY_BUDGET_SECONDS:
+                    return result
+                backoff = min(
+                    RECONNECT_MIN_SECONDS * (2**rate_limit_attempts),
+                    RATE_LIMIT_BACKOFF_MAX_SECONDS,
+                )
+                rate_limit_attempts += 1
+                await asyncio.sleep(backoff)
+                continue
             return result
 
 
 def _discover_trade_poll_enabled() -> bool:
-    """Return True only when bonding-curve trade polling is explicitly enabled."""
+    """Return True only when trade polling is explicitly opted in via env.
+
+    Continuous bonding-curve trade polling is OFF by default because it
+    burns ~2 RPC calls per mint per interval. Set
+    RUGBOT_DISCOVER_TRADE_POLL_ENABLED to a truthy value (1/true/yes/on)
+    to re-enable ATH/dump/dev-sell evidence collection.
+    """
     return os.environ.get("RUGBOT_DISCOVER_TRADE_POLL_ENABLED", "").strip().lower() in {
         "1",
         "true",
@@ -199,8 +240,11 @@ def _discover_trade_poll_interval_seconds() -> float:
         raise ValueError(
             "RUGBOT_DISCOVER_TRADE_POLL_SECONDS must be a number"
         ) from error
-    if value < 5:
-        raise ValueError("RUGBOT_DISCOVER_TRADE_POLL_SECONDS must be >= 5")
+    if value < TRADE_POLL_MIN_INTERVAL_SECONDS:
+        raise ValueError(
+            "RUGBOT_DISCOVER_TRADE_POLL_SECONDS must be >= "
+            f"{TRADE_POLL_MIN_INTERVAL_SECONDS}"
+        )
     return value
 
 
@@ -296,21 +340,24 @@ async def _poll_trades_for_mint(
                                 db,
                                 mint,
                                 dev_sell_slot=observation.slot,
+                                dump_slot=observation.slot,
                             )
             if inserted:
                 stats.trades += inserted
                 if quote_is_sol:
                     row = db.connection.execute(
-                        "SELECT SUM(quote_amount_base_units) AS volume "
+                        "SELECT SUM(quote_amount_base_units) AS volume, "
+                        "MAX(price_ppm) AS ath "
                         "FROM discover_trades WHERE mint = ?",
                         (mint,),
                     ).fetchone()
+                    metrics: dict[str, int] = {}
                     if row is not None and isinstance(row["volume"], int):
-                        update_launch_metrics(
-                            db,
-                            mint,
-                            volume_lamports=row["volume"],
-                        )
+                        metrics["volume_lamports"] = row["volume"]
+                    if row is not None and isinstance(row["ath"], int):
+                        metrics["ath_quote_lamports"] = row["ath"]
+                    if metrics:
+                        update_launch_metrics(db, mint, **metrics)
         except Exception:
             stats.errors += 1
             logger.warning("poll trades error for %s", mint, exc_info=True)

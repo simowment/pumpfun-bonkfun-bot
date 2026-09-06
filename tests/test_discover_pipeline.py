@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from time import monotonic_ns, time_ns
@@ -12,8 +13,14 @@ import base58
 from rugbot.backtest.trajectory.finalized_trade_builder import (
     decode_pump_trade_event_proofs,
 )
+from rugbot.discover import collector
 from rugbot.discover.candidates import query_candidates
-from rugbot.discover.collector import _created_at, _transaction_actors
+from rugbot.discover.collector import (
+    _created_at,
+    _is_rate_limit_abstain,
+    _observe_finalized_with_retry,
+    _transaction_actors,
+)
 from rugbot.discover.store import (
     append_observation,
     ensure_discover_schema,
@@ -26,7 +33,7 @@ from rugbot.discover.store import (
     upsert_trade,
     upsert_wallet_launch_participation,
 )
-from rugbot.domain.decisions import AbstainResult
+from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.observations import RawChainObservation
 from rugbot.integrations.solscan import SolscanMintTransactionCandidate
 from rugbot.intelligence.entity_mint_index import FinalizedEntityMint
@@ -243,3 +250,95 @@ def test_finalized_entity_windows_and_wallet_participation_are_durable(
     ).fetchone()
     assert row["first_buy_slot"] == 125
     assert row["complete"] == 1
+
+
+def _rate_limit_abstain(message: str) -> AbstainResult:
+    return AbstainResult(
+        reason=AbstainReason.MISSING_FEATURE, message=message, as_of_slot=0
+    )
+
+
+def test_is_rate_limit_abstain_matches_only_throttle_and_transport() -> None:
+    assert _is_rate_limit_abstain(
+        _rate_limit_abstain(
+            "getTransaction was rate-limited by the available RPC providers"
+        )
+    )
+    assert _is_rate_limit_abstain(
+        _rate_limit_abstain("getTransaction transport failed: RpcProviderPoolError")
+    )
+    # A different MISSING_FEATURE gap is not transient and must not be retried.
+    assert not _is_rate_limit_abstain(_rate_limit_abstain("unsupported program"))
+    # A non-MISSING_FEATURE reason is never treated as throttling.
+    assert not _is_rate_limit_abstain(
+        AbstainResult(
+            reason=AbstainReason.STALE_STATE, message="rate-limited", as_of_slot=0
+        )
+    )
+    # A hydrated observation (no ``reason``) is not an abstain at all.
+    assert not _is_rate_limit_abstain(object())
+
+
+def test_observe_finalized_retries_rate_limit_then_hydrates(
+    monkeypatch,
+) -> None:
+    """A throttled launch must eventually hydrate instead of being dropped."""
+    hydrated = _recorded_observation()
+    calls = {"count": 0}
+
+    async def fake_observe(signature: str, **kwargs: object) -> object:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return _rate_limit_abstain(
+                "getTransaction was rate-limited by the available RPC providers"
+            )
+        return hydrated
+
+    monkeypatch.setattr(collector, "observe_finalized_transaction", fake_observe)
+    # Keep the backoff negligible so the test does not actually sleep.
+    monkeypatch.setattr(collector, "RECONNECT_MIN_SECONDS", 0.001)
+
+    result = asyncio.run(
+        _observe_finalized_with_retry(
+            "signature",
+            endpoint="https://rpc.example",
+            source_id="test",
+            semaphore=asyncio.Semaphore(1),
+            transport=None,
+        )
+    )
+
+    assert result is hydrated
+    assert calls["count"] == 2  # abstained once, then hydrated on retry
+
+
+def test_observe_finalized_returns_abstain_when_budget_exhausted(
+    monkeypatch,
+) -> None:
+    """Once the retry budget lapses the abstain is surfaced, not swallowed."""
+    abstain = _rate_limit_abstain(
+        "getTransaction transport failed: RpcProviderPoolError"
+    )
+    calls = {"count": 0}
+
+    async def fake_observe(signature: str, **kwargs: object) -> object:
+        calls["count"] += 1
+        return abstain
+
+    monkeypatch.setattr(collector, "observe_finalized_transaction", fake_observe)
+    # A negative budget means the retry window is already exhausted on entry
+    # (deterministic across coarse monotonic clocks), so no retry/sleep occurs.
+    monkeypatch.setattr(collector, "RATE_LIMIT_RETRY_BUDGET_SECONDS", -1.0)
+
+    result = asyncio.run(
+        _observe_finalized_with_retry(
+            "signature",
+            endpoint="https://rpc.example",
+            source_id="test",
+            semaphore=asyncio.Semaphore(1),
+            transport=None,
+        )
+    )
+
+    assert result is abstain
+    assert calls["count"] == 1  # budget already spent; no infinite retry loop

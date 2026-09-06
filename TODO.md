@@ -198,3 +198,111 @@ Statut au 2026-08-26: (1) partiel via `funder_discovery`/`cluster_graph` mais pa
 - [ ] **Enrichisseur historique batch** : `uv run rug_discover enrich <wallet|mint>` — anciens mints via Solscan/Pump.fun, bundles par lancement, autres tokens achetés, paniers croisés, cycles financement→achat→vente→sweep. Réutilise `rug_check --trace-funding --score --entity` dedup path.
 - [ ] **File dossiers interrogeable** : `uv run rug_discover candidates --since 24h --json` + `uv run rug_discover dossier <wallet> --json`. L'opérateur lance la collecte, parcourt, compare et restitue les ruggers.
 - [ ] **Processus persistant** : `rug_discover collect` tourne en arrière-plan hors Web (PID file + `rugged` health). `candidates`/`dossier` lisent la même base.
+
+## Phase 5 — Newpairs Alpha Extraction (EN COURS — spec 2026-09-06)
+
+> Demande utilisateur : stratégie newpairs (snipe à la création, filtre « max age 3 min » sur le dashboard Pulse). Principe directeur : les seuils sont des **sorties mesurées**, pas des entrées choisies à la main. Cible de gain modeste : 20–100k MC en quelques dizaines de minutes, pas plus.
+
+### Livré
+
+- [x] **`uv run rug_pairs_lab`** — étiquetage triple-barrière (échelle TP = barrières hautes, SL = barrière basse, `horizon_close` = barrière verticale) de chaque lancement enregistré, en PnL **net exécutable** : 125 bps (95 protocole + 30 créateur) + slippage courbe via le moteur de cotation synthétique. Modèle de frais identique à `rug_scalp`, donc étiquette ≡ PnL paper.
+- [x] `src/rugbot/backtest/pairs_lab.py` (cœur pur, sans I/O) + `src/rugbot/interfaces/cli/pairs_lab.py` (adaptateur fin) + 18 tests. Réutilise `decide_scalper_exit` / `_synthetic_reserves` / `DEFAULT_FEE_CONFIG` — aucun moteur de replay parallèle.
+- [x] Taux de base + intervalles de Wilson (Z=1.96) + lift par terciles sur 9 features, avec suppression sous `min_bucket_count=30`.
+
+### Résultats mesurés — base : 1755 lancements, 5296 trades, **une seule session** (2026-08-26 06:59→12:19 UTC)
+
+**1. Échelle de timing d'entrée — EV négative à chaque point d'entrée atteignable.**
+
+| Point d'entrée | n | Winrate | SOL moyen | peak≥1.5x |
+| --- | --- | --- | --- | --- |
+| Print block-0 (place bundle, **brut** de Jito) | 572 | 4,5 % | −0,0037 | 2,1 % |
+| 1er print ≥2 s, fenêtre 3 min | 451 | 4,0 % | −0,0074 | 2,2 % |
+| 1er print 10 s–3 min (**filtre utilisateur**) | 405 | 4,0 % | −0,0074 | 2,5 % |
+| 1er print 10–30 s | 180 | 5,0 % | −0,0055 | 2,8 % |
+| 1er print 90–120 s | 83 | 3,6 % | −0,0051 | 1,2 % |
+
+Seule cohorte brute positive : entrées `entry_slot_offset == 0` en delay-0 (n=280, **+0,0020 SOL**) — effacée par le tip Jito (0,005–0,05 SOL sur une taille de 0,1). C'est le régime block-0 de `rug_scalp` (`max_entry_slot_offset=12`) : un problème de **taille + latence**, pas de filtre.
+
+**2. Deux gates intuitives sont mesurées nuisibles.**
+
+- Confirmation de momentum (`return_ppm > 0`) : **0,0 % de winrate** (n=30).
+- Fort volume acheteur précoces : **pire bucket dans toutes les configurations** — le classement « activité » du dashboard est un signal inverse.
+
+**3. Vagues thématiques (« vamp ») — le contraste le plus fort de toute l'étude, et il inverse le trade populaire.**
+
+926/1755 (53 %) des lancements sont membres d'une cohorte thématique (±45 min, token distinctif partagé, cohorte ≥4). Vagues réelles détectées : `nepal`/`pray`/`charity` (65/49/50), `sued`/`claimed` (~50), `wittgenstein` (58), `adapt` (63).
+
+| Cohorte | n | Winrate | P(peak≥1.5x) | SOL moyen |
+| --- | --- | --- | --- | --- |
+| **Loner** (hors vague) | 302 | **6,6 %** [4,3–10,0] | **3,3 %** | −0,0023 |
+| Vague | 270 | 2,2 % | 0,7 % | −0,0054 |
+| Pioneer (2 premiers du thème) | 85 | 4,7 % | 2,4 % | — |
+| **Follower** (variante copiée) | 198 | **1,5 %** [0,6–3,8] | 0,5 % | −0,0057 |
+
+Intervalles de Wilson loner/follower **non chevauchants**. Le trade vamp visible (acheter les variantes d'un thème) est la **pire** cohorte ; les loners sont 3x meilleurs ; les pioneers battent les followers 3:1 mais restent sous les loners. Confond mesuré : part de créateurs répétés (≥3 lancements) = 67 % en vague contre 43 % en loner — les vagues sont largement des fermes à copies. Hypothèse de mécanisme : dilution de l'attention, le capital se répartit sur N copies.
+
+**4. Validation d'un trader newpairs réel — `89HbgWduLwoxcofWpmn1EiF9wEdpgkNDEyPjzZ72mkDi` — VERDICT NON CONCLUANT (biais de couverture, voir audit).**
+
+Récolte via Solscan (deltas de soldes, indépendante du layout d'instructions — nécessaire car l'IDL pump épinglé est dépassé : `sell_v2` à 27 comptes, buy inconnu à 28). 55 txs → 47 fills, 9 mints, 2026-09-03 22:21 → 09-04 19:06.
+
+- **PnL mesuré négatif, MAIS VERDICT NON CONCLUANT** : 7 allers-retours complets, **2 gagnants / 5 perdants**, net **−3,803 SOL** (gains +0,151 / pertes −3,954). Même en excluant le pire trade (MANIFEST −2,621) : **−1,182 SOL**. Total réalisé + marqué : −2,432 SOL. **Rétractation (2026-09-06)** : ces chiffres sortent d'un chemin **pump-only sans couverture PumpSwap** — si un gagnant a gradué, sa vente est invisible et le PnL est biaisé vers le bas. Voir « Audit de complétude » ci-dessous. Ne pas traiter cet opérateur comme un « trader perdant ».
+- **Timing d'élite confirmé** (indépendant du biais de PnL ci-dessus) : entrée médiane **0,1 min (~6 s)** après `pump::create`, 8/8 sous 3 min, pic de la 1re heure == ATH toutes époques sur 8/8. Tout se joue bien en minutes.
+- **Ce qui reste établi** : le timing seul ne suffit pas — le ladder mesuré plus haut montre déjà que la cohorte block-0 n'est positive qu'à **+0,0020 SOL brut**, avant tips Jito. L'inférence « la sélection est l'ingrédient manquant » repose sur le ladder (valide, store complet), **pas** sur ce wallet.
+- Échantillon = ses 55 txs **les plus récentes** (pagination Solscan arrière). Une tranche de 20 h n'est pas sa carrière.
+
+### Contrats externes vérifiés (live)
+
+- **Feed « final stretch »** : `GET https://frontend-api-v3.pump.fun/coins?sort=market_cap&order=DESC&limit=50&includeNsfw=false&complete=false` → **tableau JSON nu** (pas `{"coins":[...]}`). Filtre `complete` non documenté mais fonctionnel. Progression de courbe = `(virtual_sol_reserves − 30e9) / 85e9` lamports ; courbe 100 % + `complete=false` = file de migration.
+- **Bougies** : `createdTs=0&limit=1000` renvoie l'historique **depuis la création** (tout `createdTs` non nul renvoie la fenêtre la plus récente). Prix en **USD** ; la bougie WSOL donne le SOL/USD gratuitement.
+- **Métadonnées** : `frontend-api-v3 /coins/{mint}` porte `ath_market_cap`, `created_timestamp` (ms), `twitter`/`website` optionnels, `complete`, `is_banned`, `protocol` (pump vs bonk.fun).
+- Contrôle croisé de validité : le pic MC recalculé depuis les bougies égale `ath_market_cap` sur 8/8 mints (deux sources indépendantes).
+
+### Murs de données (bloquants, à lever avant toute promotion)
+
+- **`TRADE_MONITOR_SECONDS = 15*60`** : la couverture des prints s'arrête 15 min après création. Les coins « final stretch » et les coureurs multi-heures sont **invisibles** dans le store. Aucune pièce organique de la session n'a dépassé ~13 % de courbe (6 mints à 85,01 SOL = bots de graduation instantanée, un seul print).
+- **Le flux de création ne voit les coins qu'au block 0** — un coin créé des heures plus tôt n'entre jamais dans le pipeline.
+- **Une seule session de 5h20** : tous les chiffres ci-dessus sont dépendants du régime. Les verdicts sont stables sur 7 configurations, mais n ne permet pas la sélection de gates.
+- `creation_transaction_index` NULL partout (features de bundle impossibles) ; `top10_share` et solde dev nécessitent un enrichissement RPC (différé).
+- Helius gratuit : quota 429 soutenu. GMGN : `curl_cffi` absent de l'environnement.
+
+### Audit de complétude du chemin de récolte (2026-09-06)
+
+> Déclencheur : adresse fournie par l'utilisateur `4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9`, annoncée « EV+ ». Question posée : est-ce que notre chemin API rate des transactions ?
+
+**Correction (2026-09-06, même jour) : l'adresse EST un wallet.** Preuve directe : **896,845 SOL** + **8 161 comptes token** (8 150 non vides) — cohérent avec le ~99,6 K$ du dashboard. L'affirmation précédente « pas un wallet » reposait sur un échantillon biaisé et est **rétractée**.
+
+Ce qui reste vrai et explique tout :
+
+- `getSignaturesForAddress(wallet)` est **inondé** : ~28 tx/s de références **en lecture seule** émises par des bots suiveurs/copytrade on-chain (`DhpyNWkdxFh3DRPsBrwRwrK3TYC5t7Q4arnSvf3t84HY`, signataires `5L7aqweE…` / `7iyYn4gs…`), 98,9–99,4 % en échec (`Custom 7/13/3/4`). Les réussies sont des appels de cotation/lecture : ~5,1k CU, 0 inner instruction, 0 mouvement de token, jamais pump ni pump_amm. **La marche de signatures brute est donc inutilisable pour ce wallet** — mon échantillon de 18 txs réussies tombait entièrement dans ce flot, d'où la conclusion erronée.
+- Ses **vrais trades** passent par le chemin Solscan `(address, program=pump)` : sur 30 lignes, **8 fills** où il est `feePayer` **et** signataire (index 0) avec delta token, groupés sur 22:06–22:10. Du bruit fuit aussi côté Solscan (lignes où il est absent `idx=-1` ou en lecture seule `idx=12/22`), mais avec **zéro mouvement de token pour son owner** → la gate feePayer/signer+delta l'écarte sans perdre un seul fill réel.
+- Ses plus gros sacs token sont **anciens** (ATAs du top actifs en avril–mai) : un trade récent ferme son ATA, donc classer les ATAs par solde ne donne pas son historique récent.
+
+**Verdict par classe de ratage :**
+
+| Classe suspectée | Verdict | Preuve |
+| --- | --- | --- |
+| Pagination par cursor qui saute des txs | **DISCULPÉE** | Chevauchement d'**exactement 1** ligne par frontière de page (cursor inclusif) : max slot page N == min slot page N+1, **0 inversion** de slot sur 60 lignes, 60→55 uniques après dédup. `load_rows()` déduplique déjà correctement. |
+| `status=true` qui écarte les txs échouées | **CORRECT** | Une tx échouée ne produit aucun fill ; ici 98,9 % du volume est du bruit d'échec. |
+| Gate `accountKeys[0] == WALLET` (feePayer) | **CORRECT et porteur** | C'est ce qui rejette le bruit ALT-only ci-dessus. Sans lui, on attribuerait une activité fantôme à un compte en lecture seule. |
+| Filtre `program = PUMP_PROGRAM_ID` | **RATAGE RÉEL** | `SolscanClient.enhanced_transactions` exige `program` (paramètre keyword-only obligatoire, `limit` verrouillé à 10, un seul `program[]`). Toute sortie sur **PumpSwap** après graduation est structurellement invisible — donc précisément l'exit des gagnants. Idem pour tout routeur qui ne fait pas de CPI vers pump. |
+| Santé du pool RPC | **DÉFAUT RÉEL** | 3 endpoints sur 4 morts : Helius `429 max usage reached`, Alchemy `alch_2…` `403 App is inactive`, publicnode `403 Cloudflare 1010`. Seul `alch_X…` répond ; quand il sature (~6000 signatures), le pool retombe sur les deux morts et l'appel échoue. |
+| Faisabilité volume sur Solscan | **LIMITE RÉELLE mais ciblée** | L'inondation ~28 tx/s ne sature que la marche RPC brute. L'index Solscan `(address, program)` rend ses trades à densité utilisable (8 fills sur 30 lignes ≈ 2 h d'activité). La limite dure reste 10 txs/page + 429 après ~5 pages. |
+| Sémantique `getSignaturesForAddress` | **PIÈGE CONFIRMÉ sur cas réel** | « txs impliquant X » ≠ « txs signées par X ». Sur ce wallet le flot de références lecture seule est ~3600:1 contre ses vrais trades (~0,008 tx/s vs 28 tx/s). Mais inondation ≠ absence de wallet : le seul test de propriété valide est `getBalance` + `getTokenAccountsByOwner`. |
+| Chemin Solscan `(address, program=pump)` | **CAPTURE SES FILLS** | 8/30 lignes = fills réels (feePayer + signataire + delta token) ; le bruit résiduel (absent ou lecture seule, 0 delta token owner) est écarté par la gate sans perdre de fill. |
+
+**Actions correctives découlant de l'audit :**
+
+- [ ] **Réparer le pool RPC** : retirer ou remplacer les endpoints morts (Alchemy app inactive, publicnode bloqué Cloudflare) et le quota Helius épuisé. Sans un second endpoint sain, aucune récolte d'historique n'est fiable.
+- [ ] **Rendre `program` optionnel** dans `SolscanClient.enhanced_transactions` (frontière provider) pour permettre une requête non filtrée = vérité terrain, et ajouter `pump_amm` comme second programme accepté.
+- [ ] **Gate d'attribution des fills** : n'attribuer un fill à un wallet que s'il est `signer` **ou** `writable`, jamais sur une simple présence en `lookupTable`. À appliquer partout où l'on dérive des fills depuis l'historique.
+- [ ] **Règle de récolte pour wallets inondés** : jamais de marche `getSignaturesForAddress` brute sur un wallet suivi par des bots (flot lecture seule) ; passer par Solscan `(address, program)` + gate feePayer/signer+delta, et tester la propriété par `getBalance` + `getTokenAccountsByOwner`.
+- [ ] **Ré-évaluer `89HbgWduLwoxcofWpmn1EiF9wEdpgkNDEyPjzZ72mkDi`** : son verdict négatif (−3,803 SOL) a été produit par un chemin pump-only **sans couverture PumpSwap**. Si un de ses gagnants a gradué, la vente est invisible et le PnL est biaisé vers le bas. Verdict à reconsidérer comme **non concluant**, pas comme « trader perdant ».
+
+### À faire
+
+- [ ] **Lever le mur des 15 min** — condition préalable à tout le reste : sans prints au-delà, ni l'hypothèse 20–100k ni la queue de pioneer ne sont testables.
+- [ ] **Poller « final stretch »** comme mode de `rug_discover` (contrat vérifié ci-dessus), ingestion des prints via `swap-api /trades` dans le même store, replay `rug_pairs_lab` inchangé.
+- [ ] **Croître n** : sessions `rug_discover collect` récurrentes. Objectif : plusieurs milliers de lancements étiquetables avant toute sélection de gate.
+- [ ] **Features de vague en Stage 1** : `cohort_size`, `is_pioneer`, `wave_age`, `similarity_to_pioneer` — calculables **à la latence de décision** depuis name/symbol de l'événement de création, zéro RPC. Tokenizer propre + tests, puis promotion dans `extract_pre_entry_features`. Vu le résultat loner/follower, la gate candidate est « **éviter** les followers », pas « acheter le thème ».
+- [ ] **Features de contenu** : name/symbol renseignés 1755/1755 ; socials à enrichir via `/coins/{mint}`. ML en **extracteur de features**, statistique en couche de décision — classifieur seulement à 10k+ étiquettes.
+- [ ] **Re-valider un trader expert sur un échantillon profond** (300–500 txs) avant d'utiliser ses fills comme étiquettes. Critère d'acceptation : allers-retours complets net positif sur N ≥ 30.

@@ -34,7 +34,6 @@ def test_round_trip_encode_decode():
         # verify discriminator
         assert bytes(ix.data[:8]) == CREATE_V2_DISCRIMINATOR
         # Build compiled instruction for decoder
-        account_pubkeys = tuple(str(m.pubkey) for m in ix.accounts)
         # decoder expects account_pubkeys length covering program_id_index too, but we provide minimal
         # ensure program_id_index points to pump program within account_pubkeys: append pump program if needed
         # Our ix accounts are 16, but decoder expects 16 indices referencing full tx account_keys.

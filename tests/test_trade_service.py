@@ -44,7 +44,7 @@ def test_buy_order_spec_invalid_inputs() -> None:
     with pytest.raises(ValueError, match="slippage_pct must be between"):
         BuyOrderSpec(mint=VALID_MINT, amount_sol=0.1, slippage_pct=150.0).validate()
 
-    with pytest.raises(ValueError, match="valid Solana address|invalid mint address"):
+    with pytest.raises(ValueError, match=r"valid Solana address|invalid mint address"):
         BuyOrderSpec(mint="not-a-valid-solana-key", amount_sol=0.1).validate()
 
 
@@ -111,3 +111,5 @@ async def test_trading_service_paper_lifecycle() -> None:
     assert sell_result_100.ok is True
     assert service.get_position(VALID_MINT) is None
     assert len(service.get_positions()) == 0
+
+    await service.close()

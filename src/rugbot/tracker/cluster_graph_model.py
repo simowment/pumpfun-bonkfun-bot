@@ -230,6 +230,8 @@ class ClusterIntelligenceModel:
     discovered_wallets: list[WalletDiscoveredRow] = field(default_factory=list)
     dossiers: dict[str, WalletDossier] = field(default_factory=dict)
     raw_evidence: list[RawEvidenceRow] = field(default_factory=list)
+    outbound_staged: list[dict[str, object]] = field(default_factory=list)
+    inbound_staged: list[dict[str, object]] = field(default_factory=list)
     avg_ath_multiplier: float = 1.0
     ath_consistency_pct: float = 0.0
     avg_rug_delay_seconds: float = 0.0

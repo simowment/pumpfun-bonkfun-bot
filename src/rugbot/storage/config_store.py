@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rugbot.domain.scalper_strategy import ScalperConfig
 from rugbot.runtime.config import (
@@ -16,10 +15,13 @@ from rugbot.runtime.config import (
     default_wallet_portfolio,
     parse_sniper_config_dict,
     parse_wallet_portfolio_dict,
-    resolve_state_dir,
+    resolve_tracker_db_path,
 )
 from rugbot.storage.database import DatabaseManager
 from rugbot.utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = get_logger(__name__)
 
@@ -39,11 +41,6 @@ def _ensure_app_config_table(db: DatabaseManager) -> None:
     db.connection.execute("PRAGMA journal_mode=WAL")
 
 
-def _db_path_for_state_dir(state_dir: Path | str | None) -> Path:
-    sd = resolve_state_dir(Path(state_dir) if state_dir is not None else None)
-    return sd / "rugbot.db"
-
-
 class ConfigStore:
     """Thin wrapper around DatabaseManager for app_config."""
 
@@ -53,7 +50,7 @@ class ConfigStore:
         if db is not None:
             self._db = db
         else:
-            self._db = DatabaseManager(_db_path_for_state_dir(state_dir))
+            self._db = DatabaseManager(resolve_tracker_db_path(state_dir))
         _ensure_app_config_table(self._db)
 
     def get_config(self, config_type: str) -> dict[str, Any] | None:
@@ -228,25 +225,30 @@ def sniper_to_mapping(cfg: CoreSniperConfig) -> dict[str, Any]:
             "buy_only_once": cfg.rules.buy_only_once,
             "max_consecutive_losses": cfg.rules.max_consecutive_losses,
             "buy_the_dip": {
-                "levels": [dataclasses.asdict(l) for l in cfg.rules.buy_the_dip_levels]
+                "levels": [
+                    dataclasses.asdict(level) for level in cfg.rules.buy_the_dip_levels
+                ]
             },
             "sell": {
                 "take_profit_levels": [
-                    dataclasses.asdict(l) for l in cfg.rules.sell.take_profit_levels
+                    dataclasses.asdict(level)
+                    for level in cfg.rules.sell.take_profit_levels
                 ],
                 "stop_loss_levels": [
-                    dataclasses.asdict(l) for l in cfg.rules.sell.stop_loss_levels
+                    dataclasses.asdict(level)
+                    for level in cfg.rules.sell.stop_loss_levels
                 ],
                 "trailing_levels": [
-                    dataclasses.asdict(l) for l in cfg.rules.sell.trailing_levels
+                    dataclasses.asdict(level)
+                    for level in cfg.rules.sell.trailing_levels
                 ],
                 "no_activity_seconds": (cfg.rules.sell.no_activity_timeout_ms // 1000)
                 if cfg.rules.sell.no_activity_timeout_ms is not None
                 else 0,
                 "auto_sell_big_buy": {
                     "levels": [
-                        dataclasses.asdict(l)
-                        for l in cfg.rules.sell.auto_sell_big_buy_levels
+                        dataclasses.asdict(level)
+                        for level in cfg.rules.sell.auto_sell_big_buy_levels
                     ]
                 },
             },

@@ -8,13 +8,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rugbot.backtest.trajectory.finalized_trade_builder import PumpTradeEventProof
 from rugbot.backtest.trajectory.outcome_builder import FinalizedOutcomePointInput
 from rugbot.domain.adverse_event import MarketTrajectoryPoint
 from rugbot.domain.amounts import QuoteBaseUnits, Slot, TokenBaseUnits
 from rugbot.domain.create_state_adapter import PumpCreateMintMetadataProof
 from rugbot.domain.decisions import AbstainReason, AbstainResult
-from rugbot.domain.fees import FeeConfig
+from rugbot.domain.fees import BASIS_POINTS_DENOMINATOR, FeeConfig
 from rugbot.domain.migration import PUMP_AMM_PROGRAM_ID
 from rugbot.domain.observations import RawChainObservation
 from rugbot.domain.quote_engine import (
@@ -23,6 +22,7 @@ from rugbot.domain.quote_engine import (
     executable_sell_quote,
 )
 from rugbot.domain.quotes import QuotePath
+from rugbot.domain.trades import PumpTradeEventProof
 from rugbot.domain.version_registry import PumpProtocolVersionSnapshot
 from rugbot.ingest.pump.bonding_curve_account import (
     PINNED_PUMP_IDL_SHA256,
@@ -410,9 +410,11 @@ def _validate_fee_and_metadata(  # noqa: C901
         or fee.program_config_version != snapshot.program_config_version
         or type(fee.protocol_fee_bps) is not int
         or type(fee.creator_fee_bps) is not int
+        or type(fee.lp_fee_bps) is not int
         or fee.protocol_fee_bps < 0
         or fee.creator_fee_bps < 0
-        or fee.protocol_fee_bps + fee.creator_fee_bps > 10_000
+        or fee.lp_fee_bps < 0
+        or fee.swap_total_fee_bps > BASIS_POINTS_DENOMINATOR
     ):
         return _abstain(
             AbstainReason.UNKNOWN_FEE_CONFIG,
@@ -422,6 +424,7 @@ def _validate_fee_and_metadata(  # noqa: C901
     if (
         event.protocol_fee_basis_points != fee.protocol_fee_bps
         or event.creator_fee_basis_points != fee.creator_fee_bps
+        or event.lp_fee_basis_points != fee.lp_fee_bps
     ):
         return _abstain(
             AbstainReason.UNKNOWN_FEE_CONFIG,

@@ -1,6 +1,6 @@
 """CLI tool for executing manual or automated Pump.fun Buy/Sell orders."""
 
-# ruff: noqa: C901, PLR0912
+# ruff: noqa: C901, PLR0912, PLR0911, PLR0915, FBT001, PLC0415, BLE001, TRY300
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from rugbot.execution.trade_service import (
     TradingService,
 )
 from rugbot.integrations.solana_rpc import SolanaClient
+from rugbot.runtime.config import resolve_dotenv
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -203,28 +204,31 @@ def parse_execution_mode(raw_mode: str, dry_run_flag: bool) -> ExecutionMode:
     return ExecutionMode(cleaned)
 
 
-from rugbot.runtime.config import resolve_dotenv
-
-
 async def run_cli(args: argparse.Namespace) -> int:
     resolve_dotenv(include_signing=True)
     service = TradingService()
 
     if args.command == "buy":
         mode = parse_execution_mode(args.mode, args.dry_run)
-        spec = BuyOrderSpec(
-            mint=args.mint,
-            amount_sol=args.sol,
-            slippage_pct=args.slippage,
-            priority_fee_sol=args.priority_fee,
-            jito_tip_sol=args.jito,
-            routing=args.routing,
-            mode=mode,
-            take_profit_pct=args.tp,
-            stop_loss_pct=args.sl,
-            trailing_stop_pct=args.trailing,
-            max_hold_seconds=args.max_hold,
-        )
+        try:
+            spec = BuyOrderSpec(
+                mint=args.mint,
+                amount_sol=args.sol,
+                slippage_pct=args.slippage,
+                priority_fee_sol=args.priority_fee,
+                jito_tip_sol=args.jito,
+                routing=args.routing,
+                mode=mode,
+                take_profit_pct=args.tp,
+                stop_loss_pct=args.sl,
+                trailing_stop_pct=args.trailing,
+                max_hold_seconds=args.max_hold,
+            )
+            spec.validate()
+        except ValueError as exc:
+            print(f"[-] VALIDATION ERROR: {exc}")
+            return 1
+
         print("=" * 60)
         print(" 🚀 PUMP.FUN UNIFIED ORDER: BUY")
         print("=" * 60)
@@ -263,16 +267,22 @@ async def run_cli(args: argparse.Namespace) -> int:
 
     if args.command == "sell":
         mode = parse_execution_mode(args.mode, args.dry_run)
-        spec = SellOrderSpec(
-            mint=args.mint,
-            percent=args.pct,
-            amount_tokens=args.tokens,
-            slippage_pct=args.slippage,
-            priority_fee_sol=args.priority_fee,
-            jito_tip_sol=args.jito,
-            routing=args.routing,
-            mode=mode,
-        )
+        try:
+            spec = SellOrderSpec(
+                mint=args.mint,
+                percent=args.pct,
+                amount_tokens=args.tokens,
+                slippage_pct=args.slippage,
+                priority_fee_sol=args.priority_fee,
+                jito_tip_sol=args.jito,
+                routing=args.routing,
+                mode=mode,
+            )
+            spec.validate()
+        except ValueError as exc:
+            print(f"[-] VALIDATION ERROR: {exc}")
+            return 1
+
         print("=" * 60)
         print(" 📉 PUMP.FUN UNIFIED ORDER: SELL")
         print("=" * 60)
@@ -478,7 +488,7 @@ async def run_cli(args: argparse.Namespace) -> int:
             export_vectorbt_ohlc_report,
             generate_terminal_candlestick_chart,
         )
-        from rugbot.domain.ohlc import fetch_token_ohlc_candles
+        from rugbot.integrations.pumpfun_api import fetch_token_ohlc_candles
 
         mint = args.mint.strip()
         print(

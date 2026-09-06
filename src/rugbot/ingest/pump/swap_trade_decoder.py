@@ -85,7 +85,15 @@ class CompiledPumpSwapInstruction:
 
 
 @dataclass(frozen=True, slots=True)
-class _TradeInstructionSchema:
+class _PumpSwapTradeInstructionSchema:
+    """Pinned layout for one PumpSwap AMM trade instruction.
+
+    Distinct from ``trade_decoder._PumpTradeInstructionSchema``: the AMM accepts
+    several ``allowed_data_lengths`` for the same discriminator and resolves
+    accounts positionally with no role-name indirection. The two are separate
+    on-chain programs with separate pinned IDLs and MUST NOT be merged.
+    """
+
     name: str
     side: TradeSide
     discriminator: bytes
@@ -106,7 +114,7 @@ class _DecodedArgs:
 TradeInstructionDecodeResult = PumpSwapTradeInstructionEvidence | AbstainResult
 
 _TRADE_SCHEMAS = {
-    BUY_DISCRIMINATOR: _TradeInstructionSchema(
+    BUY_DISCRIMINATOR: _PumpSwapTradeInstructionSchema(
         name="buy",
         side=TradeSide.BUY,
         discriminator=BUY_DISCRIMINATOR,
@@ -116,7 +124,7 @@ _TRADE_SCHEMAS = {
             DISCRIMINATOR_SIZE + U64_SIZE * 2 + 1,
         ),
     ),
-    BUY_EXACT_QUOTE_IN_DISCRIMINATOR: _TradeInstructionSchema(
+    BUY_EXACT_QUOTE_IN_DISCRIMINATOR: _PumpSwapTradeInstructionSchema(
         name="buy_exact_quote_in",
         side=TradeSide.BUY,
         discriminator=BUY_EXACT_QUOTE_IN_DISCRIMINATOR,
@@ -126,7 +134,7 @@ _TRADE_SCHEMAS = {
             DISCRIMINATOR_SIZE + U64_SIZE * 2 + 1,
         ),
     ),
-    SELL_DISCRIMINATOR: _TradeInstructionSchema(
+    SELL_DISCRIMINATOR: _PumpSwapTradeInstructionSchema(
         name="sell",
         side=TradeSide.SELL,
         discriminator=SELL_DISCRIMINATOR,
@@ -264,7 +272,7 @@ def _validate_account_key_bounds(
 
 def _validate_layout(
     instruction: CompiledPumpSwapInstruction,
-    schema: _TradeInstructionSchema,
+    schema: _PumpSwapTradeInstructionSchema,
 ) -> AbstainResult | None:
     if len(instruction.data) not in schema.allowed_data_lengths:
         return _abstain(
@@ -286,7 +294,7 @@ def _validate_layout(
 
 def _validate_fixed_accounts(
     instruction: CompiledPumpSwapInstruction,
-    schema: _TradeInstructionSchema,
+    schema: _PumpSwapTradeInstructionSchema,
 ) -> AbstainResult | None:
     account_pubkeys = instruction.account_pubkeys
     if account_pubkeys is None:
@@ -311,7 +319,7 @@ def _validate_fixed_accounts(
 
 def _validate_role_proofs(
     instruction: CompiledPumpSwapInstruction,
-    schema: _TradeInstructionSchema,
+    schema: _PumpSwapTradeInstructionSchema,
 ) -> AbstainResult | None:
     account_pubkeys = instruction.account_pubkeys
     if account_pubkeys is None:
@@ -348,7 +356,7 @@ def _validate_role_proofs(
 
 def _decode_args(  # noqa: PLR0911
     instruction: CompiledPumpSwapInstruction,
-    schema: _TradeInstructionSchema,
+    schema: _PumpSwapTradeInstructionSchema,
 ) -> _DecodedArgs | AbstainResult:
     first = _u64_at(instruction.data, DISCRIMINATOR_SIZE)
     second = _u64_at(instruction.data, DISCRIMINATOR_SIZE + U64_SIZE)
@@ -401,7 +409,7 @@ def _decode_args(  # noqa: PLR0911
 def _build_evidence(
     *,
     instruction: CompiledPumpSwapInstruction,
-    schema: _TradeInstructionSchema,
+    schema: _PumpSwapTradeInstructionSchema,
     args: _DecodedArgs,
     idl_hash: str,
     decoder_version: str,
@@ -465,13 +473,13 @@ def _build_evidence(
     )
 
 
-def _account_position(schema: _TradeInstructionSchema, name: str) -> int:
+def _account_position(schema: _PumpSwapTradeInstructionSchema, name: str) -> int:
     return schema.required_account_names.index(name)
 
 
 def _account_index(
     instruction: CompiledPumpSwapInstruction,
-    schema: _TradeInstructionSchema,
+    schema: _PumpSwapTradeInstructionSchema,
     name: str,
 ) -> int:
     return instruction.account_indices[_account_position(schema, name)]

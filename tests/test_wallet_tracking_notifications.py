@@ -438,3 +438,69 @@ async def test_tui_renders_and_acknowledges_durable_launch_alert(
         assert app.query_one(TabbedContent).active == "overview-tab"
 
     await core.close()
+
+
+@pytest.mark.anyio
+async def test_tui_acknowledges_offline_alerts_without_polluting_live_feed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§14.2: alerts missed while offline must not enter the live feed.
+
+    A launch recorded by another process while no TUI was running stays in the
+    durable outbox. Mounting the TUI must acknowledge it, keep the launch
+    visible in the LAUNCHES tab, and never inject it into the live activity
+    feed with its original on-chain timestamp.
+    """
+
+    monkeypatch.delenv("SOLANA_RPC_HTTP", raising=False)
+    monkeypatch.delenv("SOLANA_NODE_RPC_ENDPOINT", raising=False)
+    monkeypatch.delenv("SOLANA_RPC_WEBSOCKET", raising=False)
+    monkeypatch.delenv("SOLANA_NODE_WSS_ENDPOINT", raising=False)
+    core = build_ui_runtime(state_dir=tmp_path, endpoint="")
+    core.service.add_funder(WALLET, label="Offline entity")
+    core.service.handle_launch(
+        TokenLaunch(
+            signature=SIGNATURE,
+            slot=123,
+            timestamp=1_700_000_000,
+            creator=WALLET,
+            mint=MINT,
+            symbol="TEST",
+            name="Test token",
+        )
+    )
+    # The TUI was not running: the alert stayed in the durable outbox.
+    assert len(core.repository.get_undelivered_alerts("tui")) == 1
+
+    app = RugbotTuiApp(
+        core=core,
+        endpoint="",
+        refresh_seconds=3_600,
+        state_dir=tmp_path,
+    )
+    notified: list[str] = []
+    original_notify = app.notify
+
+    def _capture_notify(message: str, **kwargs: object) -> None:
+        notified.append(message)
+        original_notify(message, **kwargs)  # type: ignore[arg-type]
+
+    app.notify = _capture_notify  # type: ignore[method-assign]
+    async with app.run_test(size=(120, 36)) as pilot:
+        for _ in range(100):
+            if not core.repository.get_undelivered_alerts("tui"):
+                break
+            await pilot.pause()
+        await pilot.pause()
+
+        activity = app.query_one("#live-activity-view", LiveActivityView)
+        # §14.2: the historical launch is never injected into the live feed.
+        assert f"launch_{MINT}" not in activity._items
+        # The outbox is drained so it does not re-deliver on every start.
+        assert core.repository.get_undelivered_alerts("tui") == ()
+        # The launch remains visible where history belongs.
+        assert app.query_one("#launches-table", DataTable).row_count == 1
+        # The operator is told the alerts were missed while offline.
+        assert any("offline" in message for message in notified)
+
+    await core.close()

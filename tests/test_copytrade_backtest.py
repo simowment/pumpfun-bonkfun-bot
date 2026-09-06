@@ -39,7 +39,7 @@ def test_copytrade_single_sample_tp_hit() -> None:
     )
 
     # TP at +50% should hit since peak reached 1.8x
-    gross, fees, net, is_win = _eval_copytrade_single_sample(
+    gross, _fees, net, is_win = _eval_copytrade_single_sample(
         sample, tp_pct=50.0, sl_pct=20.0, config=config
     )
     assert is_win is True

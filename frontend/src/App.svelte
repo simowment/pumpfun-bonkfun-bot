@@ -16,6 +16,7 @@
     fetchEntityScanHistory,
     fetchWalletBalance,
     trackEntity,
+    fetchRuggers,
   } from './lib/api.js';
 
   let searchQuery = $state('');
@@ -33,6 +34,12 @@
   let wsRef = null;
   let statusMessage = $state('');
   let liveLaunches = $state([]);
+
+  // Rugger ranking (§14 evidence), served from the headless discover DB.
+  let ruggers = $state([]);
+  let ruggersLoading = $state(false);
+  let ruggersError = $state('');
+  let ruggersType2Note = $state('');
 
   function shortAddr(a) {
     if (!a || a.length < 10) return a || '—';
@@ -326,8 +333,29 @@
     }
   }
 
+  async function loadRuggers() {
+    ruggersLoading = true;
+    ruggersError = '';
+    try {
+      const res = await fetchRuggers('30d', 2, 50);
+      if (res?.ok) {
+        ruggers = res.ruggers ?? [];
+        ruggersType2Note = res.type2_note ?? '';
+      } else {
+        ruggers = [];
+        ruggersError = res?.error || 'discover ruggers request failed';
+      }
+    } catch (e) {
+      ruggers = [];
+      ruggersError = e?.message || String(e);
+    } finally {
+      ruggersLoading = false;
+    }
+  }
+
   onMount(async () => {
     initWebSocket();
+    loadRuggers();
     const urlTarget = new URLSearchParams(window.location.search).get('target');
     if (urlTarget) {
       searchQuery = urlTarget.trim();
@@ -368,7 +396,7 @@
       <button class="btn btn-hazard" onclick={() => handleScan()} disabled={scanning}>
         <span>🔍</span> {scanning ? 'Scanning...' : 'Scan Address'}
       </button>
-      <button class="btn btn-outline" onclick={loadData}>
+      <button class="btn btn-outline" onclick={() => { loadData(); loadRuggers(); }}>
         <span>🔄</span> Sync
       </button>
     </div>
@@ -417,6 +445,10 @@
         liveLaunches={liveLaunches}
         onLiveInspect={handleLiveInspect}
         onLiveTrack={handleLiveTrack}
+        ruggers={ruggers}
+        ruggersLoading={ruggersLoading}
+        ruggersError={ruggersError}
+        type2Note={ruggersType2Note}
       />
     </section>
 

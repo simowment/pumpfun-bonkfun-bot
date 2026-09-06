@@ -483,58 +483,6 @@ async def build_wallet_intelligence_report_from_histories(
     )
 
 
-def with_confirmed_entity_launches(
-    report: WalletIntelligenceReport,
-    launches: tuple[WalletLaunch, ...],
-    extra_repeat_bundlers: tuple[RepeatBundlerEntity, ...] = (),
-) -> WalletIntelligenceReport:
-    """Merge finalized-RPC-confirmed indexed creations into launch evidence.
-
-    Indexed nominations confirmed against finalized RPC carry slot, signature,
-    and transaction index. They are merged with history-derived launches,
-    deduped by signature, and the launch counters are recomputed so the
-    report reflects the creator's complete confirmed launch history even when
-    the creations fall outside the bounded observation window.
-    """
-
-    if not launches:
-        return report
-    known_signatures = {launch.signature for launch in report.launches}
-    merged = tuple(
-        sorted(
-            (
-                *report.launches,
-                *(
-                    launch
-                    for launch in launches
-                    if launch.signature not in known_signatures
-                ),
-            ),
-            key=lambda launch: (launch.slot, launch.signature),
-        )
-    )
-    repeat_bundlers = {
-        (entity.bundler_wallet, entity.entity_creator): entity
-        for entity in report.repeat_bundler_entities
-    }
-    for entity in extra_repeat_bundlers:
-        repeat_bundlers.setdefault(
-            (entity.bundler_wallet, entity.entity_creator), entity
-        )
-    return replace(
-        report,
-        launches=merged,
-        launch_count=len(merged),
-        early_launch_count=sum(launch.position_is_zero_or_one for launch in merged),
-        repeat_bundler_entities=tuple(
-            sorted(
-                repeat_bundlers.values(),
-                key=lambda entity: (entity.bundler_wallet, entity.entity_creator),
-            )
-        ),
-    )
-
-
 def report_to_json(report: WalletIntelligenceReport) -> dict[str, object]:
     """Convert a typed wallet report to a UI-friendly JSON object."""
 

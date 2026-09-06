@@ -49,6 +49,23 @@ export function fetchRecentTokens() {
   return request('/api/tokens/recent');
 }
 
+export function fetchRuggers(
+  since = '30d',
+  minLaunches = 2,
+  limit = 50,
+  { maxCreations = 10, sampleCount = 10, minWinrate = 33, noRpc = false } = {},
+) {
+  const params = new URLSearchParams();
+  if (since) params.set('since', since);
+  params.set('min_launches', String(minLaunches));
+  params.set('limit', String(limit));
+  params.set('max_creations', String(maxCreations));
+  params.set('sample_count', String(sampleCount));
+  params.set('min_winrate', String(minWinrate));
+  if (noRpc) params.set('no_rpc', 'true');
+  return request(`/api/discover/ruggers?${params.toString()}`);
+}
+
 export function scanEntity(query, maxTransactions = 100, signal = undefined) {
   return request('/api/entity/scan', {
     method: 'POST',

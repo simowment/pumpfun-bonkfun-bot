@@ -1,6 +1,6 @@
 """Data-based market history (on-chain first, honest unavailable flags)."""
 
-# ruff: noqa: PLC0415, C901, PLR0911, PLR0912, PLR0915, S110, BLE001, S310, I001, B007, B905, PLW0108, RUF059, F841, PLR5501, PLR2004
+# ruff: noqa: PLC0415, C901, PLR0911, PLR0912, PLR0915, S110, S112, BLE001, N806, N814, TRY300, I001, B007, B905, PLW0108, RUF059, F841, PLR5501, PLR2004
 from __future__ import annotations
 
 import base64
@@ -18,9 +18,6 @@ logger = get_logger(__name__)
 PUMP_PROGRAM_ID_STR: str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 _SOLSCAN_MAX_PAGES: int = 100
 _SOLSCAN_PAGE_LIMIT: int = 10
-_ALCHEMY_FALLBACK_RPC: str = (
-    "https://solana-mainnet.g.alchemy.com/v2/alch_2O5Is1Oqa0hgCkxXA3w7T"
-)
 _TRADE_EVENT_DISCRIMINATOR = bytes([189, 219, 127, 211, 78, 230, 97, 238])
 _EARLY_SIG_LIMIT = 1000
 _EARLY_SIG_PAGES = 5
@@ -380,26 +377,24 @@ def _parse_solscan_trade_row(row: dict, mint: str) -> dict | None:
 
 
 def _resolve_rpc_url(explicit: str | None) -> str | None:
-    if explicit and explicit.strip():
-        return explicit.strip()
-    try:
-        from rugbot.runtime.config import resolve_dotenv  # type: ignore
+    """Resolve the primary RPC endpoint through the canonical chokepoint.
 
-        resolve_dotenv()
-    except Exception:
-        pass
-    # priority: explicit env vars then fallbacks then Alchemy
-    for key in ("SOLANA_RPC_HTTP", "SOLANA_NODE_RPC_ENDPOINT"):
-        v = os.getenv(key)
-        if v and v.strip():
-            return v.strip()
-    fallbacks = os.getenv("SOLANA_RPC_HTTP_FALLBACKS")
-    if fallbacks:
-        for part in fallbacks.split(","):
-            p = part.strip()
-            if p:
-                return p
-    return _ALCHEMY_FALLBACK_RPC
+    Args:
+        explicit: Per-call override endpoint (a CLI ``--rpc`` value). Beats the
+            saved ``.env`` file and any inherited process default.
+
+    Returns:
+        The primary endpoint URL, or ``None`` when nothing is configured or a
+        configured URL is invalid. This helper is best-effort and never raises.
+    """
+    from rugbot.integrations.rpc_access import resolve_rpc_endpoints
+    from rugbot.runtime.config import SniperConfigError
+
+    try:
+        return resolve_rpc_endpoints(primary=explicit).primary
+    except SniperConfigError as exc:
+        logger.debug("rpc endpoint resolution failed: %s", exc)
+        return None
 
 
 def _fetch_solscan_trades(mint: str, db_path: str | Path) -> list[dict] | None:
@@ -504,34 +499,35 @@ def _fetch_solscan_trades(mint: str, db_path: str | Path) -> list[dict] | None:
     return collected
 
 
-def _rpc_json_call(
-    rpc_url: str, method: str, params: list[object], timeout: int = 12
-) -> dict | None:
-    import json as _json
-    import urllib.request
+def _rpc_json_call(rpc_url: str, method: str, params: list[object]) -> object | None:
+    """Return one decoded JSON-RPC ``result`` via the canonical chokepoint.
 
-    payload = _json.dumps(
-        {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-    ).encode()
-    candidates = [rpc_url]
-    fallbacks_raw = os.getenv("SOLANA_RPC_HTTP_FALLBACKS") or ""
-    for part in fallbacks_raw.split(","):
-        p = part.strip()
-        if p and p not in candidates:
-            candidates.append(p)
-    if _ALCHEMY_FALLBACK_RPC not in candidates:
-        candidates.append(_ALCHEMY_FALLBACK_RPC)
-    for cand in candidates:
-        try:
-            req = urllib.request.Request(
-                cand, data=payload, headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return _json.loads(resp.read().decode())
-        except Exception as exc:
-            logger.debug("rpc %s failed %s: %s", method, cand[:40], exc)
-            continue
-    return None
+    Args:
+        rpc_url: Per-call override endpoint; beats the saved ``.env`` file.
+        method: JSON-RPC method name.
+        params: JSON-RPC params array.
+
+    Returns:
+        The decoded ``result`` payload (a ``list`` for ``getSignaturesForAddress``
+        or a ``dict`` for ``getTransaction``), or ``None`` when no endpoint is
+        configured or every provider failed. This helper is best-effort and
+        never raises.
+    """
+    from rugbot.integrations.rpc_access import (
+        RpcAccessError,
+        resolve_rpc_endpoints,
+        sync_rpc_result,
+    )
+    from rugbot.runtime.config import SniperConfigError
+
+    try:
+        endpoints = resolve_rpc_endpoints(primary=rpc_url)
+        if not endpoints.ordered:
+            return None
+        return sync_rpc_result(method, params, endpoints=endpoints)
+    except (RpcAccessError, SniperConfigError) as exc:
+        logger.debug("rpc %s failed: %s", method, exc)
+        return None
 
 
 def _decode_trade_event_price(payload: bytes) -> tuple[int, int, bool] | None:
@@ -584,12 +580,12 @@ def _fetch_early_onchain_trades(
                     "before": before_sig,
                 },
             ]
-        resp = _rpc_json_call(rpc_url, "getSignaturesForAddress", params, timeout=15)
+        resp = _rpc_json_call(rpc_url, "getSignaturesForAddress", params)
         if resp is None:
             if not sig_entries:
                 return None
             break
-        result = resp.get("result") if isinstance(resp, dict) else None
+        result = resp if isinstance(resp, list) else None
         if not isinstance(result, list):
             if not sig_entries:
                 return None
@@ -638,7 +634,6 @@ def _fetch_early_onchain_trades(
                     "maxSupportedTransactionVersion": 0,
                 },
             ],
-            timeout=12,
         )
         if tx_resp is None:
             throttle_hits += 1
@@ -646,7 +641,7 @@ def _fetch_early_onchain_trades(
                 break
             time.sleep(_EARLY_TX_BATCH_SLEEP)
             continue
-        result = tx_resp.get("result") if isinstance(tx_resp, dict) else None
+        result = tx_resp if isinstance(tx_resp, dict) else None
         if not isinstance(result, dict):
             time.sleep(0.2)
             continue
@@ -716,15 +711,6 @@ def _fetch_supply_via_rpc(
     resolved = _resolve_rpc_url(rpc_url)
     if not resolved:
         return None, None, None, None
-    candidates = [resolved]
-    # also try fallbacks if primary fails
-    fallbacks_raw = os.getenv("SOLANA_RPC_HTTP_FALLBACKS") or ""
-    for part in fallbacks_raw.split(","):
-        p = part.strip()
-        if p and p not in candidates:
-            candidates.append(p)
-    if _ALCHEMY_FALLBACK_RPC not in candidates:
-        candidates.append(_ALCHEMY_FALLBACK_RPC)
     try:
         from solders.pubkey import Pubkey  # type: ignore
 
@@ -736,46 +722,30 @@ def _fetch_supply_via_rpc(
             PUMP_PROGRAM_ID as _PUMP_PID_STR,
         )  # type: ignore
 
+        from rugbot.integrations.rpc_access import (
+            RpcAccessError,
+            resolve_rpc_endpoints,
+            sync_rpc_result,
+        )
+
         _PUMP_PID = Pubkey.from_string(_PUMP_PID_STR)
         mint_pk = Pubkey.from_string(mint)
         bonding_curve_pda, _ = Pubkey.find_program_address(
             [b"bonding-curve", bytes(mint_pk)], _PUMP_PID
         )
-        # raw rpc call with fallback candidates
-        import json as _json
-        import urllib.request
-
-        payload = _json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getAccountInfo",
-                "params": [
+        endpoints = resolve_rpc_endpoints(primary=rpc_url)
+        try:
+            result = sync_rpc_result(
+                "getAccountInfo",
+                [
                     str(bonding_curve_pda),
                     {"commitment": "finalized", "encoding": "base64"},
                 ],
-            }
-        ).encode()
-        data: dict | None = None
-        last_exc: Exception | None = None
-        for cand_url in candidates:
-            try:
-                req = urllib.request.Request(
-                    cand_url, data=payload, headers={"Content-Type": "application/json"}
-                )
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    data = _json.loads(resp.read().decode())
-                break
-            except Exception as exc:
-                last_exc = exc
-                logger.debug("supply rpc candidate failed %s: %s", cand_url[:40], exc)
-                continue
-        if data is None:
-            logger.debug(
-                "supply via rpc all candidates failed for %s: %s", mint, last_exc
+                endpoints=endpoints,
             )
+        except RpcAccessError as exc:
+            logger.debug("supply via rpc failed for %s: %s", mint, exc)
             return None, None, None, None
-        result = data.get("result", {}) if isinstance(data, dict) else {}
         val = result.get("value") if isinstance(result, dict) else None
         if not isinstance(val, dict) or not val.get("data"):
             return None, None, None, None

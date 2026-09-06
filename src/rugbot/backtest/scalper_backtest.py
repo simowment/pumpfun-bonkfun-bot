@@ -185,8 +185,8 @@ def run_scalper_backtest(
         if not mint:
             continue
         by_mint.setdefault(mint, []).append(t)
-    for mint in by_mint:
-        by_mint[mint].sort(key=lambda r: int(r.get("slot", 0)))
+    for mint_trades in by_mint.values():
+        mint_trades.sort(key=lambda r: int(r.get("slot", 0)))
 
     # Launch slot map for entry offset check
     launch_slot_map: dict[str, int] = {}

@@ -145,7 +145,16 @@ class CompiledPumpInstruction:
 
 
 @dataclass(frozen=True, slots=True)
-class _TradeInstructionSchema:
+class _PumpTradeInstructionSchema:
+    """Pinned layout for one Pump.fun bonding-curve trade instruction.
+
+    Distinct from ``swap_trade_decoder._PumpSwapTradeInstructionSchema``: the
+    bonding curve enforces one exact ``data_length`` and resolves roles through
+    named accounts, while the PumpSwap AMM accepts several data lengths and has
+    no role-name indirection. The two are separate on-chain programs with
+    separate pinned IDLs and MUST NOT be merged.
+    """
+
     name: str
     side: TradeSide
     discriminator: bytes
@@ -174,21 +183,21 @@ class _DecodedArgs:
 TradeInstructionDecodeResult = PumpTradeInstructionEvidence | AbstainResult
 
 _TRADE_SCHEMAS = {
-    BUY_DISCRIMINATOR: _TradeInstructionSchema(
+    BUY_DISCRIMINATOR: _PumpTradeInstructionSchema(
         name="buy",
         side=TradeSide.BUY,
         discriminator=BUY_DISCRIMINATOR,
         required_account_names=BUY_ACCOUNT_NAMES,
         data_length=DISCRIMINATOR_SIZE + U64_SIZE + U64_SIZE + BOOL_SIZE,
     ),
-    SELL_DISCRIMINATOR: _TradeInstructionSchema(
+    SELL_DISCRIMINATOR: _PumpTradeInstructionSchema(
         name="sell",
         side=TradeSide.SELL,
         discriminator=SELL_DISCRIMINATOR,
         required_account_names=SELL_ACCOUNT_NAMES,
         data_length=DISCRIMINATOR_SIZE + U64_SIZE + U64_SIZE,
     ),
-    BUY_V2_DISCRIMINATOR: _TradeInstructionSchema(
+    BUY_V2_DISCRIMINATOR: _PumpTradeInstructionSchema(
         name="buy_v2",
         side=TradeSide.BUY,
         discriminator=BUY_V2_DISCRIMINATOR,
@@ -203,7 +212,7 @@ _TRADE_SCHEMAS = {
         fee_config_account_name="fee_config",
         fee_program_account_name="fee_program",
     ),
-    SELL_V2_DISCRIMINATOR: _TradeInstructionSchema(
+    SELL_V2_DISCRIMINATOR: _PumpTradeInstructionSchema(
         name="sell_v2",
         side=TradeSide.SELL,
         discriminator=SELL_V2_DISCRIMINATOR,
@@ -381,7 +390,7 @@ def _account_key_validation_failure(
 
 def _validate_instruction_layout(
     instruction: CompiledPumpInstruction,
-    schema: _TradeInstructionSchema,
+    schema: _PumpTradeInstructionSchema,
 ) -> AbstainResult | None:
     legacy_buy_without_track_volume = (
         schema.discriminator == BUY_DISCRIMINATOR
@@ -428,7 +437,7 @@ def _validate_instruction_layout(
 
 def _validate_fixed_account_pubkeys(
     instruction: CompiledPumpInstruction,
-    schema: _TradeInstructionSchema,
+    schema: _PumpTradeInstructionSchema,
 ) -> AbstainResult | None:
     account_pubkeys = instruction.account_pubkeys
     if account_pubkeys is None:
@@ -453,7 +462,7 @@ def _validate_fixed_account_pubkeys(
 
 def _validate_account_role_proofs(
     instruction: CompiledPumpInstruction,
-    schema: _TradeInstructionSchema,
+    schema: _PumpTradeInstructionSchema,
 ) -> AbstainResult | None:
     account_pubkeys = instruction.account_pubkeys
     if account_pubkeys is None:
@@ -494,7 +503,7 @@ def _validate_account_role_proofs(
 
 def _decode_args(  # noqa: C901, PLR0911
     instruction: CompiledPumpInstruction,
-    schema: _TradeInstructionSchema,
+    schema: _PumpTradeInstructionSchema,
 ) -> _DecodedArgs | AbstainResult:
     if schema.discriminator == BUY_V2_DISCRIMINATOR:
         base_amount = _u64_at(instruction.data, 8)
@@ -589,7 +598,7 @@ def _u64_at(data: bytes, offset: int) -> int:
 def _build_trade_instruction(
     *,
     instruction: CompiledPumpInstruction,
-    schema: _TradeInstructionSchema,
+    schema: _PumpTradeInstructionSchema,
     decoded_args: _DecodedArgs,
     idl_hash: str,
     decoder_version: str,
@@ -659,7 +668,7 @@ def _build_trade_instruction(
 
 def _account_index(
     instruction: CompiledPumpInstruction,
-    schema: _TradeInstructionSchema,
+    schema: _PumpTradeInstructionSchema,
     account_name: str,
 ) -> int:
     position = schema.required_account_names.index(account_name)

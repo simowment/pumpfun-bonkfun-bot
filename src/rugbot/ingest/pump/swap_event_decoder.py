@@ -23,8 +23,11 @@ PUMP_AMM_EVENT_DISCRIMINATORS = frozenset(
 SOLANA_PUBKEY_BYTES = 32
 EVENT_DISCRIMINATOR_BYTES = 8
 SIGNATURE_BYTES = 64
+U16_BYTES = 2
+U32_BYTES = 4
 U64_BYTES = 8
 I64_BYTES = 8
+I128_BYTES = 16
 STRING_LENGTH_BYTES = 4
 
 SwapEventDecodeResult = PumpSwapTradeEventEvidence | AbstainResult
@@ -47,7 +50,7 @@ def decode_pump_swap_trade_event(
     )
     if validation is not None:
         return validation
-    reader = _EventReader(payload)
+    reader = EventReader(payload)
     discriminator = reader.read_bytes(8)
     if discriminator == PUMP_AMM_BUY_EVENT_DISCRIMINATOR:
         return _decode_buy(reader, payload, as_of_slot, signature, event_index)
@@ -61,7 +64,7 @@ def decode_pump_swap_trade_event(
 
 
 def _decode_buy(
-    reader: _EventReader,
+    reader: EventReader,
     payload: bytes,
     as_of_slot: int,
     signature: bytes,
@@ -117,7 +120,7 @@ def _decode_buy(
 
 
 def _decode_sell(
-    reader: _EventReader,
+    reader: EventReader,
     payload: bytes,
     as_of_slot: int,
     signature: bytes,
@@ -167,7 +170,7 @@ def _decode_sell(
     )
 
 
-def _read_event_pubkeys(reader: _EventReader) -> tuple[str, str]:
+def _read_event_pubkeys(reader: EventReader) -> tuple[str, str]:
     pool = reader.read_pubkey()
     user = reader.read_pubkey()
     reader.skip_pubkey(2)
@@ -178,7 +181,7 @@ def _read_event_pubkeys(reader: _EventReader) -> tuple[str, str]:
 
 def _finish(
     *,
-    reader: _EventReader,
+    reader: EventReader,
     payload: bytes,
     as_of_slot: int,
     signature: bytes,
@@ -286,7 +289,15 @@ def _validate_inputs(
 
 
 @dataclass(slots=True)
-class _EventReader:
+class EventReader:
+    """Canonical bounded reader for pinned little-endian Anchor event payloads.
+
+    Every read is bounds-checked and latches a single ``error`` string instead
+    of raising, so a truncated or malformed finalized event abstains at the
+    exact field that cannot be proven. This is the only Anchor event cursor in
+    the codebase; protocol-specific field sequences belong in subclasses.
+    """
+
     payload: bytes
     offset: int = 0
     error: str | None = None
@@ -311,9 +322,21 @@ class _EventReader:
         value = self.read_bytes(I64_BYTES)
         return unpack_from("<q", value)[0] if len(value) == I64_BYTES else 0
 
+    def read_u16(self) -> int:
+        value = self.read_bytes(U16_BYTES)
+        return unpack_from("<H", value)[0] if len(value) == U16_BYTES else 0
+
+    def read_u32(self) -> int:
+        value = self.read_bytes(U32_BYTES)
+        return unpack_from("<I", value)[0] if len(value) == U32_BYTES else 0
+
     def read_i128(self) -> int:
-        value = self.read_bytes(16)
-        return int.from_bytes(value, byteorder="little", signed=True) if value else 0
+        value = self.read_bytes(I128_BYTES)
+        return (
+            int.from_bytes(value, byteorder="little", signed=True)
+            if len(value) == I128_BYTES
+            else 0
+        )
 
     def read_bool(self) -> bool:
         value = self.read_bytes(1)
@@ -361,6 +384,7 @@ __all__ = [
     "PUMP_AMM_BUY_EVENT_DISCRIMINATOR",
     "PUMP_AMM_EVENT_DISCRIMINATORS",
     "PUMP_AMM_SELL_EVENT_DISCRIMINATOR",
+    "EventReader",
     "SwapEventDecodeResult",
     "decode_pump_swap_trade_event",
 ]
