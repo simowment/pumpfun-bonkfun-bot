@@ -51,6 +51,7 @@ from rugbot.tracker.models import (
     EntityGraphSnapshotRecord,
     FunderRecord,
     LaunchRecord,
+    OperatorCandidateRecord,
     TargetExecutionMode,
     TargetExecutionPolicy,
     TransferRecord,
@@ -874,6 +875,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except Exception as exc:  # noqa: BLE001 — snapshot save never breaks output
             logger.warning("entity graph snapshot save failed: %s", type(exc).__name__)
+    if operator_linked:
+        try:
+            repo.save_operator_candidates(
+                [
+                    OperatorCandidateRecord(
+                        wallet=str(link["wallet"]),
+                        source_entity=wallet_address,
+                        created_count=int(link.get("created_count") or 0),
+                        first_seen_at=now_iso,
+                        last_seen_at=now_iso,
+                    )
+                    for link in operator_linked
+                    if link.get("wallet") and (link.get("created_count") or 0) >= 1
+                ]
+            )
+        except Exception as exc:  # noqa: BLE001 — candidate save never breaks output
+            logger.warning("operator candidate save failed: %s", type(exc).__name__)
     if args.json:
         print(json.dumps(out_dict, indent=2))
         return 2 if args.enroll and not enrolled else 0

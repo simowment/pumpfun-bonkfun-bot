@@ -14,6 +14,7 @@ from rugbot.tracker.models import (
     EntityGraphSnapshotRecord,
     FunderRecord,
     LaunchRecord,
+    OperatorCandidateRecord,
     TargetExecutionMode,
     TargetExecutionPolicy,
     TargetScanRecord,
@@ -96,6 +97,15 @@ class SQLiteTrackerRepository:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS tracker_operator_candidates (
+                wallet TEXT PRIMARY KEY,
+                source_entity TEXT NOT NULL,
+                created_count INTEGER NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tracker_operator_candidates_entity
+                ON tracker_operator_candidates (source_entity);
 
             CREATE TABLE IF NOT EXISTS tracker_wallets (
                 address TEXT PRIMARY KEY,
@@ -624,6 +634,64 @@ class SQLiteTrackerRepository:
             (wallet,),
         ).fetchone()
         return _entity_graph_from_row(row) if row is not None else None
+
+    def save_operator_candidates(
+        self, candidates: list[OperatorCandidateRecord]
+    ) -> int:
+        """Merge deployer candidates, keeping the max launch count seen.
+
+        ``first_seen_at`` is preserved on conflict so re-seeing a candidate
+        after a narrower graph slice never loses its original discovery time.
+        """
+        if not candidates:
+            return 0
+        self._db.connection.executemany(
+            """
+            INSERT INTO tracker_operator_candidates (
+                wallet, source_entity, created_count, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(wallet) DO UPDATE SET
+                source_entity = excluded.source_entity,
+                created_count = MAX(
+                    tracker_operator_candidates.created_count,
+                    excluded.created_count
+                ),
+                last_seen_at = excluded.last_seen_at
+            """,
+            [
+                (
+                    candidate.wallet,
+                    candidate.source_entity,
+                    candidate.created_count,
+                    candidate.first_seen_at,
+                    candidate.last_seen_at,
+                )
+                for candidate in candidates
+            ],
+        )
+        return len(candidates)
+
+    def get_operator_candidates(
+        self, source_entity: str | None = None
+    ) -> tuple[OperatorCandidateRecord, ...]:
+        """Fetch deployer candidates, optionally scoped to one source entity."""
+        if source_entity is None:
+            rows = self._db.connection.execute(
+                """
+                SELECT * FROM tracker_operator_candidates
+                ORDER BY created_count DESC, wallet
+                """
+            ).fetchall()
+        else:
+            rows = self._db.connection.execute(
+                """
+                SELECT * FROM tracker_operator_candidates
+                WHERE source_entity = ?
+                ORDER BY created_count DESC, wallet
+                """,
+                (source_entity,),
+            ).fetchall()
+        return tuple(_operator_candidate_from_row(row) for row in rows)
 
     # --- Wallets ---
 
@@ -1253,6 +1321,18 @@ def _entity_backfill_from_row(row: sqlite3.Row) -> EntityBackfillRecord:
         report_json=row["report_json"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+    )
+
+
+def _operator_candidate_from_row(row: sqlite3.Row) -> OperatorCandidateRecord:
+    """Decode one persisted operator-candidate row."""
+
+    return OperatorCandidateRecord(
+        wallet=row["wallet"],
+        source_entity=row["source_entity"],
+        created_count=row["created_count"],
+        first_seen_at=row["first_seen_at"],
+        last_seen_at=row["last_seen_at"],
     )
 
 

@@ -98,6 +98,22 @@ class EntityGraphSnapshotRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class OperatorCandidateRecord:
+    """One deployer wallet discovered by the free operator co-trade graph.
+
+    Accumulated across runs: ``created_count`` keeps the maximum observed
+    and ``first_seen_at`` is preserved while ``last_seen_at`` advances, so a
+    later graph slice cannot erase an earlier candidate.
+    """
+
+    wallet: str
+    source_entity: str
+    created_count: int
+    first_seen_at: str
+    last_seen_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class BundleParticipationRecord:
     """One wallet's finalized creation-slot buy on one confirmed entity launch."""
 
@@ -125,6 +141,7 @@ __all__ = [
     "Launch",
     "LaunchRecord",
     "MintAddress",
+    "OperatorCandidateRecord",
     "OperatorEntity",
     "Signature",
     "Slot",
