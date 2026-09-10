@@ -11,6 +11,7 @@ from rugbot.tracker.models import (
     BundleParticipationRecord,
     EntityBackfillRecord,
     EntityBackfillStatus,
+    EntityGraphSnapshotRecord,
     FunderRecord,
     LaunchRecord,
     TargetExecutionMode,
@@ -88,6 +89,13 @@ class SQLiteTrackerRepository:
             );
             CREATE INDEX IF NOT EXISTS idx_tracker_entity_backfills_status
                 ON tracker_entity_backfills (status, updated_at);
+            CREATE TABLE IF NOT EXISTS tracker_entity_graphs (
+                wallet TEXT PRIMARY KEY,
+                query TEXT NOT NULL,
+                graph_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS tracker_wallets (
                 address TEXT PRIMARY KEY,
@@ -585,6 +593,37 @@ class SQLiteTrackerRepository:
             ),
         ).fetchall()
         return tuple(_entity_backfill_from_row(row) for row in rows)
+
+    def save_entity_graph(self, snapshot: EntityGraphSnapshotRecord) -> None:
+        """Insert or replace the latest entity-graph dossier for one wallet."""
+
+        self._db.connection.execute(
+            """
+            INSERT INTO tracker_entity_graphs (
+                wallet, query, graph_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(wallet) DO UPDATE SET
+                query = excluded.query,
+                graph_json = excluded.graph_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                snapshot.wallet,
+                snapshot.query,
+                snapshot.graph_json,
+                snapshot.created_at,
+                snapshot.updated_at,
+            ),
+        )
+
+    def get_entity_graph(self, wallet: str) -> EntityGraphSnapshotRecord | None:
+        """Fetch the latest entity-graph dossier for one wallet."""
+
+        row = self._db.connection.execute(
+            "SELECT * FROM tracker_entity_graphs WHERE wallet = ?",
+            (wallet,),
+        ).fetchone()
+        return _entity_graph_from_row(row) if row is not None else None
 
     # --- Wallets ---
 
@@ -1212,6 +1251,18 @@ def _entity_backfill_from_row(row: sqlite3.Row) -> EntityBackfillRecord:
         status=EntityBackfillStatus(row["status"]),
         message=row["message"],
         report_json=row["report_json"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _entity_graph_from_row(row: sqlite3.Row) -> EntityGraphSnapshotRecord:
+    """Decode one persisted entity-graph dossier row."""
+
+    return EntityGraphSnapshotRecord(
+        wallet=row["wallet"],
+        query=row["query"],
+        graph_json=row["graph_json"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

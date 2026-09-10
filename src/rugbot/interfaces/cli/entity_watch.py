@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rugbot.integrations.pumpfun_api import get_client
+from rugbot.integrations.pumpfun_api import PumpFunApiClient, get_client
 from rugbot.interfaces.discord.entity_webhook import (
     EntityEdge,
     EntityGraph,
@@ -38,6 +38,7 @@ logger = get_logger(__name__)
 ENTITY_WATCH_SUBDIR = Path(".state/entity_watches")
 POLL_INTERVAL_SECONDS = 60
 CREATOR_LISTING_LIMIT = 50
+USD_COMPACT_THOUSAND = 1000.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -79,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--seed",
         action="store_true",
         help="Record current mints as known without posting alerts.",
+    )
+    parser.add_argument(
+        "--history",
+        action="store_true",
+        help="Print the full indexed launch history (no alerts, no state).",
     )
     parser.add_argument(
         "--loop",
@@ -264,10 +270,125 @@ def _to_float(value: object) -> float:
     return parsed if parsed >= 0 else 0.0
 
 
+def _collect_entity_mints(
+    client: PumpFunApiClient, wallet: EntityWallet, *, max_pages: int
+) -> list[str]:
+    """Collect every indexed mint for one wallet across listing pages."""
+    mints: list[str] = []
+    offset = 0
+    for _ in range(max_pages):
+        try:
+            listing = client.fetch_user_created_coins(
+                wallet.address, limit=CREATOR_LISTING_LIMIT, offset=offset
+            )
+        except Exception as exc:  # noqa: BLE001 - history is additive fail-soft
+            logger.warning("history listing failed: %s", type(exc).__name__)
+            break
+        coins = listing.get("coins") if isinstance(listing, dict) else None
+        if not isinstance(coins, list) or not coins:
+            break
+        for coin in coins:
+            if not isinstance(coin, dict):
+                continue
+            mint = coin.get("mint", coin.get("address", ""))
+            if isinstance(mint, str) and mint:
+                mints.append(mint)
+        if len(coins) < CREATOR_LISTING_LIMIT:
+            break
+        offset += CREATOR_LISTING_LIMIT
+    return mints
+
+
+def _mint_display_line(client: PumpFunApiClient, mint: str) -> str:
+    """Render one history line for a mint with best-effort metadata."""
+    name = symbol = mcap = ""
+    try:
+        meta = client.fetch_token(mint)
+    except Exception as exc:  # noqa: BLE001 - meta is best effort
+        logger.warning("history meta failed: %s", type(exc).__name__)
+        meta = {}
+    if isinstance(meta, dict):
+        name = str(meta.get("name", ""))
+        symbol = str(meta.get("symbol", ""))
+        market_cap = _to_float(meta.get("usd_market_cap"))
+        if market_cap >= USD_COMPACT_THOUSAND:
+            mcap = f" ${market_cap / USD_COMPACT_THOUSAND:.1f}K"
+        elif market_cap > 0:
+            mcap = f" ${market_cap:.2f}"
+    tag = f" {name} ({symbol})" if name or symbol else ""
+    return f"    {mint[:12]}...{tag}{mcap}"
+
+
+def print_entity_history(graph: EntityGraph, *, max_pages: int = 10) -> int:
+    """Print every indexed mint per entity wallet with token metadata.
+
+    Read-only: never posts alerts and never mutates watch state. Used for
+    the full-history dossier behind ``--history``.
+
+    Returns:
+        Total mint count across all entity wallets.
+    """
+    client = get_client()
+    total = 0
+    print(f"entity {graph.name}: full launch history ({len(graph.wallets)} wallets)")
+    for wallet in graph.wallets:
+        mints = _collect_entity_mints(client, wallet, max_pages=max_pages)
+        label = f" {wallet.label}" if wallet.label else ""
+        print(f"- {wallet.address[:8]}...{label}: {len(mints)} mints")
+        for mint in mints:
+            print(_mint_display_line(client, mint))
+        total += len(mints)
+    print(f"entity {graph.name}: {total} mints total")
+    return total
+
+
+def _run_once_mode(
+    graph: EntityGraph,
+    state: EntityWatchState,
+    webhook_url: str,
+    args: argparse.Namespace,
+) -> int:
+    """Run one poll pass: seed silently or alert, then persist and report."""
+    if args.seed:
+        found, _ = poll_once(graph, state, webhook_url, notify=False)
+        save_watch_state(_state_path(graph.name), state)
+        print(f"entity {graph.name}: seeded {found} mints, 0 alerts posted")
+        return 0
+    found, posted = poll_once(graph, state, webhook_url)
+    save_watch_state(_state_path(graph.name), state)
+    print(f"entity {graph.name}: {found} new mints, {posted} alerts posted")
+    return 0
+
+
+def _run_watch_loop(
+    graph: EntityGraph, state: EntityWatchState, webhook_url: str, interval: int
+) -> int:
+    """Poll forever until interrupted, posting new-mint alerts."""
+    print(f"entity {graph.name}: watching {len(graph.wallets)} wallets")
+    try:
+        while True:
+            found, posted = poll_once(graph, state, webhook_url)
+            save_watch_state(_state_path(graph.name), state)
+            if found:
+                print(f"entity {graph.name}: {found} new mints, {posted} posted")
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("entity watch stopped")
+        return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the entity watcher (returns process exit code)."""
     args = build_parser().parse_args(argv)
     resolve_dotenv()
+    try:
+        graph = load_entity_graph(args.wallets, args.entity_file, args.name)
+    except (OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.history:
+        print_entity_history(graph)
+        return 0
     webhook_url = args.webhook or os.environ.get("DISCORD_ENTITY_WEBHOOK_URL", "")
     if not webhook_url:
         print(
@@ -275,11 +396,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             "DISCORD_ENTITY_WEBHOOK_URL).",
             file=sys.stderr,
         )
-        return 2
-    try:
-        graph = load_entity_graph(args.wallets, args.entity_file, args.name)
-    except (OSError, ValueError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
         return 2
     if args.test_ping:
         posted = post_entity_launch_alert(
@@ -292,28 +408,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("test ping posted" if posted else "test ping failed")
         return 0 if posted else 1
     state = load_watch_state(_state_path(graph.name))
-    if args.seed:
-        found, _ = poll_once(graph, state, webhook_url, notify=False)
-        save_watch_state(_state_path(graph.name), state)
-        print(f"entity {graph.name}: seeded {found} mints, 0 alerts posted")
-        return 0
-    if args.once or not args.loop:
-        found, posted = poll_once(graph, state, webhook_url)
-        save_watch_state(_state_path(graph.name), state)
-        print(f"entity {graph.name}: {found} new mints, {posted} alerts posted")
-        return 0
-    interval = max(args.interval, 10)
-    print(f"entity {graph.name}: watching {len(graph.wallets)} wallets")
-    try:
-        while True:
-            found, posted = poll_once(graph, state, webhook_url)
-            save_watch_state(_state_path(graph.name), state)
-            if found:
-                print(f"entity {graph.name}: {found} new mints, {posted} posted")
-            time.sleep(interval)
-    except KeyboardInterrupt:
-        print("entity watch stopped")
-        return 0
+    if args.seed or args.once or not args.loop:
+        return _run_once_mode(graph, state, webhook_url, args)
+    return _run_watch_loop(graph, state, webhook_url, max(args.interval, 10))
 
 
 if __name__ == "__main__":

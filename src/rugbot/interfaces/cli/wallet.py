@@ -8,7 +8,7 @@ import argparse
 import asyncio
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 from rugbot.backtest.runners.cluster_optimizer import (
@@ -16,6 +16,11 @@ from rugbot.backtest.runners.cluster_optimizer import (
     run_cluster_tp_grid_search,
 )
 from rugbot.decision.lite_profiler import profile_launches
+from rugbot.integrations.nansen_client import (
+    NansenClient,
+    NansenProviderError,
+    counterparties_to_json,
+)
 from rugbot.integrations.pumpfun_api import PumpFunApiClient, get_client
 from rugbot.intelligence.token_resolver import (
     fetch_token_metadata,
@@ -43,6 +48,7 @@ from rugbot.tracker.funder_discovery import (
     scan_outbound_staging,
 )
 from rugbot.tracker.models import (
+    EntityGraphSnapshotRecord,
     FunderRecord,
     LaunchRecord,
     TargetExecutionMode,
@@ -55,11 +61,15 @@ from rugbot.tracker.operator_graph import (
     find_operator_links,
     operator_links_to_json,
 )
+from rugbot.utils.logger import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 resolve_dotenv()
+
+logger = get_logger(__name__)
+
 HIGH_ATH_CONSISTENCY_THRESHOLD: Final[float] = 70.0
 MIN_REPEAT_COORDINATED_LAUNCHES: Final[int] = 2
 
@@ -564,6 +574,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     operator_linked: list[dict[str, object]] = []
     operator_graph_warning: str | None = None
     operator_graph_calls = 0
+    nansen_linked: list[dict[str, object]] = []
+    nansen_warning: str | None = None
+    nansen_calls = 0
     if staging_skipped:
         model.outbound_staged = []
         model.inbound_staged = []
@@ -579,6 +592,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         except Exception:  # noqa: BLE001 — operator graph is additive fail-soft
             operator_linked = []
             operator_graph_warning = "operator graph failed"
+        try:
+            nansen_key = providers.nansen_api_key
+            if not nansen_key:
+                nansen_warning = "nansen API key required for counterparties"
+            else:
+                end_day = datetime.now(UTC).date()
+                start_day = end_day - timedelta(days=7)
+                nansen_page = NansenClient(nansen_key).counterparties(
+                    wallet_address,
+                    date_from=start_day.isoformat(),
+                    date_to=end_day.isoformat(),
+                )
+                nansen_linked = counterparties_to_json(nansen_page.counterparties)
+                nansen_calls = 1
+        except NansenProviderError as exc:
+            nansen_warning = f"nansen counterparties failed: {type(exc).__name__}"
+        except Exception:  # noqa: BLE001 — nansen pass is additive fail-soft
+            nansen_linked = []
+            nansen_warning = "nansen counterparties failed"
 
     # 5. Run Cluster Backtest & Optimizer if requested
     cluster_launches = repo.get_launches_for_funder(root_funder)
@@ -671,6 +703,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "operator_linked_wallets": operator_linked,
             "operator_graph_warning": operator_graph_warning,
             "operator_graph_calls": operator_graph_calls,
+            "nansen_counterparties": nansen_linked,
+            "nansen_warning": nansen_warning,
+            "nansen_calls": nansen_calls,
             "next_deployer_funding_sol": model.next_deployer_funding_sol,
             "enrolled": enrolled,
             "enrollment_rejection_reason": enrollment_rejection_reason,
@@ -735,6 +770,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else None
             ),
         }
+        if not staging_skipped:
+            try:
+                repo.save_entity_graph(
+                    EntityGraphSnapshotRecord(
+                        wallet=wallet_address,
+                        query=target_input,
+                        graph_json=json.dumps(out_dict, default=str),
+                        created_at=now_iso,
+                        updated_at=now_iso,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — snapshot save never breaks output
+                logger.warning(
+                    "entity graph snapshot save failed: %s", type(exc).__name__
+                )
         print(json.dumps(out_dict, indent=2))
         return 2 if args.enroll and not enrolled else 0
 

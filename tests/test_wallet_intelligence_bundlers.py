@@ -3,6 +3,7 @@
 import asyncio
 
 from rugbot.domain.trades import TradeSide
+from rugbot.integrations.rpc_access import RpcAccessError
 from rugbot.intelligence.wallet_intelligence import (
     WalletPumpTrade,
     _repeat_bundler_entities,
@@ -72,3 +73,27 @@ def _trade(
         side=side,
         wallet=wallet,
     )
+
+
+def test_repeat_bundler_rpc_failure_degrades_to_empty(monkeypatch) -> None:
+    """A dead transport skips bundler attribution instead of crashing."""
+    mint_a = "CcgzfZoTBdiJ5pRax7X9hXQ6kiYWcDgwPBP6tPn8pump"
+    mint_b = "FbNVNE3QjCrrQdAZFubSvz7p6FmwysFAf537naafpump"
+
+    def _failing_resolve(mint: str, rpc_url: str) -> object:
+        raise RpcAccessError(  # noqa: TRY003 - fixture for the canonical error
+            "HTTP 403",
+            method="getTransaction",
+            status=403,
+        )
+
+    monkeypatch.setattr(
+        "rugbot.intelligence.wallet_intelligence.resolve_token_or_wallet",
+        _failing_resolve,
+    )
+    trades = (
+        _trade(mint_a, TradeSide.BUY, 10, "sig-a"),
+        _trade(mint_b, TradeSide.BUY, 20, "sig-b"),
+    )
+
+    assert asyncio.run(_repeat_bundler_entities(trades, endpoint="https://rpc")) == ()

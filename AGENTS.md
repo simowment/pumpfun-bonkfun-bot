@@ -706,42 +706,50 @@ Higher-severity findings MUST NOT be buried below lower-severity cleanup.
 
 ## 11. Output Contract
 
-Completed modification reports MUST be concise and MUST NOT restate the diff.
+Completion reports MUST be concise and human-readable.
 
-Return only applicable fields:
+Use only the sections that contain useful information:
 
 ```text
-SUMMARY
-- [behavior changed]
+[What changed, in 1–3 sentences]
 
-FILES CHANGED
-- [path]: [reason]
+Changed:
+- `path` — reason
+- `path` — reason
 
-ARCHITECTURE
-- [canonical fit]
+Verification:
+- [actual checks/run]
+- [actual result]
 
-DISCOVERY
-- [reused/verified contracts]
-
-REDUCTION
-- [unnecessary work intentionally excluded]
-
-VERIFICATION
-- [executed proof and environment status]
-
-RESIDUAL RISK
-- [only actual remaining risk]
+Notes:
+- [only important decisions, exclusions, or remaining risk]
 ```
 
-Empty sections are FORBIDDEN.
+Rules:
 
-If no code changed:
+* Do NOT restate the task or diff.
+* Do NOT include empty sections.
+* Report only checks actually executed.
+* State unverified boundaries or remaining risk explicitly.
+* Explain architectural decisions only when they materially affect the implementation.
+
+If blocked:
 
 ```text
-NO CHANGE MADE
+BLOCKED
+
+Reason: [precise blocker]
+Needed: [minimal missing capability or decision]
+```
+
+If no change:
+
+```text
+NO CHANGE
+
 Reason: [precise reason]
-Required next input/capability: [only when necessary]
 ```
+
 
 ---
 

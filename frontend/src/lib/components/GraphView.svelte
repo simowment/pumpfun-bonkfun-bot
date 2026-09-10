@@ -1,6 +1,7 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
-  import * as echarts from 'echarts';
+  import { fetchCachedEntity, scanEntity } from '../api.js';
+  import { accountLinks } from '../externalLinks.js';
+  import { formatSol, shortId } from '../format.js';
 
   let {
     cluster = null,
@@ -8,785 +9,490 @@
     onSelectWallet = null,
   } = $props();
 
-  let chartContainer = $state(null);
-  let chart = null;
-  let resizeObserver = null;
+  let chain = $state([]);
+  let lastRoot = '';
+  let loadingAddress = $state('');
+  let traceError = $state('');
+  let expandedCards = $state({});
+  let selectedWindow = $state('all');
 
-  // Filter state
-  let depth = $state(3);
-  let minConfidence = $state(70);
-  let showBundlers = $state(true);
-  let showFunders = $state(true);
-  let showCreators = $state(true);
-  let showCex = $state(true);
+  const MAX_TRACE_HOPS = 8;
+  const MAX_VISIBLE_ROWS = 5;
+  const WINDOWS = [
+    { value: '24h', label: '24h', seconds: 86400 },
+    { value: '7d', label: '7 days', seconds: 604800 },
+    { value: '30d', label: '30 days', seconds: 2592000 },
+    { value: 'all', label: 'All', seconds: null },
+  ];
 
-  // Interactive Visual Settings
-  let showVisualSettings = $state(false);
-  let nodeSpacing = $state(200);       // Edge length: 120 - 360
-  let nodeScale = $state(1.0);         // Node scale: 0.6 - 1.4
-  let showEdgeLabels = $state(true);   // Toggle arrow labels
-  let repulsionForce = $state(850);    // Physics spread: 400 - 1600
-  let pinMovedNodes = $state(true);    // Keep bubbles where dropped
+  const report = $derived(entity ?? cluster);
+  const rootAddress = $derived(
+    report?.tracking_address || report?.target_wallet || report?.identity?.input || '',
+  );
+  const traceRoot = $derived(chain[0] || { wallet: rootAddress, report, mode: 'root', via: null });
+  const incomingRows = $derived(traceRoot ? rowsFor({ ...traceRoot, mode: 'to' }, 'in') : []);
+  const outgoingRows = $derived(traceRoot ? rowsFor({ ...traceRoot, mode: 'from' }, 'out') : []);
 
-  // Store user-pinned positions across re-renders
-  let pinnedPositions = new Map();
+  $effect(() => {
+    if (rootAddress && rootAddress !== lastRoot) {
+      lastRoot = rootAddress;
+      chain = [{ wallet: rootAddress, report, mode: 'root', via: null }];
+      expandedCards = {};
+      traceError = '';
+    }
+  });
 
-  function shortAddr(a) {
-    if (!a || a.length < 10) return a || '—';
-    return `${a.slice(0, 4)}...${a.slice(-4)}`;
+  function symbolFor(reportData, mint) {
+    const item = (reportData?.entity_mints || []).find((entry) => entry?.mint === mint);
+    return item?.symbol || item?.name || shortId(mint, 4, 4);
   }
 
-  function generateBubbleMapData() {
-    const nodes = [];
-    const links = [];
-    const nodeSet = new Set();
-
-    function addBubble(id, name, role, balance, bgColor, borderColor, textColor, baseSize, category) {
-      if (!nodeSet.has(id)) {
-        nodeSet.add(id);
-        const finalSize = Math.round(baseSize * nodeScale);
-        const savedPos = pinnedPositions.get(id);
-
-        const nodeObj = {
-          id,
-          name: `${role}\n${name}\n${balance} SOL`,
-          rawAddress: id,
-          role,
-          balance,
-          symbolSize: finalSize,
-          category,
-          fixed: pinMovedNodes && savedPos ? true : false,
-          x: savedPos ? savedPos.x : undefined,
-          y: savedPos ? savedPos.y : undefined,
-          itemStyle: {
-            color: bgColor,
-            borderColor: borderColor,
-            borderWidth: 2,
-            shadowBlur: 0,
-          },
-          label: {
-            show: true,
-            position: 'inside',
-            formatter: `${role}\n${name}\n{c|${balance} SOL}`,
-            rich: {
-              c: {
-                color: textColor === '#000000' || textColor === '#4d2600' ? '#623200' : '#60c5ff',
-                fontWeight: 'bold',
-                fontSize: Math.round(11 * nodeScale),
-                lineHeight: Math.round(15 * nodeScale),
-              },
-            },
-            color: textColor,
-            fontSize: Math.round(11.5 * nodeScale),
-            fontWeight: '600',
-            fontFamily: 'Inter, system-ui, sans-serif',
-          },
-        };
-        nodes.push(nodeObj);
-      }
-    }
-
-    function formatEdgeLabel(raw) {
-      if (!raw) return '';
-      if (raw === 'direct_native_transfer') return 'SOL';
-      if (raw === 'direct_spl_transfer') return 'SPL';
-      if (raw.includes('B0') || raw.includes('BUNDLE')) return 'B0';
-      if (raw.includes('SYNDICATE') || raw.includes('CROSS')) return 'SYN';
-      return raw.length > 8 ? `${raw.slice(0, 7)}…` : raw;
-    }
-
-    function addEdge(source, target, label, strokeColor = '#5c4d40', width = 1.5) {
-      if (nodeSet.has(source) && nodeSet.has(target)) {
-        const compactLabel = formatEdgeLabel(label);
-        links.push({
-          source,
-          target,
-          value: label,
-          lineStyle: {
-            color: strokeColor,
-            width,
-            type: 'dashed',
-            curveness: 0.08,
-          },
-          label: {
-            show: showEdgeLabels,
-            formatter: compactLabel,
-            fontSize: 8,
-            fontWeight: '600',
-            color: '#b5a494',
-            backgroundColor: 'rgba(14, 14, 14, 0.7)',
-            padding: [1, 2],
-            borderRadius: 2,
-            fontFamily: 'Inter, system-ui, sans-serif',
-          },
-          emphasis: {
-            label: {
-              show: true,
-              formatter: label,
-              fontSize: 10,
-              fontWeight: 'bold',
-              color: '#ffffff',
-              backgroundColor: 'rgba(28, 27, 27, 0.95)',
-              borderColor: '#ff8c00',
-              borderWidth: 1,
-              padding: [2, 5],
-            },
-            lineStyle: {
-              width: width * 1.8,
-              color: '#ff8c00',
-            },
-          },
-        });
-      }
-    }
-
-    // 1. Direct on-chain graph nodes from entity analysis
-    const graphNodes = cluster?.graph?.nodes || entity?.graph?.nodes || [];
-    const graphLinks = cluster?.graph?.links || entity?.graph?.links || cluster?.graph?.edges || entity?.graph?.edges || [];
-
-    if (graphNodes.length > 0) {
-      graphNodes.forEach((node) => {
-        const addr = node.address;
-        if (!addr) return;
-        const roles = node.roles || [];
-        const isTarget = node.is_target || roles.includes('target');
-        const isMaster = isTarget || roles.includes('MASTER_DEPLOYER') || roles.includes('PRIMARY_CREATOR');
-        const isFunder = roles.includes('FUNDER_HUB') || roles.includes('GAS_FUNDER') || roles.includes('funding_source');
-        const isBundler = roles.includes('SATELLITE_BUNDLER') || roles.includes('BUNDLE_BUYER');
-        const isCreator = roles.includes('SUB_DEPLOYER') || roles.includes('CO_CREATOR');
-        const isStorage = roles.includes('TREASURY_SWEEP') || roles.includes('STORAGE_SWEEP');
-
-        if (isBundler && !showBundlers) return;
-        if (isFunder && !showFunders) return;
-        if (isCreator && !showCreators) return;
-
-        let roleLabel = 'NODE';
-        let bgColor = '#201f1f';
-        let borderColor = '#3e332a';
-        let textColor = '#f1ede8';
-        let size = 56;
-        let cat = 5;
-
-        if (isMaster) {
-          roleLabel = 'ROOT DEV';
-          bgColor = '#ff8c00';
-          borderColor = '#ffffff';
-          textColor = '#000000';
-          size = 88;
-          cat = 0;
-        } else if (isFunder) {
-          roleLabel = 'GAS HUB';
-          bgColor = '#ffb77d';
-          borderColor = '#ff8c00';
-          textColor = '#4d2600';
-          size = 78;
-          cat = 1;
-        } else if (isCreator) {
-          roleLabel = 'SUB DEV';
-          bgColor = '#ff5625';
-          borderColor = '#ffffff';
-          textColor = '#ffffff';
-          size = 70;
-          cat = 2;
-        } else if (isStorage) {
-          roleLabel = 'STORAGE';
-          bgColor = '#60c5ff';
-          borderColor = '#00b5fc';
-          textColor = '#00344c';
-          size = 74;
-          cat = 3;
-        } else if (isBundler) {
-          roleLabel = 'BUNDLER';
-          bgColor = '#ffb5a0';
-          borderColor = '#ff5625';
-          textColor = '#601400';
-          size = 64;
-          cat = 4;
-        }
-
-        const balText = node.balance_sol != null ? `${node.balance_sol.toFixed(2)}` : (node.launch_count != null ? `${node.launch_count} M` : '—');
-        addBubble(addr, shortAddr(addr), roleLabel, balText, bgColor, borderColor, textColor, size, cat);
-      });
-
-      graphLinks.forEach((link) => {
-        if (link.source && link.target) {
-          addEdge(
-            link.source,
-            link.target,
-            link.label || link.type || link.kind || link.asset_id || '—',
-            '#5c4d40',
-            1.5
-          );
-        }
-      });
-
-      // 2. Cross-Entity Bundlers & Launch Bundles Integration
-      const targetDev = entity?.target_wallet || entity?.address || entity?.tracking_address || (graphNodes.find((n) => n.is_target)?.address) || '';
-
-      // Add launch bundles (B0 bundle buyers)
-      const launchBundles = entity?.launch_bundles?.launches || [];
-      launchBundles.forEach((lb) => {
-        if (lb.first_buyer_wallet && showBundlers) {
-          const bAddr = lb.first_buyer_wallet;
-          addBubble(
-            bAddr,
-            shortAddr(bAddr),
-            'BUNDLER',
-            lb.bundle_size ? `${lb.bundle_size} B0` : 'B0',
-            '#c084fc',
-            '#a855f7',
-            '#3b0764',
-            66,
-            4
-          );
-          if (targetDev) {
-            addEdge(bAddr, targetDev, 'B0 BUNDLE', '#a855f7', 2);
-          }
-        }
-      });
-
-      // Add cross-entity bundlers connecting multiple creators
-      const crossBundles = entity?.cross_entity_bundles?.wallets || [];
-      crossBundles.forEach((cb) => {
-        if (cb.wallet && showBundlers) {
-          const bAddr = cb.wallet;
-          addBubble(
-            bAddr,
-            shortAddr(bAddr),
-            'CROSS BUNDLER',
-            `${cb.external_creator_count || 1} DEVS`,
-            '#e879f9',
-            '#d946ef',
-            '#4a044e',
-            72,
-            4
-          );
-          if (targetDev) {
-            addEdge(bAddr, targetDev, 'SYNDICATE BUNDLE', '#d946ef', 2.5);
-          }
-          (cb.external_creators || []).forEach((extCreator) => {
-            if (extCreator && showCreators) {
-              addBubble(
-                extCreator,
-                shortAddr(extCreator),
-                'LINKED CREATOR',
-                '—',
-                '#fb923c',
-                '#ea580c',
-                '#431407',
-                74,
-                2
-              );
-              addEdge(bAddr, extCreator, 'CROSS BUNDLE', '#d946ef', 2);
-            }
-          });
-        }
-      });
-    } else {
-      // Single root deployer if no graph yet
-      const masterAddr = cluster?.master_deployer?.address || entity?.address || entity?.tracking_address || entity?.target_wallet || '';
-      if (masterAddr) {
-        addBubble(
-          masterAddr,
-          shortAddr(masterAddr),
-          'ROOT DEV',
-          '—',
-          '#ff8c00',
-          '#ffffff',
-          '#000000',
-          88,
-          0
-        );
-      }
-    }
-
-    return { nodes, links };
+  function latestTimestamp(reportData, source, target) {
+    const timestamps = (reportData?.transfers || [])
+      .filter((transfer) => transfer?.source === source && transfer?.target === target)
+      .map((transfer) => Number(transfer.timestamp))
+      .filter((timestamp) => Number.isFinite(timestamp) && timestamp > 0);
+    return timestamps.length ? Math.max(...timestamps) : null;
   }
 
-  function initChart() {
-    if (!chartContainer) return;
+  function assetKind(edge) {
+    return edge?.asset_kind || (edge?.kind === 'direct_spl_transfer' ? 'token' : 'native');
+  }
 
-    try {
-      if (chart) chart.dispose();
-      chart = echarts.init(chartContainer);
+  function edgeRows(reportData, wallet, direction) {
+    const edges = reportData?.graph?.edges || reportData?.graph?.links || [];
+    const grouped = new Map();
 
-      const { nodes, links } = generateBubbleMapData();
+    for (const edge of edges) {
+      const source = edge?.source || '';
+      const target = edge?.target || '';
+      if (!source || !target || source === target) continue;
+      const matches = direction === 'out' ? source === wallet : target === wallet;
+      if (!matches) continue;
 
-      const option = {
-        backgroundColor: '#0e0e0e',
-        tooltip: {
-          trigger: 'item',
-          backgroundColor: '#1c1b1b',
-          borderColor: '#ff8c00',
-          borderWidth: 1,
-          textStyle: {
-            color: '#f1ede8',
-            fontSize: 13,
-            fontFamily: 'Inter, system-ui, sans-serif',
-          },
-          formatter: function (params) {
-            if (params.dataType === 'edge') {
-              return `<b>${params.data.value || 'Link'}</b><br/>From: ${shortAddr(params.data.source)}<br/>To: ${shortAddr(params.data.target)}`;
-            }
-            const d = params.data;
-            return `<b>${d.role}</b><br/>
-                    Address: <span style="color:#ffb77d;font-family:monospace;">${d.rawAddress}</span><br/>
-                    Balance: <span style="color:#60c5ff;font-weight:bold;">${d.balance} SOL</span>`;
-          },
-        },
-        animationDuration: 500,
-        animationEasingUpdate: 'quinticInOut',
-        series: [
-          {
-            type: 'graph',
-            layout: 'force',
-            data: nodes,
-            links: links,
-            roam: true,
-            draggable: true,
-            zoom: 0.95,
-            force: {
-              repulsion: repulsionForce,
-              edgeLength: [Math.round(nodeSpacing * 0.75), Math.round(nodeSpacing * 1.25)],
-              gravity: 0.08,
-              friction: 0.90,
-            },
-            emphasis: {
-              focus: 'adjacency',
-              lineStyle: {
-                width: 2.5,
-              },
-            },
-            edgeSymbol: ['none', 'arrow'],
-            edgeSymbolSize: 8,
-          },
-        ],
+      const peer = direction === 'out' ? target : source;
+      const kind = assetKind(edge);
+      const assetId = edge?.asset_id || (kind === 'native' ? 'SOL' : 'TOKEN');
+      const key = `${peer}:${kind}:${assetId}`;
+      const current = grouped.get(key) || {
+        key,
+        peer,
+        kind,
+        assetId,
+        symbol: kind === 'native' ? 'SOL' : symbolFor(reportData, assetId),
+        volumeLamports: 0,
+        volumeBaseUnits: 0,
+        transfers: 0,
+        lastSlot: 0,
+        lastTimestamp: null,
+        source,
+        target,
       };
 
-      chart.setOption(option);
+      current.volumeLamports += Number(edge?.amount_lamports || 0);
+      current.volumeBaseUnits += Number(edge?.amount_base_units || 0);
+      current.transfers += Number(edge?.transfer_count || 0);
+      current.lastSlot = Math.max(current.lastSlot, Number(edge?.last_slot || 0));
+      const timestamp = latestTimestamp(reportData, source, target);
+      current.lastTimestamp = Math.max(current.lastTimestamp || 0, timestamp || 0) || null;
+      grouped.set(key, current);
+    }
 
-      // Save dragged node positions so they stay in place when moved
-      chart.on('mouseup', function (params) {
-        if (params.dataType === 'node' && pinMovedNodes) {
-          const d = params.data;
-          pinnedPositions.set(d.rawAddress, { x: d.x, y: d.y });
-        }
-      });
+    return [...grouped.values()].sort((left, right) => {
+      const leftVolume = left.kind === 'native' ? left.volumeLamports : left.volumeBaseUnits;
+      const rightVolume = right.kind === 'native' ? right.volumeLamports : right.volumeBaseUnits;
+      return rightVolume - leftVolume || right.transfers - left.transfers;
+    });
+  }
 
-      chart.on('click', (params) => {
-        if (params.dataType === 'node' && onSelectWallet) {
-          const d = params.data;
-          onSelectWallet({
-            address: d.rawAddress,
-            role: d.role,
-            balance: d.balance,
-            confidence: null,
-          });
-        }
-      });
-    } catch (e) {
-      console.error('Error initializing bubble map chart:', e);
+  function inWindow(row) {
+    const window = WINDOWS.find((item) => item.value === selectedWindow);
+    if (!window || window.seconds === null || !row.lastTimestamp) return true;
+    return Math.floor(Date.now() / 1000) - row.lastTimestamp <= window.seconds;
+  }
+
+  function rowsFor(card, direction = 'out') {
+    return edgeRows(card.report, card.wallet, direction).filter(inWindow);
+  }
+
+  function formatTokenUnits(row) {
+    if (!row.volumeBaseUnits) return '0';
+    return `${new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 }).format(row.volumeBaseUnits)} raw`;
+  }
+
+  function formatVolume(row) {
+    return row.kind === 'native' ? formatSol(row.volumeLamports) : formatTokenUnits(row);
+  }
+
+  function formatLast(row) {
+    if (row.lastTimestamp) {
+      const elapsed = Math.max(0, Math.floor(Date.now() / 1000) - row.lastTimestamp);
+      if (elapsed < 60) return `${elapsed}s`;
+      if (elapsed < 3600) return `${Math.floor(elapsed / 60)}m`;
+      if (elapsed < 86400) return `${Math.floor(elapsed / 3600)}h`;
+      return `${Math.floor(elapsed / 86400)}d`;
+    }
+    return row.lastSlot ? `slot ${row.lastSlot}` : '—';
+  }
+
+  function cardRows(card) {
+    return rowsFor(card, card.mode === 'to' ? 'in' : 'out');
+  }
+
+  function displayRows(card) {
+    const rows = cardRows(card);
+    return expandedCards[card.id] ? rows : rows.slice(0, MAX_VISIBLE_ROWS);
+  }
+
+  function toggleCard(cardId) {
+    expandedCards = { ...expandedCards, [cardId]: !expandedCards[cardId] };
+  }
+
+  function selectWallet(row) {
+    onSelectWallet?.({
+      address: row.peer,
+      role: 'Cluster Node',
+      balance: '—',
+      confidence: null,
+    });
+  }
+
+  async function resolveReport(address, parentReport = null) {
+    const parentNodes = parentReport?.graph?.nodes || [];
+    const parentEdges = parentReport?.graph?.edges || parentReport?.graph?.links || [];
+    const presentInParent = parentNodes.some((node) => (node?.address || node?.id) === address)
+      || parentEdges.some((edge) => edge?.source === address || edge?.target === address);
+    if (presentInParent) return parentReport;
+
+    try {
+      const cached = await fetchCachedEntity(address);
+      if (cached?.data) return cached.data;
+    } catch {
+      // A cache miss is expected before a wallet has been scanned.
+    }
+
+    const scanned = await scanEntity(address, 100);
+    if (scanned?.ok && scanned.data) return scanned.data;
+    throw new Error(scanned?.message || `No finalized report for ${shortId(address)}`);
+  }
+
+  async function traceRow(card, row) {
+    if (!row?.peer || loadingAddress) return;
+    const existing = chain.find((item) => item.wallet === row.peer && item.mode === 'from');
+    if (existing) {
+      document.getElementById(existing.id)?.scrollIntoView({ behavior: 'smooth', inline: 'center' });
+      return;
+    }
+    if (chain.length >= MAX_TRACE_HOPS + 1) {
+      traceError = `Trace limit reached at ${MAX_TRACE_HOPS} hops.`;
+      return;
+    }
+
+    traceError = '';
+    loadingAddress = row.peer;
+    try {
+      const nextReport = await resolveReport(row.peer, card.report);
+      const id = `trace-${chain.length}-${row.peer}`;
+      chain = [
+        ...chain,
+        {
+          id,
+          wallet: row.peer,
+          report: nextReport,
+          mode: 'from',
+          via: { source: row.source, target: row.target, amount: formatVolume(row) },
+        },
+      ];
+      queueMicrotask(() => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', inline: 'center' }));
+    } catch (error) {
+      traceError = error?.message || 'Wallet trace failed.';
+    } finally {
+      loadingAddress = '';
     }
   }
 
-  function zoomIn() {
-    if (chart) {
-      const opt = chart.getOption();
-      const currentZoom = opt.series[0].zoom || 1.0;
-      chart.setOption({
-        series: [{ zoom: currentZoom * 1.25 }],
-      });
-    }
+  function traceTopRow(card) {
+    return cardRows(card)[0] || null;
   }
 
-  function zoomOut() {
-    if (chart) {
-      const opt = chart.getOption();
-      const currentZoom = opt.series[0].zoom || 1.0;
-      chart.setOption({
-        series: [{ zoom: Math.max(0.3, currentZoom * 0.8) }],
-      });
-    }
+  function traceConnector(card) {
+    const row = traceTopRow(card);
+    if (row) traceRow(card, row);
   }
 
-  function fitScreen() {
-    if (chart) {
-      chart.setOption({
-        series: [{ zoom: 0.95, center: null }],
-      });
-      chart.resize();
-    }
+  function copyAddress(address) {
+    if (address && navigator?.clipboard) navigator.clipboard.writeText(address);
   }
-
-  function resetPositions() {
-    pinnedPositions.clear();
-    nodeSpacing = 200;
-    nodeScale = 1.0;
-    showEdgeLabels = true;
-    repulsionForce = 850;
-    initChart();
-  }
-
-  // Reactive updates on settings changes
-  $effect(() => {
-    if ((cluster || entity) && chartContainer) {
-      initChart();
-    }
-  });
-
-  $effect(() => {
-    if (chart && (
-      showBundlers !== undefined ||
-      showFunders !== undefined ||
-      showCreators !== undefined ||
-      showCex !== undefined ||
-      nodeSpacing !== undefined ||
-      nodeScale !== undefined ||
-      showEdgeLabels !== undefined ||
-      repulsionForce !== undefined ||
-      pinMovedNodes !== undefined
-    )) {
-      initChart();
-    }
-  });
-
-  onMount(() => {
-    initChart();
-
-    if (chartContainer && typeof ResizeObserver !== 'undefined') {
-      resizeObserver = new ResizeObserver(() => {
-        if (chart) chart.resize();
-      });
-      resizeObserver.observe(chartContainer);
-    }
-  });
-
-  onDestroy(() => {
-    if (resizeObserver) resizeObserver.disconnect();
-    if (chart) chart.dispose();
-  });
 </script>
 
-<div class="technical-map-card">
-  <!-- Controls Bar Header -->
-  <div class="graph-toolbar">
-    <div class="toolbar-left">
-      <span class="graph-title">Cluster Network Graph</span>
-      <span class="drag-hint">💡 Drag bubbles to reposition</span>
-      <button
-        class="settings-toggle-btn {showVisualSettings ? 'active' : ''}"
-        onclick={() => (showVisualSettings = !showVisualSettings)}
-        title="Visual Settings"
-      >
-        ⚙ Visual Settings
-      </button>
+<section class="trace-panel">
+  <header class="trace-header">
+    <div class="trace-heading">
+      <span class="trace-title">Connected wallets</span>
+      {#if rootAddress}
+        <button class="address-pill" onclick={() => copyAddress(rootAddress)} title="Copy wallet address">
+          <span>{shortId(rootAddress, 6, 6)}</span>
+          <span class="copy-icon">⧉</span>
+        </button>
+      {/if}
+      <span class="trace-subtitle">Finalized transfer evidence</span>
     </div>
-
-    <div class="filter-controls">
-      <div class="toggle-group">
-        <label class="toggle-label">
-          <input type="checkbox" bind:checked={showBundlers} />
-          <span>Bundlers</span>
-        </label>
-        <label class="toggle-label">
-          <input type="checkbox" bind:checked={showFunders} />
-          <span>Funders</span>
-        </label>
-        <label class="toggle-label">
-          <input type="checkbox" bind:checked={showCreators} />
-          <span>Creators</span>
-        </label>
-        <label class="toggle-label">
-          <input type="checkbox" bind:checked={showCex} />
-          <span>CEX</span>
-        </label>
-      </div>
+    <div class="trace-controls">
+      <label for="trace-window">Window</label>
+      <select id="trace-window" bind:value={selectedWindow}>
+        {#each WINDOWS as option}
+          <option value={option.value}>{option.label}</option>
+        {/each}
+      </select>
+      {#if chain.length > 1}
+        <button class="reset-button" onclick={() => (chain = [chain[0]])}>Reset</button>
+      {/if}
     </div>
-  </div>
+  </header>
 
-  <!-- Interactive Visual Settings Drawer -->
-  {#if showVisualSettings}
-    <div class="visual-settings-drawer">
-      <div class="setting-item">
-        <label for="spacing-slider">Distance: <strong>{nodeSpacing}px</strong></label>
-        <input
-          id="spacing-slider"
-          type="range"
-          min="120"
-          max="360"
-          step="10"
-          bind:value={nodeSpacing}
-        />
-      </div>
-
-      <div class="setting-item">
-        <label for="scale-slider">Node Size: <strong>{Math.round(nodeScale * 100)}%</strong></label>
-        <input
-          id="scale-slider"
-          type="range"
-          min="0.6"
-          max="1.4"
-          step="0.05"
-          bind:value={nodeScale}
-        />
-      </div>
-
-      <div class="setting-item">
-        <label for="spread-slider">Repulsion: <strong>{repulsionForce}</strong></label>
-        <input
-          id="spread-slider"
-          type="range"
-          min="400"
-          max="1600"
-          step="50"
-          bind:value={repulsionForce}
-        />
-      </div>
-
-      <div class="setting-checkboxes">
-        <label class="toggle-label">
-          <input type="checkbox" bind:checked={showEdgeLabels} />
-          <span>Arrow Labels</span>
-        </label>
-        <label class="toggle-label">
-          <input type="checkbox" bind:checked={pinMovedNodes} />
-          <span>Pin Moved Bubbles</span>
-        </label>
-      </div>
-
-      <button class="btn-reset" onclick={resetPositions}>Reset Positions</button>
-    </div>
+  {#if traceError}
+    <div class="trace-error" role="alert">{traceError}</div>
   {/if}
 
-  <!-- Bounded Responsive Network Canvas -->
-  <div class="canvas-wrapper">
-    <div class="echarts-container" bind:this={chartContainer}></div>
+  {#if !rootAddress}
+    <div class="trace-empty">Scan a wallet or token to build the transfer trace.</div>
+  {:else}
+    <div class="trace-scroll">
+      <div class="trace-lane">
+        <article class="transfer-card" id="root-in">
+          <header class="card-header">
+            <div class="card-title"><span class="direction to">To</span> {shortId(traceRoot.wallet, 6, 6)} <span class="count-badge">{incomingRows.length}</span></div>
+            <span class="window-chip">{WINDOWS.find((item) => item.value === selectedWindow)?.label}</span>
+          </header>
+          <div class="table-head"><span>Wallet</span><span>Volume ↓</span><span>Transfers</span><span>Last</span><span aria-hidden="true"></span></div>
+          {#if incomingRows.length === 0}
+            <div class="card-empty">No incoming transfers observed.</div>
+          {:else}
+            {#each (expandedCards['root-in'] ? incomingRows : incomingRows.slice(0, MAX_VISIBLE_ROWS)) as row (row.key)}
+              <div class="transfer-row">
+                <button class="wallet-label" onclick={() => selectWallet(row)} title={row.peer}>
+                  <span class="asset-dot wallet-dot">W</span>
+                  <span class="wallet-text">{shortId(row.peer, 5, 5)}</span>
+                  <span class="external">↗</span>
+                </button>
+                <span class="volume">{formatVolume(row)}{row.kind === 'token' ? ` · ${row.symbol}` : ' SOL'}</span>
+                <span class="metric">{row.transfers || 1}</span>
+                <span class="last">{formatLast(row)}</span>
+                <button class="trace-arrow" class:busy={loadingAddress === row.peer} onclick={() => traceRow({ ...traceRoot, mode: 'to', id: 'root-in' }, row)} title="Continue tracing this wallet" aria-label={`Trace ${shortId(row.peer)}`}>{loadingAddress === row.peer ? '…' : '→'}</button>
+              </div>
+            {/each}
+            {#if incomingRows.length > MAX_VISIBLE_ROWS}
+              <button class="show-all" onclick={() => toggleCard('root-in')}>
+                {expandedCards['root-in'] ? 'Show less' : `Show all (${incomingRows.length})`}
+              </button>
+            {/if}
+          {/if}
+        </article>
 
-    <!-- Floating Zoom Controls on Left -->
-    <div class="floating-zoom-controls">
-      <button class="zoom-btn" onclick={zoomIn} title="Zoom In">+</button>
-      <button class="zoom-btn" onclick={zoomOut} title="Zoom Out">−</button>
-      <button class="zoom-btn fit-btn" onclick={fitScreen} title="Fit to Screen">⛶</button>
-    </div>
+        <div class="connector root-connector">
+          <span class="connector-line"></span>
+          <div class="pivot-card">
+            <button class="pivot-address" onclick={() => copyAddress(traceRoot.wallet)} title="Copy pivot wallet">{shortId(traceRoot.wallet, 6, 6)} <span class="copy-icon">⧉</span></button>
+            <button class="pivot-expand" onclick={() => traceConnector(traceRoot)} title="Continue tracing">＋</button>
+          </div>
+          <span class="connector-line"></span>
+        </div>
 
-    <!-- Bubble Legend Overlay -->
-    <div class="bubble-legend">
-      <div class="legend-item"><span class="legend-square orange"></span> Root Dev</div>
-      <div class="legend-item"><span class="legend-square gold"></span> Gas Hub</div>
-      <div class="legend-item"><span class="legend-square coral"></span> Bundler</div>
-      <div class="legend-item"><span class="legend-square ice"></span> Storage</div>
+        <article class="transfer-card" id="root-out">
+          <header class="card-header">
+            <div class="card-title"><span class="direction from">From</span> {shortId(traceRoot.wallet, 6, 6)} <span class="count-badge">{outgoingRows.length}</span></div>
+            <span class="window-chip">{WINDOWS.find((item) => item.value === selectedWindow)?.label}</span>
+          </header>
+          <div class="table-head"><span>Wallet / token</span><span>Volume ↓</span><span>Transfers</span><span>Last</span><span aria-hidden="true"></span></div>
+          {#if outgoingRows.length === 0}
+            <div class="card-empty">No outgoing transfers observed.</div>
+          {:else}
+            {#each (expandedCards['root-out'] ? outgoingRows : outgoingRows.slice(0, MAX_VISIBLE_ROWS)) as row (row.key)}
+              <div class="transfer-row">
+                <button class="wallet-label" onclick={() => selectWallet(row)} title={row.peer}>
+                  <span class="asset-dot {row.kind === 'token' ? 'token-dot' : 'wallet-dot'}">{row.kind === 'token' ? '◆' : 'W'}</span>
+                  <span class="wallet-text">{shortId(row.peer, 5, 5)}</span>
+                  <span class="external">↗</span>
+                </button>
+                <span class="volume">{formatVolume(row)}{row.kind === 'token' ? ` · ${row.symbol}` : ' SOL'}</span>
+                <span class="metric">{row.transfers || 1}</span>
+                <span class="last">{formatLast(row)}</span>
+                <button class="trace-arrow" class:busy={loadingAddress === row.peer} onclick={() => traceRow({ ...traceRoot, mode: 'from', id: 'root-out' }, row)} title="Continue tracing this wallet" aria-label={`Trace ${shortId(row.peer)}`}>{loadingAddress === row.peer ? '…' : '→'}</button>
+              </div>
+            {/each}
+            {#if outgoingRows.length > MAX_VISIBLE_ROWS}
+              <button class="show-all" onclick={() => toggleCard('root-out')}>
+                {expandedCards['root-out'] ? 'Show less' : `Show all (${outgoingRows.length})`}
+              </button>
+            {/if}
+          {/if}
+        </article>
+
+        {#each chain.slice(1) as card (card.id)}
+          <div class="connector" aria-hidden="true">
+            <span class="connector-line"></span>
+            <button class="connector-button" onclick={() => traceConnector(card)} title="Continue tracing the largest transfer">＋</button>
+            <span class="connector-line"></span>
+          </div>
+          <article class="transfer-card" id={card.id}>
+            <header class="card-header">
+              <div class="card-title"><span class="direction from">From</span> {shortId(card.wallet, 6, 6)} <span class="count-badge">{cardRows(card).length}</span></div>
+              <div class="card-actions">
+                <button class="icon-button" onclick={() => copyAddress(card.wallet)} title="Copy wallet address">⧉</button>
+                <a class="icon-button" href={accountLinks(card.wallet).solscan} target="_blank" rel="noreferrer" title="Open in Solscan">↗</a>
+              </div>
+            </header>
+            <div class="table-head"><span>Wallet / token</span><span>Volume ↓</span><span>Transfers</span><span>Last</span><span aria-hidden="true"></span></div>
+            {#if loadingAddress === card.wallet}
+              <div class="card-empty loading">Tracing finalized transfers…</div>
+            {:else if cardRows(card).length === 0}
+              <div class="card-empty">No outgoing transfers observed for this wallet.</div>
+            {:else}
+              {#each displayRows(card) as row (row.key)}
+                <div class="transfer-row">
+                  <button class="wallet-label" onclick={() => selectWallet(row)} title={row.peer}>
+                    <span class="asset-dot {row.kind === 'token' ? 'token-dot' : 'wallet-dot'}">{row.kind === 'token' ? '◆' : 'W'}</span>
+                    <span class="wallet-text">{shortId(row.peer, 5, 5)}</span>
+                    <span class="external">↗</span>
+                  </button>
+                  <span class="volume">{formatVolume(row)}{row.kind === 'token' ? ` · ${row.symbol}` : ' SOL'}</span>
+                  <span class="metric">{row.transfers || 1}</span>
+                  <span class="last">{formatLast(row)}</span>
+                  <button class="trace-arrow" class:busy={loadingAddress === row.peer} onclick={() => traceRow(card, row)} title="Continue tracing this wallet" aria-label={`Trace ${shortId(row.peer)}`}>{loadingAddress === row.peer ? '…' : '→'}</button>
+                </div>
+              {/each}
+              {#if cardRows(card).length > MAX_VISIBLE_ROWS}
+                <button class="show-all" onclick={() => toggleCard(card.id)}>
+                  {expandedCards[card.id] ? 'Show less' : `Show all (${cardRows(card).length})`}
+                </button>
+              {/if}
+            {/if}
+          </article>
+        {/each}
+      </div>
     </div>
-  </div>
-</div>
+  {/if}
+</section>
 
 <style>
-  .technical-map-card {
-    background-color: var(--surface-container-lowest);
-    border: 1px solid var(--outline-variant);
-    display: flex;
-    flex-direction: column;
+  .trace-panel {
     width: 100%;
-  }
-  .graph-toolbar {
-    padding: 8px 12px;
-    background-color: var(--surface-container-low);
-    border-bottom: 1px solid var(--outline-variant);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-  .toolbar-left {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
-  .graph-title {
-    font-family: var(--font-sans);
-    font-size: 14px;
-    font-weight: 700;
-    color: var(--stark-white);
-  }
-  .drag-hint {
-    font-size: 11.5px;
-    color: var(--primary-container);
-    background-color: var(--surface-container-high);
-    padding: 2px 6px;
-    border-radius: 3px;
-    font-weight: 500;
-  }
-  .settings-toggle-btn {
-    background-color: var(--surface-container-high);
-    border: 1px solid var(--outline-variant);
-    color: var(--on-surface);
-    font-family: var(--font-sans);
-    font-size: 12px;
-    font-weight: 600;
-    padding: 4px 10px;
-    cursor: pointer;
-    border-radius: 3px;
-    transition: all 0.15s;
-  }
-  .settings-toggle-btn:hover, .settings-toggle-btn.active {
-    background-color: var(--primary-container);
-    color: #000000;
-    border-color: var(--stark-white);
-  }
-  .visual-settings-drawer {
-    background-color: var(--surface-container);
-    border-bottom: 1px solid var(--outline-variant);
-    padding: 8px 14px;
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    flex-wrap: wrap;
-    font-size: 12px;
-    font-family: var(--font-sans);
-  }
-  .setting-item {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-  }
-  .setting-item label {
-    color: var(--on-surface-variant);
-    font-size: 11px;
-  }
-  .setting-item label strong {
-    color: var(--primary-container);
-  }
-  .setting-item input[type="range"] {
-    width: 110px;
-    accent-color: var(--primary-container);
-    cursor: pointer;
-  }
-  .setting-checkboxes {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-  .btn-reset {
-    background: transparent;
-    border: 1px solid var(--outline-variant);
-    color: var(--on-surface-variant);
-    font-size: 11.5px;
-    padding: 4px 8px;
-    cursor: pointer;
-    border-radius: 3px;
-    margin-left: auto;
-  }
-  .btn-reset:hover {
-    color: var(--stark-white);
-    border-color: var(--stark-white);
-  }
-  .filter-controls {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-  .toggle-group {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-  .toggle-label {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 12px;
-    font-family: var(--font-sans);
-    font-weight: 600;
-    color: var(--on-surface-variant);
-    cursor: pointer;
-  }
-  .toggle-label input {
-    cursor: pointer;
-    accent-color: var(--primary-container);
-    width: 13px;
-    height: 13px;
-  }
-  .canvas-wrapper {
-    position: relative;
-    width: 100%;
-    height: 480px;
-    background-color: #0e0e0e;
+    min-width: 0;
+    background: #0d101c;
+    border: 1px solid #22283b;
+    color: #e8ebf5;
     overflow: hidden;
   }
-  .echarts-container {
-    width: 100%;
-    height: 100%;
-  }
-  .floating-zoom-controls {
-    position: absolute;
-    top: 12px;
-    left: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    z-index: 10;
-  }
-  .zoom-btn {
-    width: 30px;
-    height: 30px;
-    background-color: var(--surface-container-high);
-    color: var(--stark-white);
-    border: 1px solid var(--outline-variant);
-    font-size: 15px;
-    font-weight: bold;
+
+  .trace-header {
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 14px;
+    border-bottom: 1px solid #22283b;
+    background: #101525;
+  }
+
+  .trace-heading, .trace-controls, .card-title, .card-actions, .address-pill, .pivot-card {
+    display: flex;
+    align-items: center;
+  }
+
+  .trace-heading { gap: 10px; min-width: 0; }
+  .trace-title { font-size: 15px; font-weight: 750; white-space: nowrap; }
+  .trace-subtitle { color: #77819a; font-size: 11px; white-space: nowrap; }
+
+  .address-pill, .pivot-card, .window-chip {
+    border: 1px solid #303a58;
+    background: #171d31;
+    color: #aeb9e4;
+    font: 600 11px var(--font-mono);
+    padding: 5px 8px;
+    border-radius: 5px;
+  }
+
+  .address-pill { gap: 7px; cursor: pointer; }
+  .pivot-address { border: 0; padding: 0; color: inherit; background: transparent; font: inherit; cursor: pointer; }
+  .address-pill:hover, .pivot-card:hover { border-color: #7c72c8; color: #d8d5ff; }
+  .copy-icon { color: #7785ae; }
+
+  .trace-controls { gap: 7px; color: #7f89a5; font-size: 11px; }
+  .trace-controls select {
+    border: 1px solid #303a58;
+    background: #171d31;
+    color: #c9d0e8;
+    padding: 5px 8px;
+    font-size: 11px;
+  }
+  .reset-button, .show-all, .pivot-expand, .connector-button, .icon-button, .trace-arrow, .wallet-label {
+    border: 0;
     cursor: pointer;
-    padding: 0;
-    border-radius: 3px;
   }
-  .zoom-btn:hover {
-    background-color: var(--primary-container);
-    color: #000000;
-    border-color: var(--stark-white);
+  .reset-button { padding: 5px 8px; color: #aeb9e4; background: #25213d; font-size: 11px; }
+  .trace-error { padding: 8px 14px; color: #ff9e9e; background: #321c28; font-size: 12px; border-bottom: 1px solid #593244; }
+  .trace-empty { padding: 60px 20px; text-align: center; color: #7e89a5; font-size: 13px; }
+
+  .trace-scroll { overflow-x: auto; padding: 38px 14px 46px; }
+  .trace-lane { display: flex; align-items: center; min-width: max-content; min-height: 360px; }
+
+  .transfer-card {
+    width: 330px;
+    background: #151b2c;
+    border: 1px solid #293451;
+    border-radius: 7px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, .18);
+    overflow: hidden;
+    flex: 0 0 330px;
   }
-  .fit-btn {
-    font-size: 13px;
-  }
-  .bubble-legend {
-    position: absolute;
-    bottom: 12px;
-    right: 12px;
-    background-color: rgba(14, 14, 14, 0.9);
-    border: 1px solid var(--outline-variant);
-    padding: 5px 10px;
-    display: flex;
-    gap: 12px;
-    font-size: 11.5px;
-    font-family: var(--font-sans);
-    font-weight: 600;
-    color: var(--on-surface-variant);
-    border-radius: 3px;
-    z-index: 10;
-  }
-  .legend-item {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-  }
-  .legend-square {
-    width: 9px;
-    height: 9px;
-    border-radius: 2px;
-  }
-  .legend-square.orange {
-    background-color: var(--primary-container);
-  }
-  .legend-square.gold {
-    background-color: var(--surface-tint);
-  }
-  .legend-square.coral {
-    background-color: var(--secondary-container);
-  }
-  .legend-square.ice {
-    background-color: var(--tertiary);
+  .card-header { min-height: 42px; padding: 8px 10px; justify-content: space-between; gap: 8px; border-bottom: 1px solid #293451; }
+  .card-title { gap: 5px; font: 650 12px var(--font-mono); white-space: nowrap; }
+  .direction { font: 800 10px var(--font-sans); letter-spacing: .04em; }
+  .direction.to { color: #77c9d0; }
+  .direction.from { color: #c4a6ef; }
+  .count-badge { min-width: 18px; padding: 1px 5px; border-radius: 10px; background: #292348; color: #c9bbff; text-align: center; font: 700 10px var(--font-sans); }
+  .window-chip { padding: 3px 6px; font-size: 10px; }
+  .card-actions { gap: 3px; }
+  .icon-button { display: inline-flex; align-items: center; justify-content: center; padding: 3px 5px; color: #8d99bd; background: transparent; text-decoration: none; }
+  .icon-button:hover { color: #eeeaff; background: #252a42; }
+
+  .table-head, .transfer-row { display: grid; grid-template-columns: minmax(94px, 1fr) 60px 43px 40px 24px; align-items: center; column-gap: 3px; }
+  .transfer-row { position: relative; }
+  .table-head { padding: 7px 8px; color: #687492; font-size: 9px; text-transform: uppercase; letter-spacing: .04em; }
+  .transfer-row { min-height: 43px; padding: 5px 8px; border-top: 1px solid #202a42; font-size: 10px; }
+  .transfer-row:hover { background: #1b2440; }
+  .transfer-row > * { min-width: 0; }
+  .trace-arrow { justify-self: end; grid-column: 5; width: 24px; height: 24px; padding: 0; border: 1px solid #6758a2; border-radius: 4px; color: #f0edff; background: #30265b; font: 700 16px/1 var(--font-sans); }
+  .trace-arrow:hover, .trace-arrow:focus-visible, .pivot-expand:hover, .connector-button:hover { color: #fff; background: #5c4ba2; }
+  .trace-arrow.busy { color: #fff; background: #6e5ab7; cursor: wait; }
+  .wallet-label { min-width: 0; display: flex; align-items: center; gap: 5px; padding: 0; color: #cad2e7; background: transparent; text-align: left; font: 600 10px var(--font-mono); }
+  .wallet-label:hover { color: #fff; }
+  .asset-dot { width: 17px; height: 17px; flex: 0 0 17px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; font: 800 8px var(--font-sans); }
+  .wallet-dot { color: #9ee6e5; background: #164348; }
+  .token-dot { color: #e1c8ff; background: #443069; }
+  .wallet-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .external { color: #68779f; font: 10px var(--font-sans); }
+  .volume, .metric, .last { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .volume { color: #edf0fa; text-align: right; font-family: var(--font-mono); }
+  .metric { color: #a5b1d0; text-align: right; }
+  .last { color: #8792af; text-align: right; }
+  .card-empty { padding: 28px 12px; color: #74809d; text-align: center; font-size: 11px; }
+  .loading { color: #c5b7ff; }
+  .show-all { width: calc(100% - 12px); margin: 6px; padding: 7px; border: 1px solid #403568; color: #cdbfff; background: #221c3e; font-size: 10px; }
+  .show-all:hover { background: #30265a; }
+
+  .connector { width: 110px; flex: 0 0 110px; display: flex; align-items: center; justify-content: center; gap: 0; }
+  .connector-line { width: 32px; border-top: 2px dotted #62558d; }
+  .connector::before, .connector::after { content: ''; width: 7px; height: 7px; border: 2px solid #7667a8; background: #0d101c; border-radius: 50%; flex: 0 0 auto; }
+  .root-connector { width: 170px; flex-basis: 170px; }
+  .root-connector .connector-line { width: 23px; }
+  .pivot-card { gap: 6px; padding: 8px 7px 8px 10px; cursor: pointer; white-space: nowrap; }
+  .pivot-expand, .connector-button { width: 22px; height: 22px; border-radius: 50%; padding: 0; color: #d2caff; background: #35295d; font-size: 15px; line-height: 1; }
+  .connector-button { flex: 0 0 22px; }
+
+  @media (max-width: 800px) {
+    .trace-header { align-items: flex-start; flex-direction: column; }
+    .trace-subtitle { display: none; }
+    .transfer-card { width: 300px; flex-basis: 300px; }
   }
 </style>

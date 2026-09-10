@@ -87,6 +87,17 @@ class EntityBackfillRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class EntityGraphSnapshotRecord:
+    """Latest persisted entity-graph dossier for one tracked wallet."""
+
+    wallet: str
+    query: str
+    graph_json: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class BundleParticipationRecord:
     """One wallet's finalized creation-slot buy on one confirmed entity launch."""
 
@@ -105,6 +116,7 @@ __all__ = [
     "BundleParticipationRecord",
     "EntityBackfillRecord",
     "EntityBackfillStatus",
+    "EntityGraphSnapshotRecord",
     "FunderRecord",
     "FundingEdge",
     "FundingHop",

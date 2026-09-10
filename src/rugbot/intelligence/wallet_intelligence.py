@@ -32,6 +32,7 @@ from rugbot.ingest.pump.pump_create_observation import (
 )
 from rugbot.ingest.pump.pump_trade_observation import decode_pump_trade_observation
 from rugbot.ingest.rpc_observer import observe_address
+from rugbot.integrations.rpc_access import RpcAccessError
 from rugbot.intelligence.gmgn_creator_history import (
     GmgnCreatorHistory,
     creator_history_to_json,
@@ -1660,12 +1661,16 @@ async def _repeat_bundler_entities(
     mints = tuple(sorted({trade.mint for trade in buys}))
     if len(mints) < MIN_REPEAT_BUNDLER_MINTS:
         return ()
-    resolutions = await asyncio.gather(
-        *(
-            asyncio.to_thread(resolve_token_or_wallet, mint, rpc_url=endpoint)
-            for mint in mints
+    try:
+        resolutions = await asyncio.gather(
+            *(
+                asyncio.to_thread(resolve_token_or_wallet, mint, rpc_url=endpoint)
+                for mint in mints
+            )
         )
-    )
+    except RpcAccessError as exc:
+        logger.warning("repeat-bundler resolution skipped: %s", exc)
+        return ()
     bundler_mints: dict[tuple[str, str], set[str]] = {}
     creation_signatures: dict[str, str] = {}
     creation_slots: dict[str, int] = {}

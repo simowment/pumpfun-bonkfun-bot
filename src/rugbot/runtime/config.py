@@ -186,6 +186,8 @@ class ProviderSettings:
     solscan_api_key: str | None
     gmgn_api_key: str | None
     pumpportal_api_key: str | None
+    nansen_api_key: str | None
+    noesis_api_key: str | None
 
 
 def resolve_max_rpc_calls_per_command(
@@ -239,6 +241,8 @@ def load_provider_settings(
         solscan_api_key=_optional_secret(values.get("SOLSCAN_API_KEY")),
         gmgn_api_key=_optional_secret(values.get("GMGN_API_KEY")),
         pumpportal_api_key=_optional_secret(values.get("PUMPPORTAL_API_KEY")),
+        nansen_api_key=_optional_secret(values.get("NANSEN_API_KEY")),
+        noesis_api_key=_optional_secret(values.get("NOESIS_API_KEY")),
     )
 
 
@@ -365,6 +369,8 @@ def resolve_dotenv(*, include_signing: bool = False) -> None:
         "DISCORD_CHANNEL_ID",
         "DISCORD_ALLOWED_USER_IDS",
         "DISCORD_ENTITY_WEBHOOK_URL",
+        "NANSEN_API_KEY",
+        "NOESIS_API_KEY",
         "RUGBOT_MAX_RPC_CALLS",
     }
 

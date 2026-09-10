@@ -215,3 +215,36 @@ def test_seed_mode_records_without_posting() -> None:
         )
     assert (found, posted) == (2, 0)
     assert state.known_mints == {"MintA", "MintB"}
+
+
+def test_history_prints_all_mints_without_posting_or_state(capsys: Any) -> None:
+    """History mode lists every mint silently: no posts, no state writes."""
+
+    class _HistoryClient:
+        """Fake public API client with one mint page per wallet."""
+
+        def fetch_user_created_coins(
+            self, wallet: str, limit: int = 50, offset: int = 0
+        ) -> dict[str, Any]:
+            """Serve two mints once, then an empty page."""
+            if wallet == "WalletHX2S" and offset == 0:
+                return {"coins": [{"mint": "MintA"}, {"mint": "MintB"}]}
+            return {"coins": []}
+
+        def fetch_token(self, mint: str) -> dict[str, Any]:
+            """Serve canned token metadata."""
+            return {"name": "N", "symbol": "S", "usd_market_cap": 2500.0}
+
+    with (
+        patch.object(entity_watch, "get_client", return_value=_HistoryClient()),
+        patch.object(
+            entity_watch,
+            "post_entity_launch_alert",
+            side_effect=AssertionError("history must not post"),
+        ),
+    ):
+        total = entity_watch.print_entity_history(_graph())
+    out = capsys.readouterr().out
+    assert total == 2
+    assert "MintA" in out and "MintB" in out
+    assert "$2.5K" in out
