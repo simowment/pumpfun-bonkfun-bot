@@ -232,6 +232,40 @@ def _lite_mint_mcap_sol(
     return (entry_mcap, ath_mcap)
 
 
+LITE_PROFILE_CANDLE_INTERVALS: Final[tuple[str, ...]] = ("1s", "1m", "5m", "1h")
+
+
+def _fetch_candles_with_fallback(
+    client: PumpFunApiClient, mint: str
+) -> tuple[list[dict], str | None]:
+    """Fetch candles finest-first, falling back to coarser grains.
+
+    The 1s endpoint retains only recent history; older launches return
+    empty while 1m/5m/1h pages survive. Returns the first non-empty page
+    with its interval, or ([], None) when every grain is empty.
+    """
+    for interval in LITE_PROFILE_CANDLE_INTERVALS:
+        candles = client.fetch_candlesticks(mint, interval=interval, limit=300)
+        if candles:
+            return candles, interval
+    return [], None
+
+
+def _interval_mix_label(intervals: dict[str, str]) -> str:
+    """Summarize candle granularity mix, e.g. ", 5mx4, 1hx2", or ""."""
+    counts: dict[str, int] = {}
+    for interval in intervals.values():
+        counts[interval] = counts.get(interval, 0) + 1
+    if not counts or set(counts) == {"1s"}:
+        return ""
+    parts = [
+        f"{interval}x{counts[interval]}"
+        for interval in LITE_PROFILE_CANDLE_INTERVALS
+        if interval in counts
+    ]
+    return f", candles {', '.join(parts)}"
+
+
 def _run_lite_profile(target_input: str) -> int:
     """Run the REST-only lite TP profile and print the compact table.
 
@@ -262,10 +296,13 @@ def _run_lite_profile(target_input: str) -> int:
         if not mints:
             print(f"Lite profile abstained: no launches for {creator_wallet}")
             return 0
-        candles_by_mint = {
-            mint: client.fetch_candlesticks(mint, interval="1s", limit=300)
-            for mint in mints
-        }
+        candles_by_mint: dict[str, list[dict]] = {}
+        candle_interval_by_mint: dict[str, str] = {}
+        for mint in mints:
+            candles, interval = _fetch_candles_with_fallback(client, mint)
+            if candles and interval is not None:
+                candles_by_mint[mint] = candles
+                candle_interval_by_mint[mint] = interval
         sol_quote = client.fetch_sol_price()
         sol_price = sol_quote.get("solPrice") if isinstance(sol_quote, dict) else None
         mcap_sol_by_mint: dict[str, tuple[float, float]] = {}
@@ -288,7 +325,8 @@ def _run_lite_profile(target_input: str) -> int:
             print(f"Lite profile abstained: no usable candles for {creator_wallet}")
             return 0
         optimal = report.optimal_tp
-        print(f"Lite profile for {creator_wallet} (N={report.launch_count})")
+        mix_note = _interval_mix_label(candle_interval_by_mint)
+        print(f"Lite profile for {creator_wallet} (N={report.launch_count}{mix_note})")
         sol_usd = (
             float(sol_price)
             if isinstance(sol_price, (int, float)) and sol_price > 0
