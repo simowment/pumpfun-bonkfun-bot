@@ -777,106 +777,104 @@ def main(argv: Sequence[str] | None = None) -> int:
     optimal_winrate = optimal_eval.winrate_pct if optimal_eval else None
     total_fees = optimal_eval.total_fees_paid_sol if optimal_eval else None
 
+    out_dict = {
+        "input": target_input,
+        "resolved_creator": wallet_address,
+        "root_funder": root_funder,
+        "is_token": resolved.is_token,
+        "cluster_wallets": model.total_wallets,
+        "cluster_tokens": model.token_count,
+        "staged_wallets_count": model.staged_wallets_count,
+        "next_deployer_candidate": model.next_deployer_candidate,
+        "outbound_staged": model.outbound_staged,
+        "inbound_staged": model.inbound_staged,
+        "staging_skipped": staging_skipped,
+        "staging_warning": staging_warning,
+        "staging_rpc_calls": staging_rpc_calls,
+        "operator_linked_wallets": operator_linked,
+        "operator_graph_warning": operator_graph_warning,
+        "operator_graph_calls": operator_graph_calls,
+        "nansen_counterparties": nansen_linked,
+        "nansen_warning": nansen_warning,
+        "nansen_calls": nansen_calls,
+        "next_deployer_funding_sol": model.next_deployer_funding_sol,
+        "enrolled": enrolled,
+        "enrollment_rejection_reason": enrollment_rejection_reason,
+        "finalized_pump_trades": (
+            [
+                {
+                    "slot": trade.slot,
+                    "signature": trade.signature,
+                    "mint": trade.mint,
+                    "side": trade.side.value,
+                }
+                for trade in report.trades
+            ]
+            if isinstance(report, WalletIntelligenceReport)
+            else []
+        ),
+        "repeat_bundler_entities": (
+            [
+                {
+                    "bundler_wallet": entity.bundler_wallet,
+                    "entity_creator": entity.entity_creator,
+                    "mints": list(entity.mints),
+                    "mint_count": len(entity.mints),
+                    "buy_count": entity.buy_count,
+                    "first_buy_slot": entity.first_buy_slot,
+                    "last_buy_slot": entity.last_buy_slot,
+                    "evidence_ids": list(entity.evidence_ids),
+                    "finalized_entity_attribution": True,
+                }
+                for entity in report.repeat_bundler_entities
+            ]
+            if isinstance(report, WalletIntelligenceReport)
+            else []
+        ),
+        "operator_dynamics": (
+            {
+                "avg_ath_multiplier": backtest_report.avg_ath_multiplier,
+                "median_ath_multiplier": backtest_report.median_ath_multiplier,
+                "ath_consistency_pct": backtest_report.ath_consistency_pct,
+                "avg_peak_mc_usd": backtest_report.avg_peak_mc_usd,
+                "avg_rug_mc_usd": backtest_report.avg_rug_mc_usd,
+                "avg_rug_delay_seconds": backtest_report.avg_rug_delay_seconds,
+                "median_rug_delay_seconds": backtest_report.median_rug_delay_seconds,
+                "rug_delay_std_seconds": backtest_report.rug_delay_std_seconds,
+                "avg_ath_delay_seconds": backtest_report.avg_ath_delay_seconds,
+            }
+            if backtest_report
+            else None
+        ),
+        "backtest": (
+            {
+                "total_tokens_evaluated": backtest_report.total_tokens_evaluated,
+                "optimal_tp": backtest_report.optimal_tp_label,
+                "optimal_tp_multiplier": backtest_report.optimal_tp_multiplier,
+                "winrate_pct": optimal_winrate,
+                "net_roi_pct": backtest_report.optimal_roi_pct,
+                "net_ev_sol": backtest_report.optimal_net_ev_sol,
+                "avg_ath_multiplier": backtest_report.avg_ath_multiplier,
+                "total_fees_sol": total_fees,
+            }
+            if backtest_report
+            else None
+        ),
+    }
+    if not staging_skipped:
+        try:
+            repo.save_entity_graph(
+                EntityGraphSnapshotRecord(
+                    wallet=wallet_address,
+                    query=target_input,
+                    graph_json=json.dumps(out_dict, default=str),
+                    created_at=now_iso,
+                    updated_at=now_iso,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — snapshot save never breaks output
+            logger.warning("entity graph snapshot save failed: %s", type(exc).__name__)
     if args.json:
-        out_dict = {
-            "input": target_input,
-            "resolved_creator": wallet_address,
-            "root_funder": root_funder,
-            "is_token": resolved.is_token,
-            "cluster_wallets": model.total_wallets,
-            "cluster_tokens": model.token_count,
-            "staged_wallets_count": model.staged_wallets_count,
-            "next_deployer_candidate": model.next_deployer_candidate,
-            "outbound_staged": model.outbound_staged,
-            "inbound_staged": model.inbound_staged,
-            "staging_skipped": staging_skipped,
-            "staging_warning": staging_warning,
-            "staging_rpc_calls": staging_rpc_calls,
-            "operator_linked_wallets": operator_linked,
-            "operator_graph_warning": operator_graph_warning,
-            "operator_graph_calls": operator_graph_calls,
-            "nansen_counterparties": nansen_linked,
-            "nansen_warning": nansen_warning,
-            "nansen_calls": nansen_calls,
-            "next_deployer_funding_sol": model.next_deployer_funding_sol,
-            "enrolled": enrolled,
-            "enrollment_rejection_reason": enrollment_rejection_reason,
-            "finalized_pump_trades": (
-                [
-                    {
-                        "slot": trade.slot,
-                        "signature": trade.signature,
-                        "mint": trade.mint,
-                        "side": trade.side.value,
-                    }
-                    for trade in report.trades
-                ]
-                if isinstance(report, WalletIntelligenceReport)
-                else []
-            ),
-            "repeat_bundler_entities": (
-                [
-                    {
-                        "bundler_wallet": entity.bundler_wallet,
-                        "entity_creator": entity.entity_creator,
-                        "mints": list(entity.mints),
-                        "mint_count": len(entity.mints),
-                        "buy_count": entity.buy_count,
-                        "first_buy_slot": entity.first_buy_slot,
-                        "last_buy_slot": entity.last_buy_slot,
-                        "evidence_ids": list(entity.evidence_ids),
-                        "finalized_entity_attribution": True,
-                    }
-                    for entity in report.repeat_bundler_entities
-                ]
-                if isinstance(report, WalletIntelligenceReport)
-                else []
-            ),
-            "operator_dynamics": (
-                {
-                    "avg_ath_multiplier": backtest_report.avg_ath_multiplier,
-                    "median_ath_multiplier": backtest_report.median_ath_multiplier,
-                    "ath_consistency_pct": backtest_report.ath_consistency_pct,
-                    "avg_peak_mc_usd": backtest_report.avg_peak_mc_usd,
-                    "avg_rug_mc_usd": backtest_report.avg_rug_mc_usd,
-                    "avg_rug_delay_seconds": backtest_report.avg_rug_delay_seconds,
-                    "median_rug_delay_seconds": backtest_report.median_rug_delay_seconds,
-                    "rug_delay_std_seconds": backtest_report.rug_delay_std_seconds,
-                    "avg_ath_delay_seconds": backtest_report.avg_ath_delay_seconds,
-                }
-                if backtest_report
-                else None
-            ),
-            "backtest": (
-                {
-                    "total_tokens_evaluated": backtest_report.total_tokens_evaluated,
-                    "optimal_tp": backtest_report.optimal_tp_label,
-                    "optimal_tp_multiplier": backtest_report.optimal_tp_multiplier,
-                    "winrate_pct": optimal_winrate,
-                    "net_roi_pct": backtest_report.optimal_roi_pct,
-                    "net_ev_sol": backtest_report.optimal_net_ev_sol,
-                    "avg_ath_multiplier": backtest_report.avg_ath_multiplier,
-                    "total_fees_sol": total_fees,
-                }
-                if backtest_report
-                else None
-            ),
-        }
-        if not staging_skipped:
-            try:
-                repo.save_entity_graph(
-                    EntityGraphSnapshotRecord(
-                        wallet=wallet_address,
-                        query=target_input,
-                        graph_json=json.dumps(out_dict, default=str),
-                        created_at=now_iso,
-                        updated_at=now_iso,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001 — snapshot save never breaks output
-                logger.warning(
-                    "entity graph snapshot save failed: %s", type(exc).__name__
-                )
         print(json.dumps(out_dict, indent=2))
         return 2 if args.enroll and not enrolled else 0
 
