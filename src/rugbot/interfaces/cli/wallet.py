@@ -181,8 +181,7 @@ def _format_usd_compact(usd_value: float) -> str:
 
 
 def _lite_mint_mcap_sol(
-    client: PumpFunApiClient,
-    mint: str,
+    token: object,
     candles: list[dict],
     sol_price: float,
 ) -> tuple[float, float] | None:
@@ -197,18 +196,14 @@ def _lite_mint_mcap_sol(
     because ``ath_market_cap`` units are ambiguous.
 
     Args:
-        client: REST client for the per-mint token fetch.
-        mint: Token mint address.
+        token: Prefetched token payload carrying ``total_supply`` and
+            ``base_decimals`` (avoids a duplicate per-mint fetch).
         candles: Candle dicts carrying ``open``/``high``/``close`` prices.
         sol_price: USD per SOL from ``fetch_sol_price``.
 
     Returns:
         Entry/ATH mcap pair in SOL, or None when unknown (fail-soft).
     """
-    try:
-        token = client.fetch_token(mint)
-    except Exception:  # noqa: BLE001 — per-mint mcap is fail-soft
-        return None
     if not isinstance(token, dict):
         return None
     supply_raw = token.get("total_supply", 0)
@@ -233,6 +228,46 @@ def _lite_mint_mcap_sol(
 
 
 LITE_PROFILE_CANDLE_INTERVALS: Final[tuple[str, ...]] = ("1s", "1m", "5m", "1h")
+LITE_PROFILE_WINDOW_GRACE_MS: Final[int] = 600_000
+
+
+def _launch_window_is_valid(candles: list[dict], created_ms: object) -> bool:
+    """Reject candle windows that are not the mint's launch window.
+
+    The candle endpoint returns a *recent* window for tokens whose launch
+    is older than its retention, i.e. a zero-volume dead tail. Profiling
+    that tail reports a spurious 1.00x ATH because entry (first window
+    close) equals the flat tail price. A window is trusted only when it
+    carries real volume and starts at (or near) the mint's creation time.
+    """
+    if not candles:
+        return False
+
+    def _to_number(value: object) -> float | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                return None
+        return None
+
+    total_volume = 0.0
+    for candle in candles:
+        volume = _to_number(candle.get("volume"))
+        if volume is not None:
+            total_volume += volume
+    if total_volume <= 0:
+        return False
+    first_ts = _to_number(candles[0].get("timestamp"))
+    created = _to_number(created_ms)
+    if first_ts is not None and created is not None:
+        if first_ts - created > LITE_PROFILE_WINDOW_GRACE_MS:
+            return False
+    return True
 
 
 def _fetch_candles_with_fallback(
@@ -296,41 +331,60 @@ def _run_lite_profile(target_input: str) -> int:
         if not mints:
             print(f"Lite profile abstained: no launches for {creator_wallet}")
             return 0
-        candles_by_mint: dict[str, list[dict]] = {}
-        candle_interval_by_mint: dict[str, str] = {}
-        for mint in mints:
-            candles, interval = _fetch_candles_with_fallback(client, mint)
-            if candles and interval is not None:
-                candles_by_mint[mint] = candles
-                candle_interval_by_mint[mint] = interval
         sol_quote = client.fetch_sol_price()
         sol_price = sol_quote.get("solPrice") if isinstance(sol_quote, dict) else None
+        sol_usd = (
+            float(sol_price)
+            if isinstance(sol_price, (int, float)) and sol_price > 0
+            else None
+        )
+        candles_by_mint: dict[str, list[dict]] = {}
+        candle_interval_by_mint: dict[str, str] = {}
         mcap_sol_by_mint: dict[str, tuple[float, float]] = {}
         mcap_missing = 0
-        if isinstance(sol_price, (int, float)) and sol_price > 0:
-            for mint, candles in candles_by_mint.items():
-                pair = _lite_mint_mcap_sol(client, mint, candles, float(sol_price))
+        stale_windows = 0
+        for mint in mints:
+            try:
+                token = client.fetch_token(mint)
+            except Exception:  # noqa: BLE001 — per-mint fetch is fail-soft
+                token = None
+            candles, interval = _fetch_candles_with_fallback(client, mint)
+            created_ms = (
+                token.get("created_timestamp") if isinstance(token, dict) else None
+            )
+            if interval is None or not _launch_window_is_valid(candles, created_ms):
+                stale_windows += 1
+                continue
+            candles_by_mint[mint] = candles
+            candle_interval_by_mint[mint] = interval
+            if sol_usd is not None:
+                pair = _lite_mint_mcap_sol(token, candles, sol_usd)
                 if pair is None:
                     mcap_missing += 1
                 else:
                     mcap_sol_by_mint[mint] = pair
-        else:
-            mcap_missing = len(candles_by_mint)
+            else:
+                mcap_missing += 1
         report = profile_launches(
             candles_by_mint,
             fee_bps=LITE_PROFILE_FEE_BPS,
             mcap_sol_by_mint=mcap_sol_by_mint,
         )
         if report.launch_count == 0 or report.optimal_tp is None:
-            print(f"Lite profile abstained: no usable candles for {creator_wallet}")
+            stale_note = (
+                f" ({stale_windows} stale/unavailable windows)" if stale_windows else ""
+            )
+            print(
+                f"Lite profile abstained: no usable candles for "
+                f"{creator_wallet}{stale_note}"
+            )
             return 0
         optimal = report.optimal_tp
         mix_note = _interval_mix_label(candle_interval_by_mint)
-        print(f"Lite profile for {creator_wallet} (N={report.launch_count}{mix_note})")
-        sol_usd = (
-            float(sol_price)
-            if isinstance(sol_price, (int, float)) and sol_price > 0
-            else None
+        stale_note = f", {stale_windows} stale/unavailable" if stale_windows else ""
+        print(
+            f"Lite profile for {creator_wallet} "
+            f"(N={report.launch_count}{mix_note}{stale_note})"
         )
         if report.mcap_scored_count and sol_usd:
             missing_note = f", {mcap_missing} without mcap" if mcap_missing else ""

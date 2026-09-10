@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from rugbot.decision.lite_profiler import profile_launches
-from rugbot.interfaces.cli.wallet import _format_usd_compact
+from rugbot.interfaces.cli.wallet import _format_usd_compact, _launch_window_is_valid
 
 
 def test_empty_candles_are_skipped() -> None:
@@ -140,3 +140,32 @@ def test_format_usd_compact() -> None:
     assert _format_usd_compact(10500.0) == "$10.5K"
     assert _format_usd_compact(999.0) == "$999.00"
     assert _format_usd_compact(0.5) == "$0.5000"
+
+
+def test_launch_window_valid_accepts_launch_anchored_volume() -> None:
+    """A window starting at creation with real volume is trusted."""
+    candles = [
+        {"timestamp": 1_700_000_000_000, "high": "2", "close": "1", "volume": "10"},
+    ]
+    assert _launch_window_is_valid(candles, 1_700_000_000_000) is True
+
+
+def test_launch_window_rejects_zero_volume_tail() -> None:
+    """A flat zero-volume dead tail is rejected even without a timestamp."""
+    candles = [
+        {"timestamp": 1_700_000_000_000, "high": "1", "close": "1", "volume": "0"}
+    ]
+    assert _launch_window_is_valid(candles, None) is False
+
+
+def test_launch_window_rejects_stale_window() -> None:
+    """A window starting long after creation is rejected as a stale tail."""
+    created = 1_700_000_000_000
+    stale_first = created + 600_001
+    candles = [{"timestamp": stale_first, "high": "1", "close": "1", "volume": "5"}]
+    assert _launch_window_is_valid(candles, created) is False
+
+
+def test_launch_window_empty_is_invalid() -> None:
+    """No candles is never a valid window."""
+    assert _launch_window_is_valid([], 1_700_000_000_000) is False
