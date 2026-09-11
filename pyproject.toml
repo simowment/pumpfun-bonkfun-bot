@@ -61,6 +61,7 @@ rug_pairs_lab = "rugbot.interfaces.cli.pairs_lab:main"
 rug_trade = "rugbot.interfaces.cli.trade:main"
 rug_chain = "rugbot.interfaces.cli.chain:main"
 rug_graph = "rugbot.interfaces.cli.graph:main"
+rug_entity_history = "rugbot.interfaces.cli.entity_history:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]

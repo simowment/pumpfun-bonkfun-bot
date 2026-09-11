@@ -39,6 +39,8 @@ DEFAULT_MAX_HOPS = 10
 HUB_MIN_SIGNATURES = 6
 MIN_TRANSFER_SOL = 0.01
 DEFAULT_MAX_HUB_TRANSACTIONS = 60
+DEFAULT_HISTORY_PAGES = 3
+DEFAULT_HISTORY_TRANSACTIONS = 200
 PRODUCTION_PACING_SECONDS = 0.35
 ROLE_ORIGIN = "origin"
 ROLE_RELAY = "relay"
@@ -479,6 +481,148 @@ def enumerate_sources(
     )
 
 
+def _hydrate_transfers(  # noqa: PLR0913
+    owner: str,
+    entries: list[object],
+    *,
+    remaining: int,
+    min_sol: float,
+    max_sol: float,
+    min_slot: int | None,
+    max_slot: int | None,
+    endpoints: RpcEndpoints | Sequence[str] | None,
+    transport: Callable[[str, str, list[object]], object] | None,
+) -> tuple[list[FundedTransfer], int]:
+    """Hydrate one signature page into outbound transfers.
+
+    Entries outside the slot band are skipped before any transaction is
+    fetched, so scanning deep history stays cheap: signature pages are one
+    call each, and only in-band transactions are hydrated.
+
+    Returns:
+        ``(transfers, hydrated)`` for the requested page slice.
+    """
+    transfers: list[FundedTransfer] = []
+    hydrated = 0
+    for entry in entries:
+        if hydrated >= remaining:
+            break
+        if not isinstance(entry, dict):
+            continue
+        signature = entry.get("signature")
+        if not isinstance(signature, str):
+            continue
+        slot = entry.get("slot")
+        slot_value = int(slot) if isinstance(slot, int) else None
+        if min_slot is not None and (slot_value is None or slot_value < min_slot):
+            continue
+        if max_slot is not None and (slot_value is None or slot_value > max_slot):
+            continue
+        if transport is None:
+            time.sleep(PRODUCTION_PACING_SECONDS)
+        hydrated += 1
+        for counterparty, amount_sol in _counterparty_transfers(
+            _transaction(signature, endpoints=endpoints, transport=transport),
+            wallet=owner,
+            min_sol=min_sol,
+            receiving=False,
+        ):
+            if amount_sol > max_sol:
+                continue
+            transfers.append(
+                FundedTransfer(
+                    recipient=counterparty,
+                    amount_sol=amount_sol,
+                    signature=signature,
+                    slot=slot_value,
+                )
+            )
+    return transfers, hydrated
+
+
+def enumerate_funded_paged(  # noqa: PLR0913
+    wallet: str,
+    *,
+    max_pages: int = DEFAULT_HISTORY_PAGES,
+    per_page: int = SIGNATURE_PAGE_LIMIT,
+    max_transactions: int = DEFAULT_HISTORY_TRANSACTIONS,
+    min_sol: float = MIN_TRANSFER_SOL,
+    max_sol: float = float("inf"),
+    min_slot: int | None = None,
+    max_slot: int | None = None,
+    endpoints: RpcEndpoints | Sequence[str] | None = None,
+    transport: Callable[[str, str, list[object]], object] | None = None,
+) -> tuple[FundedTransfer, ...]:
+    """Enumerate outbound transfers by paging backward through history.
+
+    The single-page enumerators only see a wallet's newest signatures, which
+    on a high-frequency funder hides the transfers that actually preceded a
+    launch. This walks ``before``-cursor pages so older dispersals are
+    reachable, bounded by pages and total hydrated transactions.
+
+    Args:
+        wallet: Wallet whose outbound transfers to enumerate.
+        max_pages: Maximum signature pages requested.
+        per_page: Signatures requested per page (RPC caps this at 1000).
+        max_transactions: Maximum transactions hydrated across all pages.
+        min_sol: Ignore transfers below this SOL amount.
+        max_sol: Ignore transfers above this SOL amount.
+        min_slot: Skip signatures older than this slot before hydrating.
+        max_slot: Skip signatures newer than this slot before hydrating.
+        endpoints: Resolved endpoints; defaults to precedence resolution.
+        transport: Optional test seam replacing the pooled transport.
+
+    Returns:
+        Funded transfers, newest-first, de-duplicated by signature.
+
+    Raises:
+        FundingChainError: When ``wallet`` is empty.
+    """
+    owner = _require_address(wallet)
+    transfers: list[FundedTransfer] = []
+    hydrated = 0
+    before: str | None = None
+    for _ in range(max_pages):
+        if hydrated >= max_transactions:
+            break
+        params: dict[str, object] = {
+            "limit": per_page,
+            "commitment": "finalized",
+        }
+        if before is not None:
+            params["before"] = before
+        try:
+            page = _rpc_call(
+                "getSignaturesForAddress",
+                [owner, params],
+                endpoints=endpoints,
+                transport=transport,
+            )
+        except RpcAccessError:
+            logger.warning("paged funding enumeration stopped: rpc unavailable")
+            break
+        if not isinstance(page, list) or not page:
+            break
+        page_transfers, used = _hydrate_transfers(
+            owner,
+            page,
+            remaining=max_transactions - hydrated,
+            min_sol=min_sol,
+            max_sol=max_sol,
+            min_slot=min_slot,
+            max_slot=max_slot,
+            endpoints=endpoints,
+            transport=transport,
+        )
+        transfers.extend(page_transfers)
+        hydrated += used
+        last = page[-1].get("signature") if isinstance(page[-1], dict) else None
+        if not isinstance(last, str):
+            break
+        before = last
+    return tuple(transfers)
+
+
 __all__ = [
     "DEFAULT_MAX_HOPS",
     "DEFAULT_MAX_HUB_TRANSACTIONS",
@@ -493,6 +637,7 @@ __all__ = [
     "FundingChainWalk",
     "FundingSource",
     "enumerate_funded",
+    "enumerate_funded_paged",
     "enumerate_sources",
     "walk_upstream",
 ]

@@ -1,0 +1,143 @@
+"""Reconstruct an entity's token-creation history from its funding wallet.
+
+The creator index only reports a token against the wallet that *created* it.
+A funding wallet is never a creator, so its own launch count is always zero
+and says nothing. The entity's real history is the set of tokens created by
+the wallets it funded -- the burners it dispersed staging capital to.
+
+This module turns a funding wallet's disbursements into a single token
+timeline by resolving each funded wallet's creations and merging them, with
+the received SOL and funding slot carried on each event so a burst is
+visible.
+
+Orchestration is side-effect free: callers inject the transfer list and the
+per-wallet launch resolver.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from rugbot.utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+    from rugbot.tracker.funding_chain import FundedTransfer
+
+logger = get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchEvent:
+    """One token creation attributed to a wallet the funder disbursed to."""
+
+    mint: str
+    symbol: str
+    name: str
+    creator: str
+    created_at_ms: int | None
+    received_sol: float
+    funding_slot: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class EntityLaunchHistory:
+    """Merged token-creation timeline for one funding wallet's disbursal set."""
+
+    funder: str
+    recipients: int
+    launches: tuple[LaunchEvent, ...]
+    warning: str | None
+
+
+def _coin_event(
+    coin: Mapping[str, object],
+    *,
+    creator: str,
+    received_sol: float,
+    funding_slot: int | None,
+) -> LaunchEvent | None:
+    """Narrow one creator-index coin entry into a launch event."""
+    mint = coin.get("mint")
+    if not isinstance(mint, str) or not mint:
+        return None
+    symbol = coin.get("symbol")
+    name = coin.get("name")
+    created = coin.get("created_timestamp")
+    return LaunchEvent(
+        mint=mint,
+        symbol=symbol if isinstance(symbol, str) else "",
+        name=name if isinstance(name, str) else "",
+        creator=creator,
+        created_at_ms=created if isinstance(created, int) else None,
+        received_sol=received_sol,
+        funding_slot=funding_slot,
+    )
+
+
+def build_launch_history(
+    funder: str,
+    *,
+    transfers: Sequence[FundedTransfer],
+    launch_fetch: Callable[[str], Sequence[Mapping[str, object]] | None],
+) -> EntityLaunchHistory:
+    """Merge every funded wallet's creations into one token timeline.
+
+    Args:
+        funder: Funding wallet the disbursements came from.
+        transfers: Outbound staging-band transfers observed leaving the funder.
+        launch_fetch: ``wallet -> coins`` resolver (creator index page coins).
+
+    Returns:
+        EntityLaunchHistory with events sorted oldest-first and de-duplicated
+        by mint. Wallets whose lookup fails contribute nothing and set a
+        warning rather than aborting the merge.
+    """
+    totals: dict[str, float] = {}
+    slots: dict[str, int | None] = {}
+    for transfer in transfers:
+        totals[transfer.recipient] = (
+            totals.get(transfer.recipient, 0.0) + transfer.amount_sol
+        )
+        slots.setdefault(transfer.recipient, transfer.slot)
+    events: list[LaunchEvent] = []
+    seen_mints: set[str] = set()
+    failures = 0
+    for wallet, received in totals.items():
+        try:
+            coins = launch_fetch(wallet)
+        except Exception:  # noqa: BLE001 - one bad lookup must not abort the merge
+            failures += 1
+            logger.warning("launch lookup failed for %s", wallet[:8])
+            continue
+        for coin in coins or ():
+            if not isinstance(coin, Mapping):
+                continue
+            event = _coin_event(
+                coin,
+                creator=wallet,
+                received_sol=received,
+                funding_slot=slots.get(wallet),
+            )
+            if event is None or event.mint in seen_mints:
+                continue
+            seen_mints.add(event.mint)
+            events.append(event)
+    events.sort(key=lambda event: event.created_at_ms or 0)
+    warning = f"{failures} wallet launch lookups failed" if failures else None
+    return EntityLaunchHistory(
+        funder=funder,
+        recipients=len(totals),
+        launches=tuple(events),
+        warning=warning,
+    )
+
+
+__all__ = [
+    "EntityLaunchHistory",
+    "LaunchEvent",
+    "build_launch_history",
+]
