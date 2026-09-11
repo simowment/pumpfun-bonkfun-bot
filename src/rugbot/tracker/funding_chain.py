@@ -77,6 +77,16 @@ class FundedTransfer:
 
 
 @dataclass(frozen=True, slots=True)
+class FundingSource:
+    """One inbound SOL transfer that funded a wallet."""
+
+    sender: str
+    amount_sol: float
+    signature: str
+    slot: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class FundingChainWalk:
     """Result of walking upstream from an origin wallet to its hub."""
 
@@ -235,38 +245,45 @@ def _parent_of(
     return payer
 
 
-def _outbound_transfers(
+def _counterparty_transfers(
     result: object,
     *,
-    hub: str,
-    signature: str,
-    slot: int | None,
+    wallet: str,
     min_sol: float,
-) -> list[FundedTransfer]:
-    """Extract SOL recipients that gained funds in one hub transaction."""
+    receiving: bool,
+) -> list[tuple[str, float]]:
+    """Extract the counterparties a wallet transacted SOL with.
+
+    Args:
+        result: Parsed transaction payload.
+        wallet: Wallet whose perspective is being read.
+        min_sol: Ignore movements below this SOL amount.
+        receiving: True to read counterparties that PAID ``wallet``;
+            False to read counterparties ``wallet`` PAID.
+
+    Returns:
+        ``(counterparty, amount_sol)`` pairs for the requested direction.
+    """
     parsed = _parsed_balances(result)
     if parsed is None:
         return []
     keys, pre, post = parsed
-    transfers: list[FundedTransfer] = []
+    pairs: list[tuple[str, float]] = []
     for index in range(min(len(keys), len(pre), len(post))):
-        if keys[index] == hub:
+        if keys[index] == wallet:
             continue
-        gained = post[index] - pre[index]
-        if gained <= 0:
+        delta = post[index] - pre[index]
+        # receiving=True means the counterparty PAID the wallet, so it lost
+        # funds (negative delta); receiving=False means the wallet paid the
+        # counterparty, so the counterparty gained (positive delta).
+        amount_lamports = -delta if receiving else delta
+        if amount_lamports <= 0:
             continue
-        amount_sol = gained / LAMPORTS_PER_SOL
+        amount_sol = amount_lamports / LAMPORTS_PER_SOL
         if amount_sol < min_sol:
             continue
-        transfers.append(
-            FundedTransfer(
-                recipient=keys[index],
-                amount_sol=amount_sol,
-                signature=signature,
-                slot=slot,
-            )
-        )
-    return transfers
+        pairs.append((keys[index], amount_sol))
+    return pairs
 
 
 def walk_upstream(
@@ -340,6 +357,43 @@ def walk_upstream(
     return FundingChainWalk(nodes=tuple(nodes), hub=hub, warning=warning)
 
 
+def _enumerate_direction(  # noqa: PLR0913
+    wallet: str,
+    *,
+    receiving: bool,
+    max_transactions: int,
+    min_sol: float,
+    endpoints: RpcEndpoints | Sequence[str] | None,
+    transport: Callable[[str, str, list[object]], object] | None,
+) -> tuple[tuple[str, float, str, int | None], ...]:
+    """Enumerate counterparties a wallet paid, or that paid the wallet.
+
+    Returns:
+        ``(counterparty, amount_sol, signature, slot)`` tuples, newest-first.
+    """
+    owner = _require_address(wallet)
+    signatures = _signatures(owner, endpoints=endpoints, transport=transport)
+    if not signatures:
+        return ()
+    rows: list[tuple[str, float, str, int | None]] = []
+    seen: set[str] = set()
+    for entry in signatures[:max_transactions]:
+        signature = entry.get("signature")
+        if not isinstance(signature, str) or signature in seen:
+            continue
+        seen.add(signature)
+        slot = entry.get("slot")
+        slot_value = int(slot) if isinstance(slot, int) else None
+        if transport is None:
+            time.sleep(PRODUCTION_PACING_SECONDS)
+        transaction = _transaction(signature, endpoints=endpoints, transport=transport)
+        for counterparty, amount_sol in _counterparty_transfers(
+            transaction, wallet=owner, min_sol=min_sol, receiving=receiving
+        ):
+            rows.append((counterparty, amount_sol, signature, slot_value))
+    return tuple(rows)
+
+
 def enumerate_funded(
     wallet: str,
     *,
@@ -366,30 +420,63 @@ def enumerate_funded(
     Raises:
         FundingChainError: When ``wallet`` is empty.
     """
-    hub = _require_address(wallet)
-    signatures = _signatures(hub, endpoints=endpoints, transport=transport)
-    if not signatures:
-        return ()
-    transfers: list[FundedTransfer] = []
-    seen: set[str] = set()
-    for entry in signatures[:max_transactions]:
-        signature = entry.get("signature")
-        if not isinstance(signature, str) or signature in seen:
-            continue
-        seen.add(signature)
-        slot = entry.get("slot")
-        if transport is None:
-            time.sleep(PRODUCTION_PACING_SECONDS)
-        transfers.extend(
-            _outbound_transfers(
-                _transaction(signature, endpoints=endpoints, transport=transport),
-                hub=hub,
-                signature=signature,
-                slot=int(slot) if isinstance(slot, int) else None,
-                min_sol=min_sol,
-            )
+    return tuple(
+        FundedTransfer(
+            recipient=counterparty,
+            amount_sol=amount_sol,
+            signature=signature,
+            slot=slot,
         )
-    return tuple(transfers)
+        for counterparty, amount_sol, signature, slot in _enumerate_direction(
+            wallet,
+            receiving=False,
+            max_transactions=max_transactions,
+            min_sol=min_sol,
+            endpoints=endpoints,
+            transport=transport,
+        )
+    )
+
+
+def enumerate_sources(
+    wallet: str,
+    *,
+    max_transactions: int = DEFAULT_MAX_HUB_TRANSACTIONS,
+    min_sol: float = MIN_TRANSFER_SOL,
+    endpoints: RpcEndpoints | Sequence[str] | None = None,
+    transport: Callable[[str, str, list[object]], object] | None = None,
+) -> tuple[FundingSource, ...]:
+    """List distinct inbound SOL senders observed funding a wallet.
+
+    This surfaces the upstream funder (and, for a >5 SOL sweep, the treasury)
+    that the outward-only view hides.
+
+    Args:
+        wallet: Wallet whose inbound transfers to enumerate.
+        max_transactions: Maximum recent transactions inspected.
+        min_sol: Ignore transfers below this SOL amount.
+        endpoints: Resolved endpoints; defaults to precedence resolution.
+        transport: Optional test seam replacing the pooled transport.
+
+    Returns:
+        Inbound funding sources, newest-first, de-duplicated by signature.
+
+    Raises:
+        FundingChainError: When ``wallet`` is empty.
+    """
+    return tuple(
+        FundingSource(
+            sender=counterparty, amount_sol=amount_sol, signature=signature, slot=slot
+        )
+        for counterparty, amount_sol, signature, slot in _enumerate_direction(
+            wallet,
+            receiving=True,
+            max_transactions=max_transactions,
+            min_sol=min_sol,
+            endpoints=endpoints,
+            transport=transport,
+        )
+    )
 
 
 __all__ = [
@@ -404,6 +491,8 @@ __all__ = [
     "FundingChainError",
     "FundingChainNode",
     "FundingChainWalk",
+    "FundingSource",
     "enumerate_funded",
+    "enumerate_sources",
     "walk_upstream",
 ]

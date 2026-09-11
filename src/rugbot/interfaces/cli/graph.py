@@ -1,9 +1,9 @@
-"""CLI: graph an operator entity from one seed wallet and persist it.
+"""CLI: graph and classify an operator entity from one seed wallet.
 
-Given a launch burner (or any wallet in a hit-and-run cluster), this walks
-the funding spine, enumerates what each spine node funded, resolves launch
-counts, detects same-slot funding batches, prints the graph, and merges every
-discovered node and edge into the tracker database.
+Walks the funding graph bidirectionally from a seed (typically a launch
+burner), classifies every discovered wallet into the cluster playbook roles,
+detects same-slot funding batches, prints the result, and merges every node
+and edge into the tracker database.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,7 +21,10 @@ from rugbot.storage.database import DatabaseManager
 from rugbot.storage.tracker import SQLiteTrackerRepository
 from rugbot.tracker.entity_graph import (
     DEFAULT_BATCH_MIN_RECIPIENTS,
+    DEFAULT_MAX_DEPTH,
+    DEFAULT_MAX_NODES,
     EntityGraph,
+    WalletClass,
     discover_entity_graph,
 )
 from rugbot.tracker.funding_chain import (
@@ -29,11 +33,7 @@ from rugbot.tracker.funding_chain import (
     MIN_TRANSFER_SOL,
     FundingChainError,
 )
-from rugbot.tracker.models import (
-    LAMPORTS_PER_SOL,
-    EntityEdgeRecord,
-    EntityNodeRecord,
-)
+from rugbot.tracker.models import LAMPORTS_PER_SOL, EntityEdgeRecord, EntityNodeRecord
 from rugbot.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -43,30 +43,56 @@ logger = get_logger(__name__)
 
 DEFAULT_STATE_DB = Path(".state/watch/rugbot.db")
 
+CLASS_HEADINGS = {
+    WalletClass.ACTIVE_CREATOR.value: "ACTIVE CREATORS (>= 1 mint)",
+    WalletClass.NEXT_DEPLOYER.value: "NEXT DEPLOYER CANDIDATES (0.2-5 SOL staged)",
+    WalletClass.BUNDLED_BUYER.value: "BUNDLED BUYERS (0.001-0.15 SOL staged)",
+    WalletClass.TREASURY.value: "TREASURY / DRAIN (> 5 SOL inbound)",
+    WalletClass.UNCLASSIFIED.value: "UNCLASSIFIED",
+}
+
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the entity-graph command."""
     parser = argparse.ArgumentParser(
         prog="rug_graph",
         description=(
-            "Graph an operator entity: funding spine, funded wallets, launch "
-            "counts, and same-slot funding batches."
+            "Graph an operator entity: bidirectional funding expansion with "
+            "cluster-role classification and funding-batch detection."
         ),
     )
     parser.add_argument("seed", help="Seed wallet, typically a launch burner.")
     parser.add_argument(
-        "--max-hops",
+        "--spine-hops",
         type=int,
         default=DEFAULT_MAX_HOPS,
-        help=f"Upstream spine depth (default: {DEFAULT_MAX_HOPS}).",
+        help=(
+            "Upstream spine depth walked before breadth expansion "
+            f"(default: {DEFAULT_MAX_HOPS})."
+        ),
+    )
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=DEFAULT_MAX_DEPTH,
+        help=(
+            "Bidirectional expansion depth from each spine wallet "
+            f"(default: {DEFAULT_MAX_DEPTH})."
+        ),
+    )
+    parser.add_argument(
+        "--max-nodes",
+        type=int,
+        default=DEFAULT_MAX_NODES,
+        help=f"Hard cap on discovered wallets (default: {DEFAULT_MAX_NODES}).",
     )
     parser.add_argument(
         "--per-node",
         type=int,
         default=DEFAULT_MAX_HUB_TRANSACTIONS,
         help=(
-            "Transactions inspected per spine node when enumerating outbound "
-            f"transfers (default: {DEFAULT_MAX_HUB_TRANSACTIONS})."
+            "Transactions inspected per wallet per direction "
+            f"(default: {DEFAULT_MAX_HUB_TRANSACTIONS})."
         ),
     )
     parser.add_argument(
@@ -122,7 +148,7 @@ def _persist(graph: EntityGraph) -> tuple[int, int]:
         EntityNodeRecord(
             wallet=node.wallet,
             seed=graph.seed,
-            role=node.role,
+            role=node.wallet_class,
             launch_count=node.launch_count,
             first_seen_at=now,
             last_seen_at=now,
@@ -149,21 +175,15 @@ def _as_payload(graph: EntityGraph) -> dict[str, object]:
     return {
         "seed": graph.seed,
         "warning": graph.warning,
-        "spine": [
-            {
-                "wallet": node.wallet,
-                "role": node.role,
-                "signature_count": node.signature_count,
-                "oldest_slot": node.oldest_slot,
-                "newest_slot": node.newest_slot,
-            }
-            for node in graph.spine
-        ],
+        "class_counts": dict(Counter(node.wallet_class for node in graph.nodes)),
         "nodes": [
             {
                 "wallet": node.wallet,
-                "role": node.role,
+                "class": node.wallet_class,
                 "launch_count": node.launch_count,
+                "staged_sol": node.staged_sol,
+                "inbound_count": node.inbound_count,
+                "depth": node.depth,
             }
             for node in graph.nodes
         ],
@@ -189,26 +209,29 @@ def _as_payload(graph: EntityGraph) -> dict[str, object]:
 
 
 def _render(graph: EntityGraph, persisted: tuple[int, int] | None) -> None:
-    """Print the human-readable entity graph."""
+    """Print the human-readable classified entity graph."""
     print("=" * 78)
-    print(" ENTITY GRAPH")
+    print(" ENTITY GRAPH (classified)")
     print("=" * 78)
     print(f" seed: {graph.seed}")
     print(
-        f" spine depth: {len(graph.spine)}  nodes: {len(graph.nodes)}  "
-        f"edges: {len(graph.edges)}  batches: {len(graph.batches)}"
+        f" nodes: {len(graph.nodes)}  edges: {len(graph.edges)}  "
+        f"batches: {len(graph.batches)}"
     )
-    print("\n SPINE (seed -> upstream):")
-    for index, node in enumerate(graph.spine):
-        print(
-            f"   {index:2d} [{node.role:6s}] {node.wallet}  sigs={node.signature_count}"
-        )
-    launchers = [n for n in graph.nodes if n.launch_count > 0]
-    print(f"\n WALLETS WITH LAUNCHES ({len(launchers)}):")
-    for node in sorted(launchers, key=lambda n: -n.launch_count)[:20]:
-        print(f"   {node.launch_count:>4} launches  {node.wallet}")
-    if not launchers:
-        print("   none discovered in this walk")
+    counts = Counter(node.wallet_class for node in graph.nodes)
+    summary = "  ".join(f"{key}={counts[key]}" for key in CLASS_HEADINGS if counts[key])
+    print(f" roles: {summary or 'none'}")
+    for wallet_class, heading in CLASS_HEADINGS.items():
+        members = [n for n in graph.nodes if n.wallet_class == wallet_class]
+        if not members:
+            continue
+        print(f"\n {heading} ({len(members)}):")
+        for node in sorted(members, key=lambda n: (-n.launch_count, -n.staged_sol)):
+            print(
+                f"   {node.wallet}  staged={node.staged_sol:.4f} SOL  "
+                f"in={node.inbound_count}  launches={node.launch_count}  "
+                f"depth={node.depth}"
+            )
     if graph.batches:
         print(f"\n FUNDING BATCHES ({len(graph.batches)}) - hit-and-run signature:")
         for batch in graph.batches:
@@ -216,8 +239,6 @@ def _render(graph: EntityGraph, persisted: tuple[int, int] | None) -> None:
                 f"   slot {batch.slot}: {len(batch.recipients)} wallets, "
                 f"{batch.total_sol:.4f} SOL total"
             )
-            for recipient in batch.recipients:
-                print(f"        {recipient}")
     if graph.warning:
         print(f"\n note: {graph.warning}")
     if persisted is not None:
@@ -237,8 +258,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         graph = discover_entity_graph(
             args.seed,
-            max_hops=args.max_hops,
-            max_funded_per_node=args.per_node,
+            spine_hops=args.spine_hops,
+            max_depth=args.depth,
+            max_nodes=args.max_nodes,
+            per_node=args.per_node,
             min_sol=args.min_sol,
             batch_min_recipients=args.batch_min,
             launch_lookup=_launch_lookup(enabled=not args.no_launches),

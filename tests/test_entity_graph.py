@@ -1,4 +1,4 @@
-"""Unit tests for entity-graph assembly and persistence (no network)."""
+"""Unit tests for entity-graph assembly, classification, and persistence."""
 
 from __future__ import annotations
 
@@ -8,16 +8,20 @@ from typing import Any
 from rugbot.integrations.rpc_access import RpcEndpoints
 from rugbot.storage.database import DatabaseManager
 from rugbot.storage.tracker import SQLiteTrackerRepository
-from rugbot.tracker.entity_graph import ROLE_FUNDED, discover_entity_graph
+from rugbot.tracker.entity_graph import (
+    WalletClass,
+    classify_wallet,
+    discover_entity_graph,
+)
 from rugbot.tracker.models import EntityEdgeRecord, EntityNodeRecord
 
 ENDPOINTS = RpcEndpoints(ordered=("http://seam",), source="test")
 LAMPORTS = 1_000_000_000
 
 
-def _fanout_tx(source: str, recipients: list[str], sol: float, slot: int) -> dict:
+def _tx(source: str, recipients: list[str], amount_sol: float) -> dict[str, Any]:
     """Build a parsed transaction where ``source`` pays every recipient."""
-    lamports = int(sol * LAMPORTS)
+    lamports = int(amount_sol * LAMPORTS)
     keys = [source, *recipients]
     return {
         "meta": {
@@ -28,83 +32,97 @@ def _fanout_tx(source: str, recipients: list[str], sol: float, slot: int) -> dic
             "postBalances": [5_000, *([lamports] * len(recipients))],
         },
         "transaction": {"message": {"accountKeys": keys}},
-        "_slot": slot,
     }
 
 
 def _transport(
     signatures: dict[str, list[dict[str, object]]],
     transactions: dict[str, dict[str, object]],
-    slots: dict[str, int] | None = None,
 ) -> Any:
     """Build a fake transport serving signatures and transactions by key."""
-    slot_map = slots or {}
 
     def transport(endpoint: str, method: str, params: list[object]) -> object:
         if method == "getSignaturesForAddress":
             return signatures.get(str(params[0]), [])
         if method == "getTransaction":
-            key = str(params[0])
-            payload = transactions.get(key)
-            if payload is None:
-                return None
-            slot = slot_map.get(key)
-            if slot is not None:
-                return {
-                    "meta": payload["meta"],
-                    "transaction": payload["transaction"],
-                    "slot": slot,
-                }
-            return payload
+            return transactions.get(str(params[0]))
         unexpected = f"unexpected method {method}"
         raise AssertionError(unexpected)
 
     return transport
 
 
-def test_discover_graph_detects_same_slot_batch() -> None:
-    """A one-slot fan-out to many wallets is reported as a funding batch."""
-    seed = "SEED"
-    recipients = ["A", "B", "C", "D"]
-    tx = _fanout_tx(seed, recipients, 0.5, 900)
-    signatures = {seed: [{"signature": "sig1", "slot": 900}]}
-    graph = discover_entity_graph(
-        seed,
-        max_hops=1,
-        launch_lookup=lambda wallet: 1 if wallet == "A" else 0,
-        endpoints=ENDPOINTS,
-        transport=_transport(signatures, {"sig1": tx}, {"sig1": 900}),
+def test_classify_wallet_applies_playbook_bands() -> None:
+    """Each playbook band maps to its deterministic role."""
+    assert (
+        classify_wallet(launch_count=1, staged_sol=0.0, inbound_count=1)
+        is WalletClass.ACTIVE_CREATOR
     )
-    assert len(graph.batches) == 1
-    assert graph.batches[0].slot == 900
-    assert set(graph.batches[0].recipients) == set(recipients)
-    assert graph.batches[0].total_sol == 2.0
+    assert (
+        classify_wallet(launch_count=0, staged_sol=12.0, inbound_count=3)
+        is WalletClass.TREASURY
+    )
+    assert (
+        classify_wallet(launch_count=0, staged_sol=2.5, inbound_count=1)
+        is WalletClass.NEXT_DEPLOYER
+    )
+    assert (
+        classify_wallet(launch_count=0, staged_sol=0.05, inbound_count=1)
+        is WalletClass.BUNDLED_BUYER
+    )
+    assert (
+        classify_wallet(launch_count=0, staged_sol=0.0, inbound_count=0)
+        is WalletClass.UNCLASSIFIED
+    )
 
 
-def test_discover_graph_annotates_launch_counts_and_roles() -> None:
-    """Spine wallets keep their walk role; funded wallets resolve launch counts."""
-    seed = "SEED"
-    tx = _fanout_tx(seed, ["A", "B"], 0.4, 700)
-    signatures = {seed: [{"signature": "s1", "slot": 700}]}
-    counts = {"A": 3, "B": 0}
+def test_discover_graph_expands_both_directions_and_classifies() -> None:
+    """Outbound recipients and the inbound funder are both graphed."""
+    signatures = {
+        "SEED": [
+            {"signature": "fanout", "slot": 900},
+            {"signature": "inbound", "slot": 800},
+        ],
+    }
+    transactions = {
+        "fanout": _tx("SEED", ["PAID1", "PAID2"], 0.5),
+        "inbound": _tx("FUNDER", ["SEED"], 1.0),
+    }
+    counts = {"SEED": 2}
     graph = discover_entity_graph(
-        seed,
-        max_hops=1,
+        "SEED",
+        max_depth=1,
         launch_lookup=counts.get,
         endpoints=ENDPOINTS,
-        transport=_transport(signatures, {"s1": tx}, {"s1": 700}),
+        transport=_transport(signatures, transactions),
     )
     by_wallet = {node.wallet: node for node in graph.nodes}
-    assert by_wallet["SEED"].role == "origin"
-    assert by_wallet["A"].role == ROLE_FUNDED
-    assert by_wallet["A"].launch_count == 3
-    assert by_wallet["B"].launch_count == 0
+    assert set(by_wallet) == {"SEED", "PAID1", "PAID2", "FUNDER"}
+    assert by_wallet["SEED"].wallet_class == WalletClass.ACTIVE_CREATOR.value
+    assert by_wallet["PAID1"].wallet_class == WalletClass.NEXT_DEPLOYER.value
+    assert by_wallet["PAID1"].staged_sol == 0.5
+    assert by_wallet["PAID2"].depth == 1
+    assert by_wallet["FUNDER"].wallet_class == WalletClass.UNCLASSIFIED.value
 
 
-def test_discover_graph_dedupes_repeated_recipient_in_one_slot() -> None:
-    """A wallet funded twice in the same slot counts once in the batch."""
-    source = "SEED"
-    keys = [source, "A", "A", "B", "C"]
+def test_discover_graph_respects_node_cap() -> None:
+    """The node cap stops expansion and raises the truncation warning."""
+    signatures = {"SEED": [{"signature": "fanout", "slot": 10}]}
+    transactions = {"fanout": _tx("SEED", ["A", "B", "C", "D"], 0.5)}
+    graph = discover_entity_graph(
+        "SEED",
+        max_depth=2,
+        max_nodes=2,
+        endpoints=ENDPOINTS,
+        transport=_transport(signatures, transactions),
+    )
+    assert len(graph.nodes) <= 3
+    assert graph.warning is not None
+
+
+def test_discover_graph_detects_and_dedupes_batch() -> None:
+    """A same-slot fan-out counts each recipient once."""
+    keys = ["SEED", "A", "A", "B", "C"]
     lamports = int(0.5 * LAMPORTS)
     tx = {
         "meta": {
@@ -113,30 +131,17 @@ def test_discover_graph_dedupes_repeated_recipient_in_one_slot() -> None:
         },
         "transaction": {"message": {"accountKeys": keys}},
     }
-    signatures = {source: [{"signature": "s", "slot": 42}]}
+    signatures = {"SEED": [{"signature": "s", "slot": 42}]}
     graph = discover_entity_graph(
-        source,
-        max_hops=1,
+        "SEED",
+        max_depth=1,
         batch_min_recipients=3,
         endpoints=ENDPOINTS,
-        transport=_transport(signatures, {"s": tx}, {"s": 42}),
+        transport=_transport(signatures, {"s": tx}),
     )
     assert len(graph.batches) == 1
     assert sorted(graph.batches[0].recipients) == ["A", "B", "C"]
     assert graph.batches[0].total_sol == 2.0
-
-
-def test_discover_graph_without_lookup_leaves_counts_zero() -> None:
-    """Skipping the launch lookup still produces a graph with zero counts."""
-    tx = _fanout_tx("SEED", ["A"], 0.3, 100)
-    signatures = {"SEED": [{"signature": "s", "slot": 100}]}
-    graph = discover_entity_graph(
-        "SEED",
-        max_hops=1,
-        endpoints=ENDPOINTS,
-        transport=_transport(signatures, {"s": tx}, {"s": 100}),
-    )
-    assert all(node.launch_count == 0 for node in graph.nodes)
 
 
 def _repo(tmp_path: Path) -> SQLiteTrackerRepository:
