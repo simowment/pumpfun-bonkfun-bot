@@ -59,6 +59,7 @@ rug_backtest = "rugbot.interfaces.cli.backtest:main"
 rug_entity_watch = "rugbot.interfaces.cli.entity_watch:main"
 rug_pairs_lab = "rugbot.interfaces.cli.pairs_lab:main"
 rug_trade = "rugbot.interfaces.cli.trade:main"
+rug_chain = "rugbot.interfaces.cli.chain:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]
