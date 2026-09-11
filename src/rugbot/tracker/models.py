@@ -114,6 +114,36 @@ class OperatorCandidateRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class EntityNodeRecord:
+    """One wallet observed while graphing one operator entity.
+
+    Accumulated across runs: ``launch_count`` keeps the maximum observed and
+    ``first_seen_at`` is preserved while ``last_seen_at`` advances, so a
+    later, shallower walk cannot erase an earlier discovery.
+    """
+
+    wallet: str
+    seed: str
+    role: str
+    launch_count: int
+    first_seen_at: str
+    last_seen_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class EntityEdgeRecord:
+    """One observed funding transfer between two entity wallets."""
+
+    signature: str
+    from_wallet: str
+    to_wallet: str
+    amount_lamports: int
+    slot: int
+    seed: str
+    first_seen_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class BundleParticipationRecord:
     """One wallet's finalized creation-slot buy on one confirmed entity launch."""
 
@@ -132,7 +162,9 @@ __all__ = [
     "BundleParticipationRecord",
     "EntityBackfillRecord",
     "EntityBackfillStatus",
+    "EntityEdgeRecord",
     "EntityGraphSnapshotRecord",
+    "EntityNodeRecord",
     "FunderRecord",
     "FundingEdge",
     "FundingHop",

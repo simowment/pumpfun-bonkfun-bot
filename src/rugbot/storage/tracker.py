@@ -11,7 +11,9 @@ from rugbot.tracker.models import (
     BundleParticipationRecord,
     EntityBackfillRecord,
     EntityBackfillStatus,
+    EntityEdgeRecord,
     EntityGraphSnapshotRecord,
+    EntityNodeRecord,
     FunderRecord,
     LaunchRecord,
     OperatorCandidateRecord,
@@ -106,6 +108,28 @@ class SQLiteTrackerRepository:
             );
             CREATE INDEX IF NOT EXISTS idx_tracker_operator_candidates_entity
                 ON tracker_operator_candidates (source_entity);
+            CREATE TABLE IF NOT EXISTS tracker_entity_nodes (
+                wallet TEXT PRIMARY KEY,
+                seed TEXT NOT NULL,
+                role TEXT NOT NULL,
+                launch_count INTEGER NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tracker_entity_nodes_seed
+                ON tracker_entity_nodes (seed);
+            CREATE TABLE IF NOT EXISTS tracker_entity_edges (
+                signature TEXT NOT NULL,
+                from_wallet TEXT NOT NULL,
+                to_wallet TEXT NOT NULL,
+                amount_lamports INTEGER NOT NULL,
+                slot INTEGER NOT NULL,
+                seed TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                PRIMARY KEY (signature, from_wallet, to_wallet)
+            );
+            CREATE INDEX IF NOT EXISTS idx_tracker_entity_edges_seed
+                ON tracker_entity_edges (seed);
 
             CREATE TABLE IF NOT EXISTS tracker_wallets (
                 address TEXT PRIMARY KEY,
@@ -692,6 +716,97 @@ class SQLiteTrackerRepository:
                 (source_entity,),
             ).fetchall()
         return tuple(_operator_candidate_from_row(row) for row in rows)
+
+    def save_entity_nodes(self, nodes: list[EntityNodeRecord]) -> int:
+        """Merge entity-graph wallets, keeping the max launch count seen.
+
+        ``first_seen_at`` is preserved on conflict so a later, shallower walk
+        never loses the original discovery time.
+        """
+        if not nodes:
+            return 0
+        self._db.connection.executemany(
+            """
+            INSERT INTO tracker_entity_nodes (
+                wallet, seed, role, launch_count, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(wallet) DO UPDATE SET
+                seed = excluded.seed,
+                role = excluded.role,
+                launch_count = MAX(
+                    tracker_entity_nodes.launch_count,
+                    excluded.launch_count
+                ),
+                last_seen_at = excluded.last_seen_at
+            """,
+            [
+                (
+                    node.wallet,
+                    node.seed,
+                    node.role,
+                    node.launch_count,
+                    node.first_seen_at,
+                    node.last_seen_at,
+                )
+                for node in nodes
+            ],
+        )
+        return len(nodes)
+
+    def save_entity_edges(self, edges: list[EntityEdgeRecord]) -> int:
+        """Record observed funding edges, ignoring ones already known."""
+        if not edges:
+            return 0
+        self._db.connection.executemany(
+            """
+            INSERT OR IGNORE INTO tracker_entity_edges (
+                signature, from_wallet, to_wallet, amount_lamports, slot,
+                seed, first_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    edge.signature,
+                    edge.from_wallet,
+                    edge.to_wallet,
+                    edge.amount_lamports,
+                    edge.slot,
+                    edge.seed,
+                    edge.first_seen_at,
+                )
+                for edge in edges
+            ],
+        )
+        return len(edges)
+
+    def get_entity_nodes(self, seed: str | None = None) -> tuple[EntityNodeRecord, ...]:
+        """Fetch persisted entity-graph wallets, optionally scoped to a seed."""
+        if seed is None:
+            rows = self._db.connection.execute(
+                "SELECT * FROM tracker_entity_nodes ORDER BY launch_count DESC, wallet"
+            ).fetchall()
+        else:
+            rows = self._db.connection.execute(
+                """
+                SELECT * FROM tracker_entity_nodes
+                WHERE seed = ? ORDER BY launch_count DESC, wallet
+                """,
+                (seed,),
+            ).fetchall()
+        return tuple(_entity_node_from_row(row) for row in rows)
+
+    def get_entity_edges(self, seed: str | None = None) -> tuple[EntityEdgeRecord, ...]:
+        """Fetch persisted entity-graph funding edges, optionally scoped."""
+        if seed is None:
+            rows = self._db.connection.execute(
+                "SELECT * FROM tracker_entity_edges ORDER BY slot"
+            ).fetchall()
+        else:
+            rows = self._db.connection.execute(
+                "SELECT * FROM tracker_entity_edges WHERE seed = ? ORDER BY slot",
+                (seed,),
+            ).fetchall()
+        return tuple(_entity_edge_from_row(row) for row in rows)
 
     # --- Wallets ---
 
@@ -1321,6 +1436,33 @@ def _entity_backfill_from_row(row: sqlite3.Row) -> EntityBackfillRecord:
         report_json=row["report_json"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+    )
+
+
+def _entity_node_from_row(row: sqlite3.Row) -> EntityNodeRecord:
+    """Decode one persisted entity-graph node row."""
+
+    return EntityNodeRecord(
+        wallet=row["wallet"],
+        seed=row["seed"],
+        role=row["role"],
+        launch_count=row["launch_count"],
+        first_seen_at=row["first_seen_at"],
+        last_seen_at=row["last_seen_at"],
+    )
+
+
+def _entity_edge_from_row(row: sqlite3.Row) -> EntityEdgeRecord:
+    """Decode one persisted entity-graph edge row."""
+
+    return EntityEdgeRecord(
+        signature=row["signature"],
+        from_wallet=row["from_wallet"],
+        to_wallet=row["to_wallet"],
+        amount_lamports=row["amount_lamports"],
+        slot=row["slot"],
+        seed=row["seed"],
+        first_seen_at=row["first_seen_at"],
     )
 
 
