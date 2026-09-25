@@ -58,6 +58,30 @@ EXIT_MAX_HOLD = "max_hold"
 EXIT_END_OF_DATA = "end_of_data"
 
 
+# Tolerance when matching a coin's curve invariant to the standard curve.
+CURVE_INVARIANT_TOLERANCE = 0.01
+
+
+def nonstandard_curve_reason(
+    curve_invariant: int | None, *, mayhem: bool
+) -> str | None:
+    """Return why a coin cannot be replayed on the standard curve, if it can't.
+
+    Mayhem-mode coins are traded by Pump's protocol agent on inflated virtual
+    reserves with almost no real SOL, so standard-curve fills would be fiction.
+    """
+    if mayhem:
+        return "Mayhem-mode coin (protocol agent, no real curve liquidity)"
+    if curve_invariant is None:
+        return "curve reserves unavailable"
+    if (
+        abs(curve_invariant - CURVE_INVARIANT)
+        > CURVE_INVARIANT * CURVE_INVARIANT_TOLERANCE
+    ):
+        return "non-standard bonding curve"
+    return None
+
+
 class LaunchReplayError(ValueError):
     """Trade history cannot be narrowed into a replayable launch."""
 

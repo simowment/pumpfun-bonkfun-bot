@@ -15,6 +15,7 @@ import json
 import statistics
 import sys
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ from rugbot.backtest.launch_replay import (
     ReplayCosts,
     RuleSummary,
     default_exit_rules,
+    nonstandard_curve_reason,
     summarize_rules,
     trades_from_swap_api,
 )
@@ -274,6 +276,9 @@ def _replays(
     client = get_client()
 
     def build(event: LaunchEvent) -> LaunchReplay | str:
+        reason = nonstandard_curve_reason(event.curve_invariant, mayhem=event.mayhem)
+        if reason is not None:
+            return f"{event.symbol or event.mint[:8]}: {reason}"
         try:
             trades = trades_from_swap_api(client.fetch_all_trades(event.mint))
             return LaunchReplay(
@@ -358,8 +363,10 @@ def _render_backtest(
             f"   (comparison) {_describe_rule(dev_rule)}: "
             f"win {dev_rule.winrate:.0%}  EV {dev_rule.net_ev_sol:+.4f} SOL"
         )
-    for reason in skipped:
-        print(f"   skipped {reason}")
+    for reason, count in Counter(
+        entry.split(": ", 1)[-1] for entry in skipped
+    ).most_common():
+        print(f"   skipped {count} launch(es): {reason}")
 
 
 def _export_plot(funder: str, summary: RuleSummary, stake_sol: float) -> Path:

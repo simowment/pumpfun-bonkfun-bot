@@ -46,6 +46,8 @@ class LaunchEvent:
     received_sol: float
     funding_slot: int | None
     funded_at_s: int | None = None
+    curve_invariant: int | None = None
+    mayhem: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +107,8 @@ def _coin_event(
     symbol = coin.get("symbol")
     name = coin.get("name")
     created = coin.get("created_timestamp")
+    virtual_sol = coin.get("virtual_sol_reserves")
+    virtual_tokens = coin.get("virtual_token_reserves")
     return LaunchEvent(
         mint=mint,
         symbol=symbol if isinstance(symbol, str) else "",
@@ -114,6 +118,12 @@ def _coin_event(
         created_at_ms=created if isinstance(created, int) else None,
         received_sol=received_sol,
         funding_slot=funding_slot,
+        curve_invariant=(
+            virtual_sol * virtual_tokens
+            if isinstance(virtual_sol, int) and isinstance(virtual_tokens, int)
+            else None
+        ),
+        mayhem=bool(coin.get("mayhem_state")),
     )
 
 
