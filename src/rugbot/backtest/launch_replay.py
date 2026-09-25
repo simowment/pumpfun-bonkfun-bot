@@ -241,7 +241,7 @@ def _sell_lamports(trade: LaunchTrade, tokens: int) -> tuple[int, int]:
 class LaunchReplay:
     """Replay one launch: realistic entry once, then any number of exit rules."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - keyword-only replay inputs
         self,
         mint: str,
         *,
@@ -249,8 +249,21 @@ class LaunchReplay:
         creator: str,
         trades: Sequence[LaunchTrade],
         costs: ReplayCosts,
+        entry_slot: int | None = None,
+        signal_wallets: frozenset[str] | None = None,
     ) -> None:
         """Fix the entry for a launch.
+
+        Args:
+            mint: Coin mint.
+            create_slot: Creation slot.
+            creator: Creator wallet.
+            trades: Full oldest-first trade history.
+            costs: Execution settings and costs.
+            entry_slot: Slot our buy lands in; defaults to create + entry delay
+                (sniping). Copy-trading passes leader buy slot + delay.
+            signal_wallets: Wallets whose sells trigger the sell-signal exit;
+                defaults to the creator and block-0 buyers (insiders).
 
         Raises:
             LaunchReplayError: When no trade exists at or after the entry slot.
@@ -259,12 +272,16 @@ class LaunchReplay:
         self.costs = costs
         self._trades = list(trades)
         self._slots = [trade.slot for trade in self._trades]
-        self._insiders = {creator} | {
-            trade.wallet
-            for trade in self._trades
-            if trade.slot == create_slot and trade.is_buy
-        }
-        entry_slot = create_slot + costs.entry_delay_slots
+        self._insiders = signal_wallets or frozenset(
+            {creator}
+            | {
+                trade.wallet
+                for trade in self._trades
+                if trade.slot == create_slot and trade.is_buy
+            }
+        )
+        if entry_slot is None:
+            entry_slot = create_slot + costs.entry_delay_slots
         self._entry_index = bisect.bisect_right(self._slots, entry_slot) - 1
         if self._entry_index < 0 or self._entry_index == len(self._trades) - 1:
             raise LaunchReplayError(f"{mint}: no trading after entry slot")  # noqa: TRY003

@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import json
 import sys
+from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING
 from rugbot.discover.collector import run_collect
 
 if TYPE_CHECKING:
+    from rugbot.backtest.launch_replay import LaunchTrade
     from rugbot.discover.ruggers import RuggerEvidence
 
 
@@ -237,6 +239,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="state directory (default: .state/discover)",
     )
 
+    wallets = sub.add_parser(
+        "wallets",
+        help="bible Method 2: score wallets across collected launches and "
+        "copy-backtest the most reliable ones",
+    )
+    wallets.add_argument(
+        "--min-age-minutes",
+        type=float,
+        default=60.0,
+        help="only launches at least this old, so outcomes are known (default 60)",
+    )
+    wallets.add_argument(
+        "--max-launches", type=int, default=300, help="launches scanned (default 300)"
+    )
+    wallets.add_argument(
+        "--min-launches",
+        type=int,
+        default=5,
+        help="minimum launches a wallet traded to be scored (default 5)",
+    )
+    wallets.add_argument(
+        "--top", type=int, default=10, help="wallets shown and copy-backtested"
+    )
+    wallets.add_argument(
+        "--copy-delay",
+        type=int,
+        default=2,
+        help="slots between the leader's buy and our copy landing (default 2)",
+    )
+    wallets.add_argument("--size", type=float, default=0.1, help="copy size in SOL")
+    wallets.add_argument(
+        "--state-dir",
+        type=Path,
+        default=Path(".state/discover"),
+        help="state directory (default: .state/discover)",
+    )
+
     status = sub.add_parser(
         "status", help="PID alive, health last_heartbeat, launches count"
     )
@@ -249,6 +288,137 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _load_launch_trades(
+    state_dir: Path, *, min_age_minutes: float, max_launches: int
+) -> tuple[dict[str, tuple[str, list[LaunchTrade]]], Counter[str]]:
+    """Fetch full trade histories of old-enough standard-curve collected launches.
+
+    Returns:
+        ``({mint: (creator, trades)}, skip_reason_counts)``.
+    """
+    import sqlite3
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import UTC, datetime, timedelta
+
+    from rugbot.backtest.launch_replay import (
+        LaunchReplayError,
+        nonstandard_curve_reason,
+        trades_from_swap_api,
+    )
+    from rugbot.integrations.pumpfun_api import PumpFunApiError, get_client
+
+    cutoff = (datetime.now(UTC) - timedelta(minutes=min_age_minutes)).isoformat()
+    with sqlite3.connect(state_dir / "rugbot.db") as connection:
+        rows = connection.execute(
+            "SELECT mint, creator FROM discover_launches WHERE created_at <= ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (cutoff, max_launches),
+        ).fetchall()
+    client = get_client()
+
+    def load(row: tuple[str, str]) -> tuple[str, str, list[LaunchTrade] | str]:
+        mint, creator = row
+        token = client.fetch_token(mint)
+        reserves = (
+            token.get("virtual_sol_reserves"),
+            token.get("virtual_token_reserves"),
+        )
+        invariant = (
+            reserves[0] * reserves[1]
+            if all(isinstance(value, int) for value in reserves)
+            else None
+        )
+        reason = nonstandard_curve_reason(
+            invariant, mayhem=bool(token.get("mayhem_state"))
+        )
+        if reason is not None:
+            return mint, creator, reason
+        try:
+            return mint, creator, trades_from_swap_api(client.fetch_all_trades(mint))
+        except (PumpFunApiError, LaunchReplayError, OSError) as error:
+            return mint, creator, f"trade history unavailable: {type(error).__name__}"
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        loaded = list(pool.map(load, rows))
+    launches = {
+        mint: (creator, trades)
+        for mint, creator, trades in loaded
+        if isinstance(trades, list) and trades
+    }
+    skipped = Counter(trades for _, _, trades in loaded if isinstance(trades, str))
+    return launches, skipped
+
+
+def _run_wallets(args: argparse.Namespace) -> int:
+    """Score wallets across collected launches and copy-backtest the best."""
+    from rugbot.backtest.launch_replay import (
+        LaunchReplay,
+        LaunchReplayError,
+        ReplayCosts,
+        default_exit_rules,
+        summarize_rules,
+    )
+    from rugbot.discover.smart_wallets import score_wallets, wallet_launches
+
+    launches, skipped = _load_launch_trades(
+        args.state_dir,
+        min_age_minutes=args.min_age_minutes,
+        max_launches=args.max_launches,
+    )
+    scores = score_wallets(
+        (wallet_launches(mint, trades) for mint, (_, trades) in launches.items()),
+        min_launches=args.min_launches,
+    )
+    print(f"launches scanned {len(launches)}   wallets scored {len(scores)}")
+    for reason, count in skipped.most_common():
+        print(f"  skipped {count} launch(es): {reason}")
+    costs = ReplayCosts(quote_size_sol=args.size)
+    for score in scores[: args.top]:
+        print(
+            f"\n{score.wallet}  launches {len(score.launches)}  win {score.winrate:.0%} "
+            f"(floor {score.winrate_floor:.0%})  realized {score.total_pnl_sol:+.3f} SOL  "
+            f"median entry +{score.median_entry_delay_slots:.0f} slots  "
+            f"early {score.early_share:.0%}"
+        )
+        replays = []
+        for activity in score.launches:
+            creator, trades = launches[activity.mint]
+            try:
+                replays.append(
+                    LaunchReplay(
+                        activity.mint,
+                        create_slot=trades[0].slot,
+                        creator=creator,
+                        trades=trades,
+                        costs=costs,
+                        entry_slot=activity.first_buy_slot + args.copy_delay,
+                        signal_wallets=frozenset({score.wallet}),
+                    )
+                )
+            except LaunchReplayError:
+                continue
+        if not replays:
+            print("  copy backtest: no replayable launches")
+            continue
+        summaries = summarize_rules(replays, default_exit_rules())
+        best = summaries[0]
+        mirror = next(s for s in summaries if s.rule.exit_on_dev_sell)
+        rule = best.rule
+        label = (
+            "mirror leader sell"
+            if rule.exit_on_dev_sell
+            else f"TP {rule.take_profit_pct}% SL {rule.stop_loss_pct}% "
+            f"hold {rule.max_hold_s}s"
+        )
+        print(
+            f"  copy +{args.copy_delay} slots, N={best.samples}: best [{label}] "
+            f"win {best.winrate:.0%} cons.EV {best.conservative_ev_sol:+.4f} "
+            f"EV {best.net_ev_sol:+.4f} EV-best {best.ev_without_best_sol:+.4f} SOL | "
+            f"mirror-sell EV {mirror.net_ev_sol:+.4f} (cons {mirror.conservative_ev_sol:+.4f})"
+        )
+    return 0
 
 
 def _print_status(state_dir: Path, as_json: bool) -> int:
@@ -671,6 +841,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"tokens traded: {report['participating_token_count']}")
         return 0
+    if args.command == "wallets":
+        return _run_wallets(args)
     if args.command == "status":
         state_dir: Path = args.state_dir
         as_json: bool = bool(args.json)
