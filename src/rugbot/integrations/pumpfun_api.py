@@ -35,8 +35,14 @@ PUMPFUN_FRONTEND_API_BASE = "https://frontend-api-v3.pump.fun"
 PUMPFUN_ORIGIN = "https://pump.fun"
 PUMP_PROGRAM_ID_STR = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 _TRADE_EVENT_DISCRIMINATOR = bytes([189, 219, 127, 211, 78, 230, 97, 238])
+TOKEN_CACHE_TTL_SECONDS = 300.0
+USER_COINS_CACHE_TTL_SECONDS = 120.0
+RECENT_LAUNCHES_CACHE_TTL_SECONDS = 60.0
+SOL_PRICE_CACHE_TTL_SECONDS = 60.0
+CANDLESTICK_CACHE_TTL_SECONDS = 60.0
 DEFAULT_CANDLESTICK_LIMIT = 300
 HTTP_OK = 200
+HTTP_NOT_FOUND = 404
 MS_PER_SECOND = 1000
 GECKOTERMINAL_OHLCV_FIELDS = 6
 SECONDS_PER_MINUTE = 60
@@ -101,6 +107,53 @@ class PumpFunApiClient:
         self._base_url = base_url
         self._page_cache = page_cache
 
+    def _cached_json(
+        self,
+        cache_key: str,
+        params: object,
+        url: str,
+        *,
+        ttl: float,
+    ) -> object | None:
+        """Return a cached pump.fun GET payload or fetch and store it.
+
+        Args:
+            cache_key: Cache namespace for this read type.
+            params: Canonical params identifying the request.
+            url: Full HTTPS URL to fetch on a cache miss.
+            ttl: Bounded TTL in seconds for the stored response.
+
+        Returns:
+            The decoded JSON payload (dict or list) on success.
+        """
+        cache = self._page_cache
+        if cache is None:
+            try:
+                from rugbot.tracker.funder_discovery import (
+                    get_shared_rpc_cache,
+                )
+
+                cache = get_shared_rpc_cache()
+            except Exception:
+                cache = None
+        if cache is not None:
+            try:
+                hit = cache.lookup(cache_key, params)
+            except Exception:
+                hit = None
+            if isinstance(hit, dict):
+                if "result" in hit:
+                    return hit["result"]
+                return hit
+        resp = _http_json(url)
+        if cache is not None and isinstance(resp, (dict, list)):
+            try:
+                payload = resp if isinstance(resp, dict) else {"result": resp}
+                cache.store(cache_key, params, payload, ttl_override=ttl)
+            except Exception:
+                logger.debug("Pump.fun cache store failed for %s", cache_key)
+        return resp
+
     def fetch_candlesticks(
         self,
         mint: str,
@@ -121,11 +174,22 @@ class PumpFunApiClient:
             f"?createdTs={created_ts}&interval={interval}&limit={limit}"
         )
         try:
-            resp = _http_json(url)
+            resp = self._cached_json(
+                "pumpfun/candles",
+                {
+                    "mint": mint,
+                    "interval": interval,
+                    "limit": limit,
+                    "created_ts": created_ts,
+                },
+                url,
+                ttl=CANDLESTICK_CACHE_TTL_SECONDS,
+            )
             if isinstance(resp, list):
                 return resp
             if isinstance(resp, dict):
-                return resp.get("candlesticks", [])
+                candles = resp.get("candlesticks", [])
+                return candles if isinstance(candles, list) else []
             return []
         except urllib.error.HTTPError as exc:
             logger.warning(
@@ -212,13 +276,25 @@ class PumpFunApiClient:
         """
         url = f"{PUMPFUN_FRONTEND_API_BASE}/coins/{mint}"
         try:
-            resp = _http_json(url)
+            resp = self._cached_json(
+                "pumpfun/token",
+                {"mint": mint},
+                url,
+                ttl=TOKEN_CACHE_TTL_SECONDS,
+            )
             return resp if isinstance(resp, dict) else {}
         except urllib.error.HTTPError as exc:
-            logger.warning("Pump.fun API token fetch failed (%s): %s", exc.code, exc)
+            if exc.code == HTTP_NOT_FOUND:
+                logger.debug(
+                    "Pump.fun API token fetch 404 (non-pump or unindexed mint %s)", mint
+                )
+            else:
+                logger.warning(
+                    "Pump.fun API token fetch failed (%s): %s", exc.code, exc
+                )
             return {}
         except Exception as exc:
-            logger.warning("Pump.fun API request failed: %s", exc)
+            logger.debug("Pump.fun API request failed for %s: %s", mint, exc)
             return {}
 
     def fetch_user_created_coins(
@@ -242,7 +318,12 @@ class PumpFunApiClient:
             f"{creator_wallet}?limit={limit}&offset={offset}"
         )
         try:
-            resp = _http_json(url)
+            resp = self._cached_json(
+                "pumpfun/user-created-coins",
+                {"creator": creator_wallet, "limit": limit, "offset": offset},
+                url,
+                ttl=USER_COINS_CACHE_TTL_SECONDS,
+            )
             if isinstance(resp, dict):
                 return {
                     "limit": resp.get("limit", limit),
@@ -262,6 +343,54 @@ class PumpFunApiClient:
             logger.warning("Pump.fun API request failed: %s", exc)
             return {"limit": limit, "offset": offset, "count": 0, "coins": []}
 
+    def fetch_recent_launches(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        sort: str = "created_timestamp",
+    ) -> list[dict]:
+        """Return launches from the frontend listing feed sorted by requested field.
+
+        Args:
+            limit: Maximum coins to return.
+            offset: Pagination offset.
+            sort: Sort field (e.g. 'created_timestamp', 'market_cap', 'last_trade_timestamp').
+
+        Returns:
+            List of coin dicts with ``mint``, ``creator`` and
+            ``created_timestamp`` keys (plus ``market_cap`` /
+            ``usd_market_cap`` / ``ath_market_cap`` when present).
+            Empty list on failure.
+        """
+        url = (
+            f"{PUMPFUN_FRONTEND_API_BASE}/coins?sort={sort}"
+            f"&order=DESC&limit={limit}&offset={offset}&includeNsfw=false"
+        )
+        try:
+            resp = self._cached_json(
+                "pumpfun/recent-launches",
+                {"limit": limit, "offset": offset, "sort": sort},
+                url,
+                ttl=RECENT_LAUNCHES_CACHE_TTL_SECONDS,
+            )
+            if isinstance(resp, list):
+                return [c for c in resp if isinstance(c, dict)]
+            if isinstance(resp, dict):
+                coins = resp.get("coins", [])
+                return [c for c in coins if isinstance(c, dict)]
+            return []
+        except urllib.error.HTTPError as exc:
+            logger.warning(
+                "Pump.fun API recent launches fetch failed (%s): %s",
+                exc.code,
+                exc,
+            )
+            return []
+        except Exception as exc:
+            logger.warning("Pump.fun API request failed: %s", exc)
+            return []
+
     def fetch_sol_price(self) -> dict:
         """Return current SOL price.
 
@@ -271,7 +400,12 @@ class PumpFunApiClient:
         """
         url = f"{PUMPFUN_FRONTEND_API_BASE}/sol-price"
         try:
-            resp = _http_json(url)
+            resp = self._cached_json(
+                "pumpfun/sol-price",
+                {"key": "sol-price"},
+                url,
+                ttl=SOL_PRICE_CACHE_TTL_SECONDS,
+            )
             return resp if isinstance(resp, dict) else {}
         except urllib.error.HTTPError as exc:
             logger.warning(

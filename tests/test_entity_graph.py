@@ -9,6 +9,7 @@ from rugbot.integrations.rpc_access import RpcEndpoints
 from rugbot.storage.database import DatabaseManager
 from rugbot.storage.tracker import SQLiteTrackerRepository
 from rugbot.tracker.entity_graph import (
+    EntityGraph,
     WalletClass,
     classify_wallet,
     discover_entity_graph,
@@ -196,3 +197,39 @@ def test_entity_edges_ignore_duplicates(tmp_path: Path) -> None:
     repo.save_entity_edges([_edge("sig-1", "A", "B")])
     repo.save_entity_edges([_edge("sig-1", "A", "B")])
     assert len(repo.get_entity_edges("SEED")) == 1
+
+
+def test_on_progress_snapshots_are_subsets_of_final_graph() -> None:
+    """Each progress snapshot stays within the final graph for the seed."""
+    signatures = {
+        "SEED": [
+            {"signature": "fanout", "slot": 900},
+            {"signature": "inbound", "slot": 800},
+        ],
+    }
+    transactions = {
+        "fanout": _tx("SEED", ["PAID1", "PAID2"], 0.5),
+        "inbound": _tx("FUNDER", ["SEED"], 1.0),
+    }
+    seen: list[EntityGraph] = []
+    graph = discover_entity_graph(
+        "SEED",
+        max_depth=1,
+        launch_lookup={"SEED": 2}.get,
+        endpoints=ENDPOINTS,
+        transport=_transport(signatures, transactions),
+        on_progress=seen.append,
+    )
+    assert len(seen) >= 1
+    final_nodes = {node.wallet for node in graph.nodes}
+    final_edges = {
+        (edge.from_wallet, edge.to_wallet, edge.signature) for edge in graph.edges
+    }
+    for snapshot in seen:
+        assert isinstance(snapshot, EntityGraph)
+        assert snapshot.seed == "SEED"
+        assert {node.wallet for node in snapshot.nodes} <= final_nodes
+        assert {
+            (edge.from_wallet, edge.to_wallet, edge.signature)
+            for edge in snapshot.edges
+        } <= final_edges

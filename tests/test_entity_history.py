@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from rugbot.integrations.rpc_access import RpcEndpoints
-from rugbot.tracker.entity_history import build_launch_history
+from rugbot.tracker.entity_history import build_launch_history, merge_launch_histories
 from rugbot.tracker.funding_chain import FundedTransfer, enumerate_funded_paged
 
 ENDPOINTS = RpcEndpoints(ordered=("http://seam",), source="test")
@@ -156,3 +156,76 @@ def test_paged_enumeration_applies_upper_band() -> None:
         transport=_paged_transport(pages, transactions),
     )
     assert transfers == ()
+
+
+def test_paged_enumeration_all_pages_exhausts_cursor() -> None:
+    """max_pages=None walks the before cursor until an empty page."""
+    pages = {
+        None: [{"signature": "s1", "slot": 400}],
+        "s1": [{"signature": "s2", "slot": 300}],
+        "s2": [{"signature": "s3", "slot": 200}],
+        "s3": [{"signature": "s4", "slot": 100}],
+    }
+    transactions = {
+        "s1": _pay_tx("FUNDER", "BURNER_1", 1.0),
+        "s2": _pay_tx("FUNDER", "BURNER_2", 1.0),
+        "s3": _pay_tx("FUNDER", "BURNER_3", 1.0),
+        "s4": _pay_tx("FUNDER", "BURNER_4", 1.0),
+    }
+
+    def run(max_pages: int | None):
+        return enumerate_funded_paged(
+            "FUNDER",
+            max_pages=max_pages,
+            max_transactions=20,
+            min_sol=0.2,
+            max_sol=5.0,
+            endpoints=ENDPOINTS,
+            transport=_paged_transport(pages, transactions),
+        )
+
+    all_transfers = run(None)
+    assert {t.recipient for t in all_transfers} == {
+        "BURNER_1",
+        "BURNER_2",
+        "BURNER_3",
+        "BURNER_4",
+    }
+    limited = run(2)
+    assert {t.recipient for t in limited} == {"BURNER_1", "BURNER_2"}
+    assert len(limited) < len(all_transfers)
+
+
+def test_merge_launch_histories_dedupes_across_funders() -> None:
+    """Cross-funder merge dedupes by mint, keeping first-funder attribution."""
+    first = build_launch_history(
+        "FUNDER_A",
+        transfers=[
+            _transfer("BURNER_A", 1.0, 10, "sa"),
+            _transfer("BURNER_SHARED", 1.0, 11, "ss"),
+        ],
+        launch_fetch={
+            "BURNER_A": [_coin("mintA", "A", 300)],
+            "BURNER_SHARED": [_coin("shared", "S", 100)],
+        }.get,
+    )
+    second = build_launch_history(
+        "FUNDER_B",
+        transfers=[
+            _transfer("BURNER_B", 1.0, 12, "sb"),
+            _transfer("BURNER_DUP", 1.0, 13, "sd"),
+        ],
+        launch_fetch={
+            "BURNER_B": [_coin("mintB", "B", 200)],
+            "BURNER_DUP": [_coin("shared", "S", 100)],
+        }.get,
+    )
+    merged = merge_launch_histories([first, second])
+    assert merged.funders == ("FUNDER_A", "FUNDER_B")
+    assert [event.mint for event in merged.launches] == [
+        "shared",
+        "mintB",
+        "mintA",
+    ]
+    assert next(e for e in merged.launches if e.mint == "shared").funder == ("FUNDER_A")
+    assert merged.recipients == first.recipients + second.recipients

@@ -16,6 +16,12 @@ from rugbot.domain.quote_engine import (
 from rugbot.domain.quotes import QuotePath
 from rugbot.utils.logger import get_logger
 
+_FIXED_STOP_SCENARIO_WARNING = (
+    "fixed-SL grid rows are scenario-only and not executable on rugs: "
+    "there is no fill at the stop level; the observed (no-stop) model "
+    "exits at the dev/bundle sell-leg print and is the primary EV."
+)
+
 logger = get_logger(__name__)
 
 LAMPORTS_PER_SOL = 1_000_000_000
@@ -83,12 +89,13 @@ class CreatorSample:
         tuple[float, float], ...
     ]  # (seconds_from_entry, price_multiplier)
     ath_multiplier: float | None = None
+    entry_basis: str = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
 class CreatorTpSlEvaluation:
     tp_pct: float
-    sl_pct: float
+    sl_pct: float | None
     wins: int
     losses: int
     winrate_pct: float
@@ -114,6 +121,11 @@ class CreatorBacktestReport:
     warnings: tuple[str, ...]
     insufficient_data: bool = False
     message: str = ""
+    entry_basis_counts: tuple[tuple[str, int], ...] = ()
+    tp_only_evaluations: tuple[CreatorTpSlEvaluation, ...] = ()
+    optimal_tp_observed: float | None = None
+    optimal_ev_observed: float = 0.0
+    exit_models: tuple[str, ...] = ("observed_no_stop", "scenario_fixed_stop")
 
 
 def _net_pnl_for_multiplier(
@@ -176,6 +188,41 @@ def _net_pnl_for_multiplier(
         return gross - fees, fees
 
 
+def _simulate_observed_exit(
+    sample: CreatorSample, tp_pct: float, config: CreatorBacktestConfig
+) -> tuple[str, float, float]:
+    """Simulate exit with no fixed stop (observed adverse print).
+
+    If a trajectory point within ``max_hold_s`` reaches the TP multiplier,
+    exit at TP (win). Otherwise exit at the observed adverse extreme — the
+    minimum multiplier over points within ``max_hold_s`` (the real
+    dev/bundle dump print / floor), floored at 0.01. Empty trajectories
+    fall back to the ``ath_multiplier`` behaviour.
+    """
+    tp_mult = 1.0 + tp_pct / 100.0
+    traj = sample.trajectory
+    if not traj:
+        ath = sample.ath_multiplier if sample.ath_multiplier is not None else 1.0
+        if ath >= tp_mult:
+            net, fees = _net_pnl_for_multiplier(tp_mult, config)
+            return "win", net, fees
+        exit_mult = max(0.01, ath)
+        net, fees = _net_pnl_for_multiplier(exit_mult, config)
+        return "loss", net, fees
+    in_window = [(s, m) for s, m in traj if s <= config.max_hold_s]
+    if not in_window:
+        exit_mult = max(0.01, min(m for _, m in traj))
+        net, fees = _net_pnl_for_multiplier(exit_mult, config)
+        return "loss", net, fees
+    for _, mult in sorted(in_window, key=lambda x: x[0]):
+        if mult >= tp_mult:
+            net, fees = _net_pnl_for_multiplier(tp_mult, config)
+            return "win", net, fees
+    exit_mult = max(0.01, min(m for _, m in in_window))
+    net, fees = _net_pnl_for_multiplier(exit_mult, config)
+    return "loss", net, fees
+
+
 def _simulate_one(
     sample: CreatorSample, tp_pct: float, sl_pct: float, config: CreatorBacktestConfig
 ) -> tuple[str, float, float]:
@@ -221,6 +268,16 @@ def _simulate_one(
     return outcome, net, fees
 
 
+def _entry_basis_counts(
+    samples: Sequence[CreatorSample],
+) -> tuple[tuple[str, int], ...]:
+    """Count samples per entry_basis label."""
+    counts: dict[str, int] = {}
+    for sample in samples:
+        counts[sample.entry_basis] = counts.get(sample.entry_basis, 0) + 1
+    return tuple(sorted(counts.items()))
+
+
 def run_creator_tp_sl_grid_search(
     samples: Sequence[CreatorSample],
     config: CreatorBacktestConfig,
@@ -230,6 +287,7 @@ def run_creator_tp_sl_grid_search(
     warnings: list[str] = []
     # leakage-safe sort
     sorted_samples = sorted(samples, key=lambda s: (s.created_at, s.created_slot))
+    basis_counts = _entry_basis_counts(sorted_samples)
     if len(sorted_samples) < 2:
         return CreatorBacktestReport(
             target=target,
@@ -243,11 +301,30 @@ def run_creator_tp_sl_grid_search(
             warnings=tuple(warnings),
             insufficient_data=True,
             message=f"insufficient launches: {len(sorted_samples)}/2 (fail-closed)",
+            entry_basis_counts=basis_counts,
         )
     evaluations: list[CreatorTpSlEvaluation] = []
     best_ev = float("-inf")
     best_tp: float | None = None
     best_sl: float | None = None
+    if not any(s.trajectory or s.ath_multiplier is not None for s in sorted_samples):
+        return CreatorBacktestReport(
+            target=target,
+            mode=mode,
+            samples=tuple(sorted_samples),
+            evaluations=(),
+            optimal_tp=None,
+            optimal_sl=None,
+            optimal_ev=0.0,
+            robust_zone=(),
+            warnings=(),
+            insufficient_data=True,
+            message=(
+                f"no usable price history: {len(sorted_samples)} samples lack "
+                "trajectory and ATH (fail-closed)"
+            ),
+            entry_basis_counts=basis_counts,
+        )
     # gross per combo
     for tp in config.tp_grid:
         for sl in config.sl_grid:
@@ -302,8 +379,58 @@ def run_creator_tp_sl_grid_search(
     robust_zone: list[tuple[float, float]] = []
     if best_ev > 0:
         for ev in evaluations:
-            if ev.net_ev_sol >= best_ev * 0.9:
+            if ev.sl_pct is not None and ev.net_ev_sol >= best_ev * 0.9:
                 robust_zone.append((ev.tp_pct, ev.sl_pct))
+    # observed (no-stop) TP-only model: primary EV, additive to SL grid.
+    tp_only_evals: list[CreatorTpSlEvaluation] = []
+    best_ev_obs = float("-inf")
+    best_tp_obs: float | None = None
+    for tp in config.tp_grid:
+        wins = losses = 0
+        net_pnls: list[float] = []
+        fees_list: list[float] = []
+        cum = 0.0
+        peak = 0.0
+        max_dd = 0.0
+        for s in sorted_samples:
+            outcome, net, fees = _simulate_observed_exit(s, tp, config)
+            net_pnls.append(net)
+            fees_list.append(fees)
+            if outcome == "win":
+                wins += 1
+            else:
+                losses += 1
+            cum += net
+            peak = max(peak, cum)
+            max_dd = max(max_dd, peak - cum)
+        total = len(sorted_samples)
+        winrate = wins / total * 100 if total else 0.0
+        gross_pnl = sum(net_pnls)
+        fees_sol = sum(fees_list)
+        gross_pnl_sol = gross_pnl + fees_sol
+        net_pnl = gross_pnl
+        net_ev = net_pnl / total if total else 0.0
+        invested = total * config.quote_size_sol
+        net_roi = net_pnl / invested * 100 if invested else 0.0
+        tp_only_evals.append(
+            CreatorTpSlEvaluation(
+                tp_pct=tp,
+                sl_pct=None,
+                wins=wins,
+                losses=losses,
+                winrate_pct=round(winrate, 2),
+                gross_pnl_sol=round(gross_pnl_sol, 6),
+                fees_sol=round(fees_sol, 6),
+                net_pnl_sol=round(net_pnl, 6),
+                net_ev_sol=round(net_ev, 6),
+                net_roi_pct=round(net_roi, 2),
+                max_drawdown_sol=round(max_dd, 6),
+                robust=False,
+            )
+        )
+        if net_ev > best_ev_obs:
+            best_ev_obs = net_ev
+            best_tp_obs = tp
     # mark robust
     final_evals: list[CreatorTpSlEvaluation] = []
     for ev in evaluations:
@@ -333,9 +460,15 @@ def run_creator_tp_sl_grid_search(
         optimal_sl=best_sl,
         optimal_ev=round(best_ev, 6) if best_ev != float("-inf") else 0.0,
         robust_zone=tuple(robust_zone),
-        warnings=tuple(warnings),
+        warnings=tuple([*warnings, _FIXED_STOP_SCENARIO_WARNING]),
         insufficient_data=False,
         message="ok",
+        entry_basis_counts=basis_counts,
+        tp_only_evaluations=tuple(tp_only_evals),
+        optimal_tp_observed=best_tp_obs,
+        optimal_ev_observed=round(best_ev_obs, 6)
+        if best_ev_obs != float("-inf")
+        else 0.0,
     )
 
 
@@ -387,6 +520,13 @@ def _load_discover_samples(target_wallets: set[str]) -> list[CreatorSample]:
             conn.close()
             return []
         samples: list[CreatorSample] = []
+        try:
+            from rugbot.backtest.runners.entry_resolver import build_entry_sample
+            from rugbot.integrations.pumpfun_api import get_client
+
+            _entry_client = get_client()
+        except Exception:
+            _entry_client = None  # type: ignore[assignment]
         for w in target_wallets:
             try:
                 cur.execute(
@@ -411,53 +551,24 @@ def _load_discover_samples(target_wallets: set[str]) -> list[CreatorSample]:
                         ts = int(float(str(ts_raw)))
                     except Exception:
                         ts = slot
-                # use data-based market history
+                # Tiered entry: 1s candles, else on-chain early trades.
+                # No reconstructable entry -> excluded, never a loss.
+                if _entry_client is None:
+                    continue
                 try:
-                    from rugbot.domain.market_data import build_token_market_history
-
-                    h = build_token_market_history(mint, db_path=str(found_db))
-                    if h.entry_price_ppm is None or h.entry_price_ppm <= 0:
-                        # unavailable -> trajectory empty, ath None -> abstain later
-                        traj: tuple[tuple[float, float], ...] = ()
-                        ath: float | None = None
-                    else:
-                        entry_ppm = int(h.entry_price_ppm)
-                        entry_slot_hist = (
-                            int(h.entry_slot) if h.entry_slot is not None else slot
-                        )
-                        traj_list: list[tuple[float, float]] = []
-                        for s_slot, ppm, _mc in h.trajectory:
-                            mult = ppm / entry_ppm if entry_ppm else 1.0
-                            sec = (int(s_slot) - entry_slot_hist) * 0.4
-                            traj_list.append((float(sec), float(mult)))
-                        traj = tuple(traj_list)
-                        if h.peak_price_ppm and entry_ppm:
-                            ath = float(h.peak_price_ppm) / float(entry_ppm)
-                        else:
-                            ath = (
-                                max((m for _, m in traj), default=None)
-                                if traj
-                                else None
-                            )
-                    # if ath still None -> mark unavailable, not synthetic
-                    if ath is None:
-                        ath_val: float | None = None
-                    else:
-                        ath_val = float(ath)
-                except Exception as exc2:  # noqa: BLE001
-                    logger.debug("market_history failed for %s: %s", mint, exc2)
-                    traj = ()
-                    ath_val = None
-                samples.append(
-                    CreatorSample(
-                        mint=mint,
+                    built = build_entry_sample(
+                        mint,
                         creator=w,
                         created_at=ts,
                         created_slot=slot,
-                        trajectory=traj,
-                        ath_multiplier=ath_val,
+                        client=_entry_client,
                     )
-                )
+                except Exception as exc2:  # noqa: BLE001
+                    logger.debug("entry_sample failed for %s: %s", mint, exc2)
+                    built = None
+                if built is None:
+                    continue
+                samples.append(built)
         conn.close()
         by_mint: dict[str, CreatorSample] = {}
         for s in samples:
@@ -471,6 +582,65 @@ def _load_discover_samples(target_wallets: set[str]) -> list[CreatorSample]:
     except Exception as exc:
         logger.warning("discover db load failed: %s", exc)
         return []
+
+
+def _creator_only_on_cex_source(
+    target_wallet: str,
+    wallets: list[str],
+    funding_rows: list[dict[str, object]],
+) -> list[str]:
+    """Fall back to the creator wallet when the funding source is CEX-shaped.
+
+    A funding source that creates nothing but pays many wallets is an
+    exchange or shared hot wallet; its recipients are unrelated users and
+    MUST NOT backtest as one entity. On any lookup failure the entity
+    wallet set is returned unchanged (no fabricated attribution).
+
+    Args:
+        target_wallet: Creator wallet the entity was seeded from.
+        wallets: Entity wallets resolved from the funding chain.
+        funding_rows: Funding transfers observed around the entity.
+
+    Returns:
+        ``[target_wallet]`` when the primary funder is CEX-shaped, else
+        ``wallets`` unchanged.
+    """
+    if len(wallets) <= 1 or not funding_rows:
+        return wallets
+    try:
+        from collections import Counter
+
+        from rugbot.integrations.pumpfun_creator_index import (
+            fetch_pumpfun_created_tokens,
+        )
+        from rugbot.tracker.funding_chain import (
+            enumerate_funded,
+            is_cex_shaped_source,
+        )
+
+        funders = [
+            str(row["from"])
+            for row in funding_rows
+            if isinstance(row.get("from"), str) and row.get("from") != "unknown"
+        ]
+        if not funders:
+            return wallets
+        source = Counter(funders).most_common(1)[0][0]
+        source_creations = len(fetch_pumpfun_created_tokens(source))
+        source_recipients = len({t.recipient for t in enumerate_funded(source)})
+        if is_cex_shaped_source(
+            source_creation_count=source_creations,
+            source_recipient_count=source_recipients,
+        ):
+            logger.warning(
+                "entity backtest fell back to creator-only: "
+                "funding source %s is CEX-shaped",
+                source[:8],
+            )
+            return [target_wallet]
+    except Exception as exc:
+        logger.debug("cex-shaped funding guard skipped: %s", exc)
+    return wallets
 
 
 def resolve_target_samples(
@@ -501,6 +671,7 @@ def resolve_target_samples(
         pass
 
     wallets: list[str] = [target_wallet]
+    funding_rows: list[dict[str, object]] = []
     if entity:
         try:
             from rugbot.interfaces.cli.check_mint import (
@@ -517,6 +688,9 @@ def resolve_target_samples(
         except Exception as exc:
             logger.warning("entity funding chain failed: %s", exc)
             wallets = [target_wallet]
+
+    if entity:
+        wallets = _creator_only_on_cex_source(target_wallet, wallets, funding_rows)
 
     wallet_set = set(wallets)
     # try discover DB first
@@ -547,44 +721,34 @@ def resolve_target_samples(
     if not all_cands:
         return ()
 
-    # for each mint, build honest history via market_data (no synthetic 1.0/ath/0.5)
+    # for each mint, resolve tiered entry (1s candles, else on-chain).
+    # Samples without reconstructable entry are excluded, never losses.
+    from rugbot.backtest.runners.entry_resolver import build_entry_sample
+    from rugbot.integrations.pumpfun_api import get_client
+
+    try:
+        _live_client = get_client()
+    except Exception:
+        _live_client = None  # type: ignore[assignment]
     result: list[CreatorSample] = []
     for mint, cand in list(all_cands.items())[:MAX_SAMPLES_CAP]:
         created_at = int(getattr(cand, "created_timestamp", 0))
+        if _live_client is None:
+            continue
         try:
-            from rugbot.domain.market_data import build_token_market_history
-
-            h = build_token_market_history(mint)
-            if h.entry_price_ppm and h.entry_price_ppm > 0 and h.trajectory:
-                entry_ppm = int(h.entry_price_ppm)
-                entry_slot_hist = int(h.entry_slot) if h.entry_slot is not None else 0
-                traj_list: list[tuple[float, float]] = []
-                for s_slot, ppm, _mc in h.trajectory:
-                    mult = ppm / entry_ppm if entry_ppm else 1.0
-                    sec = (int(s_slot) - entry_slot_hist) * 0.4
-                    traj_list.append((float(sec), float(mult)))
-                traj: tuple[tuple[float, float], ...] = tuple(traj_list)
-                ath2: float | None = (
-                    (float(h.peak_price_ppm) / float(entry_ppm))
-                    if h.peak_price_ppm
-                    else None
-                )
-            else:
-                traj = ()
-                ath2 = None
-        except Exception:
-            traj = ()
-            ath2 = None
-        result.append(
-            CreatorSample(
-                mint=mint,
+            built = build_entry_sample(
+                mint,
                 creator=target_wallet,
                 created_at=created_at,
                 created_slot=created_at,
-                trajectory=traj,
-                ath_multiplier=ath2,
+                client=_live_client,
+                rpc_url=rpc,
             )
-        )
+        except Exception:
+            built = None
+        if built is None:
+            continue
+        result.append(built)
     # sort desc then cap
     result_sorted = sorted(result, key=lambda x: x.created_at, reverse=True)[
         :MAX_SAMPLES_CAP

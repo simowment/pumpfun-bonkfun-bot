@@ -683,6 +683,7 @@ async def _read_helius_full_transaction_history(  # noqa: C901, PLR0911, PLR0912
             "limit": page_limit,
             "sortOrder": "desc",
             "transactionDetails": "full",
+            "maxSupportedTransactionVersion": 0,
             "filters": {
                 "slot": {
                     "gte": start_slot if start_slot is not None else 0,
@@ -882,6 +883,7 @@ async def _read_helius_signature_history(  # noqa: C901, PLR0911, PLR0912, PLR09
             "limit": page_limit,
             "sortOrder": "desc",
             "transactionDetails": "signatures",
+            "maxSupportedTransactionVersion": 0,
             "filters": {
                 "slot": {
                     "gte": start_slot if start_slot is not None else 0,

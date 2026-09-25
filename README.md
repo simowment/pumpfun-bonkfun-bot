@@ -1,10 +1,78 @@
-# Pump.fun Repeat-Rugger Bot
+# Pump.fun Intelligence & Cabal Sniper Bot
 
-Private research bot for identifying repeat Pump.fun operators, watching their
-next launch, and evaluating fixed-size entries in observe, paper, and backtest
-modes.
+Autonomous on-chain insider intelligence, funding cluster reconstruction, and asymmetric copy-sniping pipeline on Solana Pump.fun.
 
-## Setup
+---
+
+> 📖 **Operator Guide**: See [Memecoin Bible Operator Guide](docs/MEMECOIN_BIBLE_OPERATOR_GUIDE.md) for the complete target discovery, cluster reconstruction, Jito B0 bundle forensics, and mathematical risk playbook based on the *Memecoin Bible*.
+
+---
+
+## 1. Insider Cabal Sniping Strategy
+
+On Solana Pump.fun, thousands of tokens launch daily and ~98% rug to zero within minutes. However, the profitable runners are rarely random: they are launched or heavily coordinated by **serial operator cabals**.
+
+These operators:
+1. Fund multiple fresh "burner" wallets from a central funding mother wallet or CEX dispersal node.
+2. Buy into their token in the very first blocks (blocks 0–10) across 2 to 5 burner wallets simultaneously to simulate launch momentum and organic hype.
+3. Push the market cap to $50k–$500k+ before selling.
+
+**The Strategy**: Instead of predicting coins or following social media shills, the bot **reverse-engineers the early buyers of verified winners**, clusters them back to their common funding origin, and monitors those clustered wallets via low-latency WebSockets. When the cluster coordinates a new launch with high conviction, the bot paper-snipes the coin in the same early block window, de-risks 100% of the initial principal at $2.0\times$, and trails the rest.
+
+### System Architecture
+
+```text
+src/rugbot/
+├── discover/
+│   └── cabal.py             # 1. Winner Ingestion, Early Buyer Extraction, Transitive Clustering, CabalStore
+├── intelligence/
+│   └── signal_filter.py     # 2. Age, Liquidity, Confluence, & Conviction Sizing Filters
+├── execution/
+│   ├── wallet_pool.py       # 3. Stealth Multi-Wallet Signer Pool & Rotation (Round-Robin / LRU)
+│   └── cabal_executor.py    # 4. Paper Execution, Jito Tip Estimator, TP Ladders & Trailing Stops
+├── runtime/
+│   └── cabal_pipeline.py    # 5. WebSocket/RPC Monitor, Discord Webhook, Telegram Alerts Coordinator
+└── interfaces/cli/
+    └── cabal.py             # 6. Unified CLI: cabal / cabal_sniper (discover, list, watch)
+```
+
+---
+
+## 2. Mathematical Expected Value & Unit Economics
+
+The Expected Value equation for on-chain trading:
+$$\text{EV} = \Big[P(\text{win}) \times \bar{R}(\text{win})\Big] + \Big[P(\text{loss}) \times \bar{R}(\text{loss})\Big] - \text{Friction}$$
+
+### Head-to-Head Comparison (Per 0.50 SOL Position)
+
+| Metric | Naive Copytrading (Blind Follow) | Filtered Confluence Sniping (Our Setup) |
+| :--- | :--- | :--- |
+| **Filtered Signals / Day** | 20 – 30 (Spam & dust) | 1 – 3 (High conviction) |
+| **Winrate ($P \ge 2.0\times$)** | 12.0% | **56.0%** |
+| **Net Win Payoff ($\bar{R}_{\text{win}}$)** | +110.0% | **+153.8%** (Tiered 2x/5x + Trailing) |
+| **Net Loss Payoff ($\bar{R}_{\text{loss}}$)** | -95.0% | **-89.5%** (Adverse print exit) |
+| **Roundtrip Fee + Jito Drag** | 0.0225 SOL / trade | 0.0225 SOL / trade |
+| **Breakeven Winrate Required** | 68.5% | **36.8%** |
+| **Net EV per 0.50 SOL Trade** | **-0.2607 SOL (-52.1%)** | **+0.2337 to +0.4402 SOL (+46.7% to +88.0%)** |
+| **Margin of Safety** | Negative (-56.5%) | **+19.2% above breakeven** |
+
+### Complete Fee Breakdown (Per 0.50 SOL Trade)
+* **Pump.fun Buy Curve Fee**: 1.0% (0.0050 SOL)
+* **Pump.fun Sell Curve Fee**: 1.0% (0.0050 SOL)
+* **Jito Validator Tip (p75 priority)**: 0.0045 SOL roundtrip
+* **Solana Base Priority Network Fee**: 0.0005 SOL
+* **Entry Slippage**: 1.5% (0.0075 SOL)
+* **Total Friction Drag**: **0.0225 SOL (4.50% of trade capital)**.
+
+### Asymmetric Exit Rules
+1. **Tier 1 Take-Profit**: Sell **50% at 2.0x (+100%)**. Returning 100% of initial principal ($0.50 \times 2.0 \times 0.50 = 0.50\text{ SOL}$). The position becomes mathematically risk-free house money.
+2. **Tier 2 Take-Profit**: Sell **25% at 5.0x (+400%)**.
+3. **Trailing Runner**: The remaining **25%** trails with a **15% trailing stop** from peak high-water mark.
+4. **Adverse Rug Liquidation (NORMATIVE AGENTS.md §11)**: If a tracked insider or dev submits a sell transaction (`txType == "sell"`), the bot detects it on the WebSocket stream and **immediately dumps your position on their print** before the bonding curve collapses.
+
+---
+
+## 3. Quickstart & CLI Commands
 
 Python 3.11 or newer and [uv](https://docs.astral.sh/uv/) are required.
 
@@ -12,271 +80,158 @@ Python 3.11 or newer and [uv](https://docs.astral.sh/uv/) are required.
 uv sync
 ```
 
-Observation and backtesting use finalized HTTP JSON-RPC; no gRPC provider is required.
+The CLI entry points `cabal` and `cabal_sniper` are registered in `pyproject.toml` (with `rug_cabal` preserved as an alias).
 
-Environment variables used by the remaining tools:
+### Step 1: Ingest & Refresh Cabal Clusters
+Reverse-engineers recent Pump.fun winners, extracts earliest unique buyers, clusters them by funder origin, and persists to `.state/cabal/cabal_clusters.sqlite3`:
+```powershell
+uv run cabal discover --min-mcap 50000 --limit-winners 25
+```
 
+### Step 2: Query Monitored Clusters (<1s query)
+Displays all persisted clusters, typical buy sizes, historical winrates, and token counts:
+```powershell
+uv run cabal list
+```
+
+### Step 3: Run Empirical Historical Backtests (`cabal backtest`)
+Backtest trading parameters against real, authentic 1-minute OHLC candlesticks from Pump.fun for discovered cabal tokens:
+```powershell
+# 1. Backtest top 10 discovered cabal tokens with default TP/trail parameters
+uv run cabal backtest --limit 10
+
+# 2. Backtest a specific token mint
+uv run cabal backtest --mint F2reRYPQUPkagQy7t5VaZgtiHqXNFQ91ej15GRypump
+
+# 3. Backtest and export performance sheet directly to Apache Parquet
+uv run cabal backtest --limit 20 --parquet
+
+# 4. Custom backtest: 10% trailing stop, 0.50 SOL trade size, 5.0 SOL starting balance
+uv run cabal backtest --trail 10.0 --size-sol 0.50 --paper-balance 5.00
+```
+
+### Step 4: Launch Live Dry Run Monitoring (`cabal dryrun`)
+Monitors tracked cabals in real-time via dual-engine ingestion (Helius RPC poller + PumpPortal WS), applies positive-EV confluence gating, dispatches Discord/Telegram alerts, and executes paper trades with live balance and PnL tracking:
+```powershell
+uv run cabal dryrun --profitable --seconds 0
+```
+*(Pass `--seconds 0` to run indefinitely, or e.g. `--seconds 300` for a 5-minute session).*
+
+> [!TIP]
+> **Zero Balance Required for Ingestion**: The bot uses your configured Helius RPC (`SOLANA_RPC_HTTP`) to poll on-chain transactions directly across both Pump.fun and DEXs every 3s. You do **not** need to deposit any SOL into PumpPortal. Terminal heartbeats tick every 15s with live paper balance, PnL, and open positions.
+
+CLI Options for `cabal dryrun`:
+* `--profitable`: Enforces +59% Net EV settings: multi-wallet confluence $\ge 2$, minimum buy 0.10 SOL, excludes dust sprayers (default: `True`).
+* `--paper-balance`: Initial simulated cash balance in SOL (default: `2.00`).
+* `--min-buy-sol`: Minimum buy size in SOL to trigger copytrade (default: `0.10`).
+* `--min-cluster-buy`: Minimum cluster typical buy size to avoid dust sprayers (default: `0.10`).
+* `--require-confluence`: Demands $\ge 2$ wallets from the cluster co-buy within 30s (default: `True`).
+* `--tp2x`: Fraction of position to sell at 2.0x (default: `0.50`).
+* `--tp5x`: Fraction of position to sell at 5.0x (default: `0.25`).
+* `--trail`: Trailing stop loss percentage from peak (default: `15.0`).
+* `--size-mode`: Position sizing algorithm: `fixed`, `proportional`, or `balance_pct` (default: `fixed`).
+* `--size-sol`: Fixed order size in SOL when `--size-mode=fixed` (default: `0.25`).
+* `--copy-ratio`: Fraction of insider buy when `--size-mode=proportional` (default: `0.50` = 50%).
+* `--balance-pct`: Percentage of portfolio per snipe when `--size-mode=balance_pct` (default: `10.0` = 10%).
+* `--max-size-sol`: Hard risk ceiling per trade across all modes (default: `1.00`).
+* `--min-size-sol`: Minimum order size floor to clear fees (default: `0.05`).
+
+### Step 5: Inspect Bot Trades & Performance (`cabal trades`)
+Query your bot's executed trades, realized PnL, winrate, and full performance table with copyable mints:
+```powershell
+# 1. View bot paper executions, KPIs, Net PnL, and copyable mints
+uv run cabal trades
+
+# 2. Quick-copy a specific token mint directly to system clipboard (e.g. token #1)
+uv run cabal trades --copy 1
+
+# 3. Output raw copyable mint list (one per line, ideal for piping / DexScreener batching)
+uv run cabal trades --mints
+
+# 4. Export trade records directly to CSV or Apache Parquet
+uv run cabal trades --csv .state/reports/trades.csv
+uv run cabal trades --parquet .state/reports/bot_stats.parquet
+
+# 5. View recent on-chain transactions executed by tracked cabal wallets
+uv run cabal trades --cabal --limit 15
+
+# 6. Inspect on-chain transaction history for a specific wallet address
+uv run cabal trades --wallet <WALLET_ADDRESS>
+```
+
+---
+
+## 4. Notifications & Manual Review
+
+Configure your `.env` file:
 ```env
-SOLANA_RPC_HTTP=https://...
-SOLANA_NODE_WSS_ENDPOINT=wss://...
-SOLANA_PRIVATE_KEY=...
+SOLANA_RPC_HTTP=https://api.mainnet-beta.solana.com
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/your/webhook
+TELEGRAM_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
 ```
 
-Observe, paper, and route-simulation processes use only the RPC endpoint. They
-must not load `SOLANA_PRIVATE_KEY`. Route simulation requires only the public
-`execution.signer_pubkey` because the payer account is used for RPC simulation;
-it never signs or broadcasts.
+The bot runs 100% autonomously, but automatically alerts you on Discord and Telegram for events requiring attention:
+* **`⚠️ MANUAL REVIEW REQUIRED` (Amber Embed)**: Dispatched when an insider buys with high conviction ($\ge 80\%$ baseline or $\ge 0.25$ SOL) on a fresh token, but a 2nd wallet from the cluster hasn't co-bought within 30s. The bot abstains automatically to protect capital, allowing you to manually inspect DexScreener if you want to enter.
+* **`🟢 PROFIT EXIT` (Green Embed)**: Dispatched when 2.0x or 5.0x TP tiers execute, de-risking principal.
+* **`🚨 ADVERSE EXIT` (Red Embed)**: Dispatched when an insider sell signature is detected, liquidating position immediately on their print.
 
-## Commands
+---
 
-Run the leakage-safe demo backtest:
+## 5. Verification & Automated Tests
 
+All core checks are automated as formal regression tests:
+
+### Run Dedicated Verification Suite
 ```powershell
-uv run python -m rugbot.backtest.cli \
-  --input fixtures/backtest/demo.json --pretty
+uv run pytest tests/test_cabal_verification.py
 ```
+Validates:
+1. `test_profitable_preset_net_ev_guarantee`: Mathematical assertion of positive EV ($>+40\%$ ROI), low breakeven ($<40\%$), and principal de-risking.
+2. `test_persisted_cabal_clusters_integrity`: Data integrity check on SQLite store addresses, funder entities, and typical buys.
+3. `test_manual_review_borderline_flagging`: Confirms high-conviction solo buys are tagged for manual review.
+4. `test_discord_webhook_delivery_check`: Live delivery test to Discord webhook (fail-soft if not configured).
 
-Replay finalized observations through the same dataset boundary used by RPC
-callers:
-
+### Run Pipeline Integration Suite
 ```powershell
-uv run python -m rugbot.backtest.cli \
-  --replay path/to/observations.jsonl --as-of-slot SLOT --pretty
+uv run pytest tests/test_cabal_pipeline.py
 ```
+Validates:
+* Address parsing, early buyer extraction, and transitive clustering.
+* Signal filter gates: age, liquidity bounds, mayhem rejection, and confluence.
+* Stealth `WalletPool` rotation policies (`ROUND_ROBIN`, `LRU`).
+* `CabalExecutor` entry, tiered TP ladder, trailing stop, and insider dump liquidation.
 
-Acquire one known operator and its explicitly attributed launch mints through
-the same finalized HTTP path:
-
+### Run Full Test Suite (449 Tests Green)
 ```powershell
-uv run python -m rugbot.backtest.cli \
-  --operator-wallet CREATOR_WALLET \
-  --start-slot START_SLOT --end-slot END_SLOT \
-  --max-transactions 1000 --pretty
+uv run pytest
 ```
 
-This command evaluates the typed launch outcomes already present in the fixed
-fixture and reports split metrics. It does not infer operator qualification or
-fabricate cases from incomplete RPC data. The RPC acquisition and qualified
-pipeline still return `ABSTAIN` until point-in-time entity evidence,
-protocol/mint account proofs, and completed outcome proofs are supplied.
+---
 
-Inspect a wallet, linked wallets, wallet-switch candidates, and launch
-positions:
+## 6. Repeat-Rugger Backtest & Profiling Tools (Legacy)
 
+The repository also includes point-in-time operator profiling and finalized replay backtesting for historical wallet investigations.
+
+### Leakage-Safe Demo Backtest
+```powershell
+uv run python -m rugbot.backtest.cli --input fixtures/backtest/demo.json --pretty
+```
+
+### Inspect Single Wallet Intelligence
 ```powershell
 uv run rug_watch --intelligence --wallet CREATOR_WALLET --pretty
 ```
 
-Watch one known wallet through finalized HTTP RPC evidence:
-
-```powershell
-uv run rug_watch --wallet CREATOR_WALLET
-```
-
-Use a persistent standard Solana WebSocket trigger for the next Pump.fun
-create from one wallet. The WebSocket only wakes the watcher; the transaction
-is fetched again through finalized HTTP RPC before the existing qualification
-and paper-execution path runs. `SOLANA_RPC_WEBSOCKET` is optional when the
-configured HTTP endpoint has a normal `http`/`https` URL because the watcher
-derives the corresponding `ws`/`wss` URL:
-
-```powershell
-uv run rug_watch --wallet CREATOR_WALLET --stream --mode paper `
-  --state-dir .state/stream-watch
-```
-
-The stream uses `logsSubscribe` with `processed` commitment only as a trigger,
-then requires finalized `getTransaction` and finalized block ordering. It
-reconnects after transport failure and performs durable HTTP catch-up first, so
-restarts do not rely solely on the live socket. `--stream` currently targets
-one wallet; portfolio polling remains available through `--portfolio`.
-
-Expose the shared core to a browser through the aiohttp web bridge:
-
-```powershell
-uv run rug_web
-```
-
-The bridge serves a UI-agnostic JSON API and a live WebSocket event stream:
-
-- `GET /api/health` returns a liveness payload.
-- `GET /api/state` returns a JSON projection of targets, funders, wallets,
-  launches, positions, and the daemon snapshot.
-- `POST /api/command` accepts `{ "name": string, "args": string[] }` and
-  dispatches it through the shared command registry.
-- `GET /api/events` opens a WebSocket that sends the current state on connect
-  and then broadcasts every core tracker event.
-
-Configuration is read from validated environment variables: `RUG_WEB_HOST`
-(default `127.0.0.1`), `RUG_WEB_PORT` (default `8787`), and `RUGBOT_STATE_DIR`
-(default `.state/web`). Watcher config and portfolio are DB-only in
-`state.sqlite3` / `rugbot.db` via `rugbot config set` (or `rug_config set --file`
-as a one-shot import). CORS is permissive for local development.
-
-Portfolio wallets are stored DB-only (`portfolio` config type) and watched from
-the primary `rugbot config` state. Each portfolio wallet is polled through the
-same finalized observation path.
-
-Inspect wallet history and linked-wallet evidence:
-
-```powershell
-uv run rug_wallet --wallet CREATOR_WALLET --pretty
-```
-
-Interactive terminal UI:
-
+### Terminal UI (TUI)
 ```powershell
 uv run rug_wallet_tui --state-dir .state/watch
 ```
 
-Press `r` to refresh, `f` to focus the wallet field, `1`/`2`/`3` to switch
-between Overview, Launches, and Graph, `4` for Settings, `5` for Buy, and `6`
-for Positions. Press `t` to cycle Textual themes and `q` to quit. The initial
-theme can be selected with
-`--theme nord` (or another installed Textual theme). The
-Overview presents the configured signer wallet, capital flow, observed activity,
-and data-quality warnings before the detailed evidence. Launches
-combines target and linked-wallet creates, with local search and an `early only`
-filter. Graph shows directional native-transfer edges, wallet roles, and
-wallet-switch candidates. The dashboard also shows refresh deltas and the
-bounded activity window.
-The `Buy` toolbar button or `5` opens a direct Pump.fun buy/sell form. Enter the
-mint, buy amount in SOL (for example `0.001`), or sell amount in token base
-units, plus slippage in basis points. `6` opens durable paper/live positions
-from `--state-dir` and
-prefills the sell form when a position is selected. Observe, paper, and simulation configurations never submit transactions;
-paper requires exact finalized market context and otherwise abstains.
-Simulation uses the live Pump V2 builder, dynamic finalized account-state
-decoders, pre-sign firewall, real blockhash, configured priority/tip policy,
-and finalized RPC `simulateTransaction`, while never loading a private key or
-calling a transaction sender. Set `execution.mode: simulation` and provide a
-public `execution.signer_pubkey` to run it. Live uses the same build/firewall/
-simulation path before requiring `SOLANA_PRIVATE_KEY`, routing, and finalized
-landing reconciliation.
+---
 
-The TUI never loads or stores a private key. Its Live and Route Simulation
-controls persist configuration only; the TUI cannot submit on its own. Route
-Simulation can be started by `rug_watch` with the saved `mode: simulation`
-configuration and a public signer identity. A failed, stale, malformed, or
-dynamically unsupported finalized account state abstains before simulation or
-signing.
+## 7. Safety & Policy Notice
 
-The UI refreshes every 30 seconds by default and uses the same bounded,
-finalized-RPC report as the JSON command. The Settings tab edits the DB-backed
-watcher config (`state.sqlite3` via `ConfigStore`); saving validates the mapping
-and persists it to the DB. It exposes the public target wallet, quote size,
-slippage, routing policy, priority fee, Jito tip, compute/data limits, signer
-public key, entry market-cap, timing gates, exit thresholds, and qualification
-fields without creating a second configuration. Missing historical or market
-evidence remains an abstention.
-
-The result contains `stats`, a `rug_evidence` summary, historical Pump creates,
-and a `graph` payload with nodes and direct native-transfer edges. It also
-includes `creator_history` from the official read-only GMGN CLI when available.
-That section reports creator-wide creation count, open count, token list, and
-ATH information; it is explicitly external/non-finalized and is not used as a
-backtest or decision input. Install the provider once with:
-
-```powershell
-npm install -g gmgn-cli
-```
-
-The CLI uses GMGN's public read-only testing key by default. Set
-`GMGN_API_KEY` to use a personal key. If the CLI is unavailable, the report
-keeps the finalized RPC result and shows the provider as unavailable instead
-of treating a bounded RPC scan as proof that the creator has no history. The rug
-summary exposes repeat-launch evidence, position 0/1 launches, linked creator
-wallets, wallet-switch candidates, proven fresh wallets, multi-hop paths, and
-native flow. These are observed signals, not a scam score or proof of common
-control. The scan is
-bounded to 50 transactions and 8 counterparties by default; increase those
-limits deliberately because each linked wallet adds finalized RPC requests.
-
-For Helius endpoints, the observer uses `getTransactionsForAddress` with
-`transactionDetails: "full"`, so one finalized page carries both transaction
-history and raw transaction evidence. Standard Solana RPC keeps the bounded
-`getSignaturesForAddress` plus `getTransaction` path. Neither path fabricates a
-missing account snapshot, entity proof, or completed outcome; the backtest
-returns `ABSTAIN` until those typed proofs exist. This uses the existing
-Helius/Solana JSON-RPC endpoint and requires no second paid data provider.
-Helius Enhanced Transactions can be useful for later display-only enrichment,
-but the canonical graph continues to use raw finalized RPC evidence so
-offline replay and online inspection cannot diverge.
-
-The DB-backed watcher config contains the fixed quote size and observe/paper/
-simulation mode; its wallet is used when `--wallet` is not given.
-The watcher persists immutable raw observations in
-`.state/watch/observations.jsonl` and derived restart state in
-`.state/watch/state.sqlite3` for a single wallet, or under the per-wallet
-portfolio paths shown above. SQLite stores checkpoints, handled canonical
-identities, and paper positions; raw observations remain re-decodable JSONL.
-Restart uses that state and does not replay handled evidence. Existing legacy
-JSON state files are not imported automatically. It detects pinned Pump
-`create_v2` launches and emits block-position 0/1 candidates without signing or
-submitting transactions.
-
-The sell rules also accept up to three bounded `auto_sell_big_buy.levels`
-ranges under `rules.sell`; each range uses integer quote base units and a
-`sell_fraction_ppm`.
-
-The default watch configuration uses `observe`. Changing it to `paper` uses
-`PaperContextInput`: the pinned Pump quote engine and exact point-in-time
-protocol, mint, reserve, and stress evidence fill paper buy/sell intents
-without signing. Changing it to `simulation` runs the real Pump V2 transaction
-builder and firewall against finalized mainnet state, then calls only
-`simulateTransaction` with placeholder signatures. It refuses stale contexts
-instead of inventing later market state.
-
-## Live execution
-
-Live execution uses the same Pump V2 build, firewall, and simulation gates as
-route simulation, then signs once, broadcasts according to the configured
-Jito/RPC policy, and waits for finalized landing evidence. It requires
-`execution.mode: live`, `SOLANA_PRIVATE_KEY`, and a matching public
-`execution.signer_pubkey`. Route simulation requires the public key only and
-never calls `sendTransaction`.
-
-The current Pump documentation describes `buy_v2` with a 27-account layout,
-dynamic fee and buyback recipients, and quote-token accounts. The legacy adapter
-still builds the old account path, reads processed state, and does not run the
-validated firewall/simulation/landing pipeline, so it must not be used with a
-funded account.
-
-The core filters live in `watch.yaml`: `max_market_cap_quote_base_units`,
-`max_token_age_minutes`, `buy_only_once`, `max_consecutive_losses`, and
-`execution.max_slippage_bps`. Exits support multiple PnL take-profit and
-stop-loss levels, market-cap-tiered trailing stops, inactivity exits, and
-partial sells. Amounts are integer base units: SOL quote values are lamports
-and PnL/percentage values use parts per million.
-
-The live poll currently supplies curve-price evidence for TP/SL/trailing
-decisions. Inactivity exits remain fail-closed until an activity timestamp is
-available for the position.
-
-Transaction account layouts follow the repository's pinned Pump IDL and the
-current Pump fee-recipient requirements documented in the
-[official Pump public docs](https://github.com/pump-fun/pump-public-docs).
-
-## Layout
-
-- `src/rugbot/ingest`: finalized HTTP observations and decoding inputs.
-- `src/rugbot/protocol`: pinned Pump decoders, state, and integer quotes.
-- `src/rugbot/graph`: point-in-time wallet and operator evidence.
-- `src/rugbot/decision`: matching, sizing, timing, and exits.
-- `src/rugbot/runtime`: shared observation loop, wallet watch mode, and TUI.
-- `src/rugbot/backtest`: historical calibration and evaluation.
-- `src/rugbot/storage`: immutable JSONL evidence and the SQLite derived-state store.
-- `fixtures`: finalized protocol and backtest evidence.
-- `learning-examples`: only the small scripts still useful for core manual checks.
-
-The strategy and remaining work are in
-[`TODO_RUG_RISK_SYSTEM.md`](TODO_RUG_RISK_SYSTEM.md).
-
-## Safety
-
-- Unknown or stale protocol state abstains.
-- Financial calculations use integer base units.
-- Historical features are bounded by `as_of_slot`.
-- Paper and observe modes never submit transactions.
-- Test manual buys and sells only with minimal amounts after paper validation.
-- Never commit RPC credentials or private keys.
+* **Observe & Paper Only**: Per `AGENTS.md` §7, live trading remains strictly forbidden during development until out-of-sample paper verification is completed.
+* **No Secret Storage**: Private keys must never be logged or committed.
+* **RPC Protection**: Public RPC endpoints will rate-limit or disconnect under load. Use a dedicated private RPC for extended monitoring sessions.

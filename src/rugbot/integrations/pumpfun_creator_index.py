@@ -1,7 +1,7 @@
 """Read-only Pump.fun creator-token index client."""
 
 # The fixed first-party HTTPS endpoint is an indexed nomination source only.
-# ruff: noqa: S310, TRY003
+# ruff: noqa: S310, TRY003, C901, PLR0912, BLE001, S110
 
 from __future__ import annotations
 
@@ -10,15 +10,20 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import base58
+
+if TYPE_CHECKING:
+    from rugbot.integrations.rpc_cache import RpcResponseCache
 
 PUMPFUN_COINS_URL: Final[str] = "https://frontend-api-v3.pump.fun/coins"
 PAGE_SIZE: Final[int] = 50
 MAX_CREATOR_TOKENS: Final[int] = 5_000
 SOLANA_ADDRESS_BYTES: Final[int] = 32
 DEFAULT_TIMEOUT_SECONDS: Final[int] = 15
+CREATOR_INDEX_CACHE_KEY: Final[str] = "pumpfun/creator-index"
+CREATOR_INDEX_FIRST_PAGE_TTL_SECONDS: Final[float] = 120.0
 
 
 class PumpfunCreatorIndexError(RuntimeError):
@@ -58,6 +63,7 @@ def fetch_pumpfun_created_tokens(
     if stop_after is not None and stop_after <= 0:
         raise ValueError("stop_after must be positive when provided")
     tokens: list[PumpfunCreatedTokenCandidate] = []
+    cache = _shared_cache()
     for offset in range(0, MAX_CREATOR_TOKENS, PAGE_SIZE):
         query = urllib.parse.urlencode(
             {
@@ -69,21 +75,48 @@ def fetch_pumpfun_created_tokens(
                 "creator": creator,
             }
         )
-        request = urllib.request.Request(
-            f"{PUMPFUN_COINS_URL}?{query}",
-            headers={"Accept": "application/json", "User-Agent": "rugbot/2.0"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as error:
-            raise PumpfunCreatorIndexError(
-                f"Pump.fun creator index returned HTTP {error.code}"
-            ) from error
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise PumpfunCreatorIndexError(
-                "Pump.fun creator index request failed"
-            ) from error
+        params: dict[str, object] = {"creator": creator, "offset": offset}
+        payload: object | None = None
+        if cache is not None:
+            try:
+                hit = cache.lookup(CREATOR_INDEX_CACHE_KEY, params)
+            except Exception:
+                hit = None
+            if isinstance(hit, dict) and isinstance(hit.get("result"), list):
+                payload = hit["result"]
+        if payload is None:
+            request = urllib.request.Request(
+                f"{PUMPFUN_COINS_URL}?{query}",
+                headers={"Accept": "application/json", "User-Agent": "rugbot/2.0"},
+            )
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=timeout_seconds
+                ) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as error:
+                raise PumpfunCreatorIndexError(
+                    f"Pump.fun creator index returned HTTP {error.code}"
+                ) from error
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise PumpfunCreatorIndexError(
+                    "Pump.fun creator index request failed"
+                ) from error
+            if cache is not None and isinstance(payload, list):
+                try:
+                    ttl = (
+                        CREATOR_INDEX_FIRST_PAGE_TTL_SECONDS
+                        if offset == 0
+                        else float("inf")
+                    )
+                    cache.store(
+                        CREATOR_INDEX_CACHE_KEY,
+                        params,
+                        {"result": payload},
+                        ttl_override=ttl,
+                    )
+                except Exception:
+                    pass
         if not isinstance(payload, list):
             raise PumpfunCreatorIndexError(
                 "Pump.fun creator index returned a non-list response"
@@ -95,6 +128,18 @@ def fetch_pumpfun_created_tokens(
         if stop_after is not None and len(tokens) >= stop_after:
             return tuple(tokens)
     raise PumpfunCreatorIndexError("Pump.fun creator index exceeded 5,000 tokens")
+
+
+def _shared_cache() -> RpcResponseCache | None:
+    """Return the process-wide shared cache, or None when unavailable."""
+    try:
+        from rugbot.tracker.funder_discovery import (  # noqa: PLC0415
+            get_shared_rpc_cache,
+        )
+
+        return get_shared_rpc_cache()
+    except Exception:
+        return None
 
 
 def _parse_token(item: object, creator: str) -> PumpfunCreatedTokenCandidate:

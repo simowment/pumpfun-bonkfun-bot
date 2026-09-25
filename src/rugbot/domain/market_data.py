@@ -1329,3 +1329,39 @@ def build_token_market_history(
             as_of_slot=None,
             ath_unavailable=True,
         )
+
+
+def fetch_early_launch_trades(
+    mint: str, *, rpc_url: str | None = None
+) -> list[dict] | None:
+    """Fetch earliest on-chain Pump trades for a mint (best-effort).
+
+    Args:
+        mint: Token mint address.
+        rpc_url: Optional RPC endpoint override.
+
+    Returns:
+        List of trade dicts (slot, signature, side, quote/base amounts,
+        price_ppm), or None when unavailable. Never raises.
+    """
+    try:
+        resolved_rpc = _resolve_rpc_url(rpc_url)
+        if not resolved_rpc:
+            return None
+        from solders.pubkey import Pubkey  # type: ignore
+
+        from rugbot.execution.transaction_builder import (
+            PUMP_PROGRAM_ID as _PUMP_PID_STR,
+        )  # type: ignore
+
+        _pump_pid = Pubkey.from_string(_PUMP_PID_STR)
+        mint_pk = Pubkey.from_string(mint)
+        bonding_curve_pda, _ = Pubkey.find_program_address(
+            [b"bonding-curve", bytes(mint_pk)], _pump_pid
+        )
+        return _fetch_early_onchain_trades(
+            mint, str(bonding_curve_pda), set(), resolved_rpc
+        )
+    except Exception as exc:
+        logger.debug("fetch_early_launch_trades failed for %s: %s", mint, exc)
+        return None

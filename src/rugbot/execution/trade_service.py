@@ -277,6 +277,11 @@ class TradingService:
         self._init_db()
         self._load_from_db()
 
+    @property
+    def auto_router(self) -> AutoRouter:
+        """Return the AutoRouter instance."""
+        return self._auto_router
+
     def _init_db(self) -> None:
         try:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)

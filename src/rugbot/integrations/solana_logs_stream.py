@@ -19,6 +19,9 @@ logger = get_logger(__name__)
 LOGS_SUBSCRIBE: Final[str] = "logsSubscribe"
 LOGS_NOTIFICATION: Final[str] = "logsNotification"
 FINALIZED: Final[str] = "finalized"
+VALID_COMMITMENTS: Final[frozenset[str]] = frozenset(
+    {"finalized", "confirmed", "processed"}
+)
 RECONNECT_DELAY_SECONDS: Final[float] = 1.0
 MAX_RECONNECT_DELAY_SECONDS: Final[float] = 30.0
 
@@ -41,16 +44,27 @@ class SolanaLogsStream:
 
     ``logsSubscribe`` permits one mentioned wallet per subscription, while a
     single socket may carry many subscriptions. This object owns that fan-in and
-    returns only successful, finalized transaction triggers. Callers must still
-    hydrate the signature through finalized HTTP RPC before interpreting it.
+    returns only successful transaction triggers at the configured commitment.
+    Callers must still hydrate the signature through finalized HTTP RPC before
+    interpreting it.
     """
 
-    def __init__(self, websocket_endpoint: str) -> None:
-        """Initialize the stream for one configured Solana WSS endpoint."""
+    def __init__(self, websocket_endpoint: str, commitment: str = "finalized") -> None:
+        """Initialize the stream for one configured Solana WSS endpoint.
+
+        Args:
+            websocket_endpoint: Native Solana WebSocket URL.
+            commitment: ``logsSubscribe`` commitment level.
+        """
 
         if not websocket_endpoint.strip():
             raise SolanaLogsStreamError
+        if commitment not in VALID_COMMITMENTS:
+            raise SolanaLogsStreamError(  # noqa: TRY003
+                f"commitment must be one of {sorted(VALID_COMMITMENTS)}"
+            )
         self._websocket_endpoint = websocket_endpoint
+        self._commitment = commitment
         self._wallets: tuple[str, ...] = ()
         self._websocket: object | None = None
         self._request_wallets: dict[int, str] = {}
@@ -61,6 +75,12 @@ class SolanaLogsStream:
         self._wallets_available = asyncio.Event()
         self._connected = False
         self._failed = False
+
+    @property
+    def commitment(self) -> str:
+        """Return the configured ``logsSubscribe`` commitment level."""
+
+        return self._commitment
 
     @property
     def connected(self) -> bool:
@@ -168,7 +188,7 @@ class SolanaLogsStream:
                         "method": LOGS_SUBSCRIBE,
                         "params": [
                             {"mentions": [wallet]},
-                            {"commitment": FINALIZED},
+                            {"commitment": self._commitment},
                         ],
                     },
                     separators=(",", ":"),
@@ -232,4 +252,9 @@ def _notification_from_payload(
     return WalletLogNotification(wallet=wallet, signature=signature, slot=slot)
 
 
-__all__ = ["SolanaLogsStream", "SolanaLogsStreamError", "WalletLogNotification"]
+__all__ = [
+    "VALID_COMMITMENTS",
+    "SolanaLogsStream",
+    "SolanaLogsStreamError",
+    "WalletLogNotification",
+]

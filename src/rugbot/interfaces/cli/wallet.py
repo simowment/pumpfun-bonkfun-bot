@@ -16,6 +16,12 @@ from rugbot.backtest.runners.cluster_optimizer import (
     run_cluster_tp_grid_search,
 )
 from rugbot.decision.lite_profiler import profile_launches
+from rugbot.domain.launch_window import (  # noqa: F401
+    WINDOW_GRACE_MS as LITE_PROFILE_WINDOW_GRACE_MS,
+)
+from rugbot.domain.launch_window import (
+    launch_window_is_valid as _launch_window_is_valid,
+)
 from rugbot.integrations.nansen_client import (
     NansenClient,
     NansenProviderError,
@@ -109,6 +115,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "-e",
         action="store_true",
         help="Enroll target and cluster into SQLite tracking repository.",
+    )
+    parser.add_argument(
+        "--force",
+        "-f",
+        action="store_true",
+        help="Force enrollment bypassing heuristic eligibility gates.",
+    )
+    parser.add_argument(
+        "--min-launches",
+        type=int,
+        default=1,
+        help="Minimum confirmed launches to qualify for enrollment (default: 1).",
     )
     parser.add_argument(
         "--size",
@@ -229,46 +247,6 @@ def _lite_mint_mcap_sol(
 
 
 LITE_PROFILE_CANDLE_INTERVALS: Final[tuple[str, ...]] = ("1s", "1m", "5m", "1h")
-LITE_PROFILE_WINDOW_GRACE_MS: Final[int] = 600_000
-
-
-def _launch_window_is_valid(candles: list[dict], created_ms: object) -> bool:
-    """Reject candle windows that are not the mint's launch window.
-
-    The candle endpoint returns a *recent* window for tokens whose launch
-    is older than its retention, i.e. a zero-volume dead tail. Profiling
-    that tail reports a spurious 1.00x ATH because entry (first window
-    close) equals the flat tail price. A window is trusted only when it
-    carries real volume and starts at (or near) the mint's creation time.
-    """
-    if not candles:
-        return False
-
-    def _to_number(value: object) -> float | None:
-        if isinstance(value, bool):
-            return None
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            try:
-                return float(value)
-            except ValueError:
-                return None
-        return None
-
-    total_volume = 0.0
-    for candle in candles:
-        volume = _to_number(candle.get("volume"))
-        if volume is not None:
-            total_volume += volume
-    if total_volume <= 0:
-        return False
-    first_ts = _to_number(candles[0].get("timestamp"))
-    created = _to_number(created_ms)
-    if first_ts is not None and created is not None:
-        if first_ts - created > LITE_PROFILE_WINDOW_GRACE_MS:
-            return False
-    return True
 
 
 def _fetch_candles_with_fallback(
@@ -551,6 +529,41 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
     if not isinstance(report, WalletIntelligenceReport):
+        if args.enroll and getattr(args, "force", False):
+            repo.save_funder(
+                FunderRecord(
+                    id=None,
+                    address=root_funder,
+                    label=resolved.default_label,
+                    enabled=True,
+                    created_at=now_iso,
+                    last_seen_at=now_iso,
+                )
+            )
+            try:
+                from rugbot.analysis.wallet_registry import (  # noqa: PLC0415
+                    WalletRegistry,
+                )
+
+                reg = WalletRegistry(".state/copytrade/registry.sqlite3")
+                reg.add(
+                    wallet=wallet_address,
+                    quote_sol=args.size,
+                    note=f"forced:{resolved.default_label}",
+                )
+                reg.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Could not sync forced wallet to registry: %s", exc)
+
+            payload = abstention_to_json(report)
+            payload["enrolled"] = True
+            payload["enrollment_rejection_reason"] = None
+            if args.json:
+                print(json.dumps(payload, indent=2))
+            else:
+                print(f"Force-enrolled {wallet_address} into tracking repository.")
+            return 0
+
         payload = abstention_to_json(report)
         payload["enrolled"] = False
         payload["enrollment_rejection_reason"] = report.message
@@ -578,15 +591,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         for mint in entity.mints
     }
-    enrollment_eligible = (
+    min_launches = getattr(args, "min_launches", 1)
+    force = getattr(args, "force", False)
+    is_serial_deployer = len(finalized_launch_mints) >= min_launches
+    is_coordinated_bundler = (
         len(finalized_launch_mints) >= MIN_REPEAT_COORDINATED_LAUNCHES
         and len(repeat_bundler_mints) >= MIN_REPEAT_COORDINATED_LAUNCHES
     )
+    enrollment_eligible = force or is_coordinated_bundler or is_serial_deployer
     enrolled = args.enroll and enrollment_eligible
     enrollment_rejection_reason = (
         None
         if not args.enroll or enrolled
-        else "Finalized evidence did not prove at least two coordinated launches."
+        else f"Finalized evidence did not meet launch threshold (found {len(finalized_launch_mints)} launches, needed {min_launches})."
     )
 
     # 3. Persist only repeat coordinated operators explicitly requested for tracking.
@@ -772,6 +789,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 updated_at=now_iso,
             )
         )
+        try:
+            from rugbot.analysis.wallet_registry import (  # noqa: PLC0415
+                WalletRegistry,
+            )
+
+            reg = WalletRegistry(".state/copytrade/registry.sqlite3")
+            reg.add(wallet=wallet_address, quote_sol=args.size, note=target_label)
+            reg.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Could not sync enrolled wallet %s to registry: %s",
+                wallet_address,
+                exc,
+            )
 
     # 7. Output Format
     optimal_eval = backtest_report.optimal_evaluation if backtest_report else None

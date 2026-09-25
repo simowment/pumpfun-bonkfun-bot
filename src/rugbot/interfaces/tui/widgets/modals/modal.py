@@ -12,6 +12,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
+from rugbot.integrations.axiom import build_axiom_url
 from rugbot.interfaces.tui.formatters import (
     format_age,
     format_amount,

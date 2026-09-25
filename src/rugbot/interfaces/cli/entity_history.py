@@ -16,7 +16,11 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from rugbot.integrations.pumpfun_api import get_client
-from rugbot.tracker.entity_history import EntityLaunchHistory, build_launch_history
+from rugbot.tracker.entity_history import (
+    EntityLaunchHistory,
+    build_launch_history,
+    merge_launch_histories,
+)
 from rugbot.tracker.funder_discovery import STAGED_MAX_SOL, STAGED_MIN_SOL
 from rugbot.tracker.funding_chain import (
     DEFAULT_HISTORY_PAGES,
@@ -41,12 +45,20 @@ def _build_parser() -> argparse.ArgumentParser:
             "disbursed staging capital to."
         ),
     )
-    parser.add_argument("funder", help="Funding wallet to page backward from.")
     parser.add_argument(
+        "funders", nargs="+", help="Funding wallets to page backward from."
+    )
+    pages_group = parser.add_mutually_exclusive_group()
+    pages_group.add_argument(
         "--pages",
         type=int,
         default=DEFAULT_HISTORY_PAGES,
         help=f"Signature pages to walk back (default: {DEFAULT_HISTORY_PAGES}).",
+    )
+    pages_group.add_argument(
+        "--all-pages",
+        action="store_true",
+        help="Walk the cursor to exhaustion, still bounded by --max-tx.",
     )
     parser.add_argument(
         "--max-tx",
@@ -106,7 +118,7 @@ def _format_when(created_at_ms: int | None) -> str:
 def _as_payload(history: EntityLaunchHistory, scanned: int) -> dict[str, object]:
     """Serialize the history into a JSON-safe mapping."""
     return {
-        "funder": history.funder,
+        "funders": list(history.funders),
         "transfers_scanned": scanned,
         "recipients": history.recipients,
         "tokens_created": len(history.launches),
@@ -117,6 +129,7 @@ def _as_payload(history: EntityLaunchHistory, scanned: int) -> dict[str, object]
                 "symbol": event.symbol,
                 "name": event.name,
                 "creator": event.creator,
+                "funder": event.funder,
                 "created_at_ms": event.created_at_ms,
                 "created_at": _format_when(event.created_at_ms),
                 "received_sol": event.received_sol,
@@ -132,7 +145,7 @@ def _render(history: EntityLaunchHistory, scanned: int) -> None:
     print("=" * 78)
     print(" ENTITY TOKEN-CREATION HISTORY")
     print("=" * 78)
-    print(f" funder: {history.funder}")
+    print(f" funders: {', '.join(history.funders)}")
     print(f" transfers scanned: {scanned}   recipients: {history.recipients}")
     print(f" tokens created: {len(history.launches)}")
     if not history.launches:
@@ -145,8 +158,9 @@ def _render(history: EntityLaunchHistory, scanned: int) -> None:
                 f"{event.symbol or '(no symbol)':<14} {event.mint}"
             )
             print(
-                f"      creator {event.creator}   received "
-                f"{event.received_sol:.4f} SOL   funding slot {event.funding_slot}"
+                f"      creator {event.creator}   funder {event.funder}   "
+                f"received {event.received_sol:.4f} SOL   "
+                f"funding slot {event.funding_slot}"
             )
     if history.warning:
         print(f"\n note: {history.warning}")
@@ -163,15 +177,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     args = _build_parser().parse_args(argv)
     try:
-        transfers = enumerate_funded_paged(
-            args.funder,
-            max_pages=args.pages,
-            max_transactions=args.max_tx,
-            min_sol=args.min_sol,
-            max_sol=args.max_sol,
-            min_slot=args.slot_from,
-            max_slot=args.slot_to,
-        )
+        collected: list[tuple[EntityLaunchHistory, int]] = []
+        for funder in args.funders:
+            transfers = enumerate_funded_paged(
+                funder,
+                max_pages=None if args.all_pages else args.pages,
+                max_transactions=args.max_tx,
+                min_sol=args.min_sol,
+                max_sol=args.max_sol,
+                min_slot=args.slot_from,
+                max_slot=args.slot_to,
+            )
+            per_history = build_launch_history(
+                funder,
+                transfers=transfers,
+                launch_fetch=_launch_fetch,
+            )
+            collected.append((per_history, len(transfers)))
     except FundingChainError as error:
         if args.json:
             print(json.dumps({"error": str(error)}, indent=2))
@@ -179,15 +201,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Entity history failed: {error}", file=sys.stderr)
         return 1
 
-    history = build_launch_history(
-        args.funder,
-        transfers=transfers,
-        launch_fetch=_launch_fetch,
-    )
+    history = merge_launch_histories([entry[0] for entry in collected])
+    scanned = sum(entry[1] for entry in collected)
     if args.json:
-        print(json.dumps(_as_payload(history, len(transfers)), indent=2))
+        print(json.dumps(_as_payload(history, scanned), indent=2))
         return 0
-    _render(history, len(transfers))
+    _render(history, scanned)
     return 0
 
 

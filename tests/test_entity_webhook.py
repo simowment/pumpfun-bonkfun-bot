@@ -63,10 +63,11 @@ def test_payload_carries_mint_creator_links_and_graph() -> None:
     assert "WalletHX" in fields["Creator"] and "sniper" in fields["Creator"]
     assert "ZCAT Deployer" in fields["Entity: TestEntity"]
     assert "16.64 SOL" in fields["Known Links"] and "sweep" in fields["Known Links"]
-    assert "$9.9K" in fields["MCap"]
+    assert "axiom.trade/meme/" in fields["Axiom"]
     assert "dexscreener.com/solana/MintNew" in fields["DexScreener"]
     assert "solscan.io/account/MintNew" in fields["Solscan"]
     assert "pump.fun/coin/MintNew" in fields["Pump"]
+    assert embed["url"].startswith("https://axiom.trade/meme/")
     assert "webhook" not in json.dumps(payload).lower()
 
 

@@ -38,6 +38,7 @@ class LaunchEvent:
     symbol: str
     name: str
     creator: str
+    funder: str
     created_at_ms: int | None
     received_sol: float
     funding_slot: int | None
@@ -47,7 +48,7 @@ class LaunchEvent:
 class EntityLaunchHistory:
     """Merged token-creation timeline for one funding wallet's disbursal set."""
 
-    funder: str
+    funders: tuple[str, ...]
     recipients: int
     launches: tuple[LaunchEvent, ...]
     warning: str | None
@@ -57,6 +58,7 @@ def _coin_event(
     coin: Mapping[str, object],
     *,
     creator: str,
+    funder: str,
     received_sol: float,
     funding_slot: int | None,
 ) -> LaunchEvent | None:
@@ -72,6 +74,7 @@ def _coin_event(
         symbol=symbol if isinstance(symbol, str) else "",
         name=name if isinstance(name, str) else "",
         creator=creator,
+        funder=funder,
         created_at_ms=created if isinstance(created, int) else None,
         received_sol=received_sol,
         funding_slot=funding_slot,
@@ -119,6 +122,7 @@ def build_launch_history(
             event = _coin_event(
                 coin,
                 creator=wallet,
+                funder=funder,
                 received_sol=received,
                 funding_slot=slots.get(wallet),
             )
@@ -129,10 +133,49 @@ def build_launch_history(
     events.sort(key=lambda event: event.created_at_ms or 0)
     warning = f"{failures} wallet launch lookups failed" if failures else None
     return EntityLaunchHistory(
-        funder=funder,
+        funders=(funder,),
         recipients=len(totals),
         launches=tuple(events),
         warning=warning,
+    )
+
+
+def merge_launch_histories(
+    histories: Sequence[EntityLaunchHistory],
+) -> EntityLaunchHistory:
+    """Merge per-funder timelines into one entity token-creation timeline.
+
+    Args:
+        histories: Per-funder histories in attribution priority order.
+
+    Returns:
+        One entity history with unioned funders, summed recipients, mint
+        deduplication keeping the first occurrence, and oldest-first order.
+    """
+    funders: list[str] = []
+    for history in histories:
+        for funder in history.funders:
+            if funder not in funders:
+                funders.append(funder)
+    events: list[LaunchEvent] = []
+    seen_mints: set[str] = set()
+    recipients = 0
+    warnings: list[str] = []
+    for history in histories:
+        recipients += history.recipients
+        if history.warning is not None:
+            warnings.append(history.warning)
+        for event in history.launches:
+            if event.mint in seen_mints:
+                continue
+            seen_mints.add(event.mint)
+            events.append(event)
+    events.sort(key=lambda event: event.created_at_ms or 0)
+    return EntityLaunchHistory(
+        funders=tuple(funders),
+        recipients=recipients,
+        launches=tuple(events),
+        warning="; ".join(warnings) if warnings else None,
     )
 
 
@@ -140,4 +183,5 @@ __all__ = [
     "EntityLaunchHistory",
     "LaunchEvent",
     "build_launch_history",
+    "merge_launch_histories",
 ]
