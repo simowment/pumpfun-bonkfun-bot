@@ -12,6 +12,16 @@ chemin d'intégration réaliste a été exécuté et observé.
 - **Devs sériels à fort volume** (1 lancement/min) : quasi tous en **Mayhem mode**
   (agent protocole, ~0 SOL réel) → exclus du backtest. Les autres : médiane ATH
   ≈ prix de lancement. La Bible a raison : viser 5–10 créations max.
+- **Opérateur $BAG (dev `AmyjEX…`, `rug_discover fleet`)** : 29 lancements le
+  2026-09-25, flotte de 15 wallets bundle (~49 SOL) → MC d'entrée bloc +2 ≈ 157 SOL
+  à chaque fois. TP +25 % : win 83 %, EV +0,0015 / cons. −0,016 SOL → pas d'edge
+  à bloc +2 ; l'edge éventuel est avant/pendant le bundle.
+- **Dev `4Sr8W6…` (PUMPGENTS, MANLETS)** : burner du jour (Type 2), 2 lancements,
+  bloc 0 : MC ≈ 83 SOL, ATH médian 5,4x (N=2, non concluant). Financé par le hub
+  `CUNJKKCq…` (né 2026-09-24, 1000+ tx) via 3 relais 1,15 SOL ; le dev renvoie
+  1,15 SOL au hub via 3 autres relais. Scan du hub trop lent sur RPC gratuit
+  (400 tx récentes : 0 créateur ; fenêtre du financement non scannée). Piste :
+  watcher observe-only sur le hub (Type 2, autorisation explicite requise).
 
 ### Pistes d'edge à tester (données on-chain / pump.fun uniquement)
 - [ ] **Vagues narratives** : cluster de lancements même nom/thème en quelques
@@ -38,6 +48,15 @@ chemin d'intégration réaliste a été exécuté et observé.
   section market sans trades on-chain (utiliser `fetch_all_trades`).
 - [ ] Supprimer les 26 fichiers de tests mockés (liste dans l'historique de session).
 - [ ] 185 erreurs ruff préexistantes (push du 2026-09-25).
+- [ ] `rug_graph` : les achats tiers du coin d'un dev (via routeur, ex. `FLASHX…`)
+  sont comptés comme transferts vers/depuis le dev → faux liens (courbe de bonding
+  prise pour un wallet, créateurs sans rapport à depth 2). Exclure les tx Pump
+  buy/sell du traçage de transferts.
+- [ ] Scans RPC lents sur plan gratuit (~10 req/s, pacing 0,12 s) : un hub de
+  1000+ tx + relais = plusieurs minutes. Évaluer Helius payant / historique
+  enrichi avant d'investir dans le traçage Type 2.
+- [ ] 7 tests échouent déjà sur HEAD (env/état local : `SOLANA_RPC_HTTP` absent,
+  fastapi/tui/discord/screener/cabal_verification).
 
 ## Phase 1 — Known-Wallet Sniper P0 (EN COURS)
 
