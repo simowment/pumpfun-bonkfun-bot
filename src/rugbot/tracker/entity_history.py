@@ -192,6 +192,41 @@ def build_launch_history(
     )
 
 
+def creator_launch_history(
+    creator: str, coins: Sequence[Mapping[str, object]]
+) -> EntityLaunchHistory:
+    """Build the launch timeline of a serial same-wallet deployer (Type 1).
+
+    Args:
+        creator: Creator wallet, which is its own funder of record.
+        coins: Its creator-index coin entries.
+
+    Returns:
+        EntityLaunchHistory with the creator as the single funder/recipient.
+    """
+    events = sorted(
+        (
+            event
+            for coin in coins
+            if isinstance(coin, Mapping)
+            and (
+                event := _coin_event(
+                    coin,
+                    creator=creator,
+                    funder=creator,
+                    received_sol=0.0,
+                    funding_slot=None,
+                )
+            )
+            is not None
+        ),
+        key=lambda event: event.created_at_ms or 0,
+    )
+    return EntityLaunchHistory(
+        funders=(creator,), recipients=1, launches=tuple(events), warning=None
+    )
+
+
 def merge_launch_histories(
     histories: Sequence[EntityLaunchHistory],
 ) -> EntityLaunchHistory:
@@ -237,6 +272,7 @@ __all__ = [
     "LaunchActivity",
     "LaunchEvent",
     "build_launch_history",
+    "creator_launch_history",
     "launch_activity",
     "merge_launch_histories",
 ]

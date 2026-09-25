@@ -39,6 +39,7 @@ from rugbot.tracker.entity_history import (
     LaunchActivity,
     LaunchEvent,
     build_launch_history,
+    creator_launch_history,
     launch_activity,
     merge_launch_histories,
 )
@@ -59,6 +60,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 TRADE_FETCH_WORKERS = 3
+BIBLE_MIN_SAMPLES = 10
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -119,6 +121,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Only hydrate signatures at or before this slot.",
     )
     parser.add_argument(
+        "--creator",
+        action="store_true",
+        help="Treat the addresses as serial creator wallets (Type 1) instead of funders.",
+    )
+    parser.add_argument(
         "--backtest",
         action="store_true",
         help="Replay every launch from its full trade history and rank exit rules.",
@@ -126,13 +133,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--entry-delay",
         type=int,
-        default=ReplayCosts.entry_delay_slots,
+        default=ReplayCosts().entry_delay_slots,
         help="Slots after create our buy lands (0 = block 0).",
     )
     parser.add_argument(
         "--size",
         type=float,
-        default=ReplayCosts.quote_size_sol,
+        default=ReplayCosts().quote_size_sol,
         help="Buy size in SOL per launch.",
     )
     parser.add_argument(
@@ -327,12 +334,24 @@ def _render_backtest(
             "\n   best exit rules, ranked by conservative EV (winrate at its 95%"
             " lower bound; SOL per trade after pump fees + tx costs):"
         )
-        for summary in summaries[:8]:
+        shown: set[tuple[float, ...]] = set()
+        distinct = []
+        for summary in summaries:
+            outcome = tuple(round(r.net_pnl_sol, 9) for r in summary.results)
+            if outcome not in shown:
+                shown.add(outcome)
+                distinct.append(summary)
+        for summary in distinct[:8]:
             print(
                 f"   {_describe_rule(summary):<38} N={summary.samples:<3} "
                 f"win {summary.winrate:5.0%}  cons.EV {summary.conservative_ev_sol:+.4f}"
                 f"  EV {summary.net_ev_sol:+.4f}  EV-best "
                 f"{summary.ev_without_best_sol:+.4f}  ROI {summary.roi_pct:+6.1f}%"
+            )
+        if len(profiles) < BIBLE_MIN_SAMPLES:
+            print(
+                f"   WARNING: {len(profiles)} launches < {BIBLE_MIN_SAMPLES} "
+                "(Bible minimum); results are not evidence of an edge"
             )
         dev_rule = next(s for s in summaries if s.rule.exit_on_dev_sell)
         print(
@@ -388,7 +407,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         collected: list[tuple[EntityLaunchHistory, int]] = []
-        for funder in args.funders:
+        for creator in args.funders if args.creator else ():
+            collected.append(
+                (creator_launch_history(creator, _launch_fetch(creator) or []), 0)
+            )
+        for funder in () if args.creator else args.funders:
             transfers = enumerate_funded_paged(
                 funder,
                 max_pages=None if args.all_pages else args.pages,
