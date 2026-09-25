@@ -3,6 +3,42 @@
 Ce document suit l'état réel du produit. Une case n'est cochée que lorsqu'un
 chemin d'intégration réaliste a été exécuté et observé.
 
+## Constats & pistes (2026-09-25) — à reprendre plus tard
+
+### Verdicts mesurés
+- **Opérateur $ZKASH (hub `6RfZnj…`)** : 47 lancements via relais, actif, mais EV
+  conservatrice négative sur toutes les règles (médiane ATH 1,02x depuis bloc +2).
+  Modèle : create → flip en ~3 s → collecte des creator fees. Rejeté.
+- **Devs sériels à fort volume** (1 lancement/min) : quasi tous en **Mayhem mode**
+  (agent protocole, ~0 SOL réel) → exclus du backtest. Les autres : médiane ATH
+  ≈ prix de lancement. La Bible a raison : viser 5–10 créations max.
+
+### Pistes d'edge à tester (données on-chain / pump.fun uniquement)
+- [ ] **Vagues narratives** : cluster de lancements même nom/thème en quelques
+  minutes (métadonnées pump.fun gratuites) ; tester si les premiers de la vague
+  surperforment. Proxy sans données sociales.
+- [ ] **Graduation / final stretch** : coins proches de 100 % de courbe et
+  comportement autour de la migration PumpSwap.
+- [ ] **Devs sériels peu actifs** : rejouer le screen avec plafond Bible 5–10
+  créations + filtre Mayhem.
+- [ ] Création de tokens narratifs (creator fees) : seulement sans tactiques
+  trompeuses (bundles d'auto-achat, faux locks Streamflow, wash trading).
+
+### Dette technique connue
+- [ ] `execution/trade_service.py` calcule les quotes comme si la courbe était
+  à l'état initial (30 SOL / 1,073 B) — faux pour tout coin ayant bougé. Chemin
+  d'exécution : à corriger avant tout live.
+- [ ] Constantes de courbe dupliquées dans 7 fichiers → une seule source.
+- [ ] 3 décodeurs `TradeEvent` parallèles → un seul.
+- [ ] `sol-trade-sdk` : pool RPC en failover seulement (Helius → Alchemy) ;
+  ajouter un round-robin ; `client.py` demande encore `maxSupportedTransactionVersion: 0` ;
+  décodeurs pump probablement antérieurs à l'upgrade creator-fee ; package
+  top-level nommé `src`.
+- [ ] `rug_check` : montants SOL affichés = plafond de slippage, pas le coût réel ;
+  section market sans trades on-chain (utiliser `fetch_all_trades`).
+- [ ] Supprimer les 26 fichiers de tests mockés (liste dans l'historique de session).
+- [ ] 185 erreurs ruff préexistantes (push du 2026-09-25).
+
 ## Phase 1 — Known-Wallet Sniper P0 (EN COURS)
 
 **Objectif** : un wallet développeur explicitement approuvé déclenche une
