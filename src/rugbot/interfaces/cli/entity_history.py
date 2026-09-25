@@ -27,6 +27,7 @@ from rugbot.backtest.launch_replay import (
     ReplayCosts,
     RuleSummary,
     default_exit_rules,
+    describe_exit_rule,
     nonstandard_curve_reason,
     summarize_rules,
     trades_from_swap_api,
@@ -298,16 +299,6 @@ def _replays(
     return replays, skipped
 
 
-def _describe_rule(summary: RuleSummary) -> str:
-    rule = summary.rule
-    if rule.exit_on_dev_sell:
-        return "exit on dev/bundle sell"
-    tp = f"TP +{rule.take_profit_pct:.0f}%" if rule.take_profit_pct else "no TP"
-    sl = f"SL -{rule.stop_loss_pct:.0f}%" if rule.stop_loss_pct else "no SL"
-    hold = f"hold {rule.max_hold_s / 60:.0f}m" if rule.max_hold_s else "no max hold"
-    return f"{tp}, {sl}, {hold}"
-
-
 def _render_backtest(
     replays: list[LaunchReplay], summaries: list[RuleSummary], skipped: list[str]
 ) -> None:
@@ -348,7 +339,7 @@ def _render_backtest(
                 distinct.append(summary)
         for summary in distinct[:8]:
             print(
-                f"   {_describe_rule(summary):<38} N={summary.samples:<3} "
+                f"   {describe_exit_rule(summary.rule):<38} N={summary.samples:<3} "
                 f"win {summary.winrate:5.0%}  cons.EV {summary.conservative_ev_sol:+.4f}"
                 f"  EV {summary.net_ev_sol:+.4f}  EV-best "
                 f"{summary.ev_without_best_sol:+.4f}  ROI {summary.roi_pct:+6.1f}%"
@@ -360,7 +351,7 @@ def _render_backtest(
             )
         dev_rule = next(s for s in summaries if s.rule.exit_on_dev_sell)
         print(
-            f"   (comparison) {_describe_rule(dev_rule)}: "
+            f"   (comparison) {describe_exit_rule(dev_rule.rule)}: "
             f"win {dev_rule.winrate:.0%}  EV {dev_rule.net_ev_sol:+.4f} SOL"
         )
     for reason, count in Counter(
@@ -394,7 +385,7 @@ def _export_plot(funder: str, summary: RuleSummary, stake_sol: float) -> Path:
         )
     return export_vectorbt_html_report(
         target=funder,
-        mode=_describe_rule(summary),
+        mode=describe_exit_rule(summary.rule),
         records=records,
         total_fees_sol=summary.fees_sol,
         market_impact_drag_sol=0.0,

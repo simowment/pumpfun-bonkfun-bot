@@ -121,6 +121,16 @@ class ExitRule:
     max_hold_s: float | None
 
 
+def describe_exit_rule(rule: ExitRule) -> str:
+    """Human-readable label for an exit rule."""
+    if rule.exit_on_dev_sell:
+        return "exit on dev/bundle sell"
+    tp = f"TP +{rule.take_profit_pct:.0f}%" if rule.take_profit_pct else "no TP"
+    sl = f"SL -{rule.stop_loss_pct:.0f}%" if rule.stop_loss_pct else "no SL"
+    hold = f"hold {rule.max_hold_s / 60:.0f}m" if rule.max_hold_s else "no max hold"
+    return f"{tp}, {sl}, {hold}"
+
+
 @dataclass(frozen=True, slots=True)
 class LaunchProfile:
     """Rule-independent facts about a launch after our realistic entry."""
@@ -443,14 +453,27 @@ def summarize_rules(
     replays: Sequence[LaunchReplay], rules: Sequence[ExitRule]
 ) -> list[RuleSummary]:
     """Evaluate every rule on every launch, best conservative EV first."""
+    if not replays:
+        return []
+    return summarize_results(
+        {rule: [replay.run(rule) for replay in replays] for rule in rules},
+        quote_size_sol=replays[0].costs.quote_size_sol,
+    )
+
+
+def summarize_results(
+    results_by_rule: Mapping[ExitRule, Sequence[LaunchResult]],
+    *,
+    quote_size_sol: float,
+) -> list[RuleSummary]:
+    """Aggregate precomputed per-launch results, best conservative EV first."""
     summaries: list[RuleSummary] = []
-    for rule in rules:
-        results = tuple(replay.run(rule) for replay in replays)
+    for rule, rule_results in results_by_rule.items():
+        results = tuple(rule_results)
         if not results:
             continue
         wins = sum(1 for result in results if result.net_pnl_sol > 0)
         net_total = sum(result.net_pnl_sol for result in results)
-        stake = sum(replay.costs.quote_size_sol for replay in replays)
         pnls = sorted(result.net_pnl_sol for result in results)
         summaries.append(
             RuleSummary(
@@ -460,7 +483,7 @@ def summarize_rules(
                 winrate=wins / len(results),
                 net_ev_sol=net_total / len(results),
                 net_total_sol=net_total,
-                roi_pct=100 * net_total / stake,
+                roi_pct=100 * net_total / (quote_size_sol * len(results)),
                 fees_sol=sum(result.fees_sol for result in results),
                 worst_loss_sol=pnls[0],
                 conservative_ev_sol=_conservative_ev(pnls),

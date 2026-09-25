@@ -16,10 +16,12 @@ from typing import TYPE_CHECKING
 from rugbot.discover.collector import run_collect
 
 if TYPE_CHECKING:
-    from rugbot.backtest.launch_replay import LaunchTrade
+    from rugbot.backtest.launch_replay import LaunchTrade, RuleSummary
     from rugbot.discover.ruggers import RuggerEvidence
 
 
+# Bible: fewer than 10 launches is not evidence of an edge.
+BIBLE_MIN_SAMPLES = 10
 # lamports per SOL (1e9) over base units per token (1e6).
 LAMPORTS_PER_TOKEN_RATIO = 1_000
 
@@ -297,6 +299,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="state directory (default: .state/discover)",
     )
 
+    patterns = sub.add_parser(
+        "patterns",
+        help="find repeat creators, block-0 insiders and block-0 pairs in recorded "
+        "launches and test each against the all-launch baseline (DB only)",
+    )
+    patterns.add_argument("--min-age-minutes", type=float, default=10.0)
+    patterns.add_argument("--max-launches", type=int, default=2000)
+    patterns.add_argument(
+        "--min-launches", type=int, default=3, help="launches a pattern must cover"
+    )
+    patterns.add_argument(
+        "--entry-delay", type=int, default=2, help="slots after create our buy lands"
+    )
+    patterns.add_argument("--size", type=float, default=0.1, help="buy size in SOL")
+    patterns.add_argument("--top", type=int, default=15, help="patterns shown")
+    patterns.add_argument(
+        "--state-dir",
+        type=Path,
+        default=Path(".state/discover"),
+        help="state directory (default: .state/discover)",
+    )
+
     status = sub.add_parser(
         "status", help="PID alive, health last_heartbeat, launches count"
     )
@@ -422,6 +446,87 @@ def _load_launch_trades(
     }
     skipped = Counter(trades for _, _, trades in loaded if isinstance(trades, str))
     return launches, skipped
+
+
+def _run_patterns(args: argparse.Namespace) -> int:
+    """Rank recorded launch patterns by conservative EV against the baseline."""
+    from rugbot.backtest.launch_replay import (
+        LaunchReplay,
+        LaunchReplayError,
+        ReplayCosts,
+        default_exit_rules,
+        describe_exit_rule,
+        summarize_results,
+    )
+    from rugbot.discover.patterns import find_patterns
+
+    launches, skipped = _load_launch_trades(
+        args.state_dir,
+        min_age_minutes=args.min_age_minutes,
+        max_launches=args.max_launches,
+        recorded_only=True,
+    )
+    costs = ReplayCosts(quote_size_sol=args.size, entry_delay_slots=args.entry_delay)
+    rules = default_exit_rules()
+    results_by_mint = {}
+    for mint, (creator, trades) in launches.items():
+        try:
+            replay = LaunchReplay(
+                mint,
+                create_slot=trades[0].slot,
+                creator=creator,
+                trades=trades,
+                costs=costs,
+            )
+        except LaunchReplayError:
+            skipped["no trading after entry"] += 1
+            continue
+        results_by_mint[mint] = [replay.run(rule) for rule in rules]
+
+    def best_for(mints: list[str]) -> RuleSummary:
+        return summarize_results(
+            {
+                rule: [results_by_mint[mint][index] for mint in mints]
+                for index, rule in enumerate(rules)
+            },
+            quote_size_sol=args.size,
+        )[0]
+
+    print(
+        f"launches replayed {len(results_by_mint)} "
+        f"(entry block +{args.entry_delay}, {args.size} SOL, all fees)"
+    )
+    for reason, count in skipped.most_common():
+        print(f"  skipped {count}: {reason}")
+    if not results_by_mint:
+        return 0
+    baseline = best_for(list(results_by_mint))
+    print(
+        f"BASELINE (every launch): best [{describe_exit_rule(baseline.rule)}] "
+        f"win {baseline.winrate:.0%}  cons.EV {baseline.conservative_ev_sol:+.4f}  "
+        f"EV {baseline.net_ev_sol:+.4f} SOL/trade"
+    )
+    ranked = []
+    replayable = {mint: launches[mint] for mint in results_by_mint}
+    for pattern in find_patterns(replayable, min_launches=args.min_launches):
+        ranked.append((pattern, best_for(list(pattern.mints))))
+    ranked.sort(key=lambda item: item[1].conservative_ev_sol, reverse=True)
+    print(f"patterns with >= {args.min_launches} launches: {len(ranked)}")
+    for pattern, best in ranked[: args.top]:
+        members = " + ".join(member[:10] for member in pattern.members)
+        verdict = (
+            "BEATS BASELINE"
+            if best.conservative_ev_sol > max(0.0, baseline.conservative_ev_sol)
+            else "no edge"
+        )
+        small = "  (small sample < 10)" if best.samples < BIBLE_MIN_SAMPLES else ""
+        print(
+            f"\n[{pattern.kind}] {members}  N={best.samples}  {verdict}{small}\n"
+            f"  best [{describe_exit_rule(best.rule)}] win {best.winrate:.0%}  "
+            f"cons.EV {best.conservative_ev_sol:+.4f}  EV {best.net_ev_sol:+.4f}  "
+            f"EV-best {best.ev_without_best_sol:+.4f} SOL/trade"
+        )
+    return 0
 
 
 def _run_wallets(args: argparse.Namespace) -> int:
@@ -917,6 +1022,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"tokens traded: {report['participating_token_count']}")
         return 0
+    if args.command == "patterns":
+        return _run_patterns(args)
     if args.command == "wallets":
         return _run_wallets(args)
     if args.command == "status":
