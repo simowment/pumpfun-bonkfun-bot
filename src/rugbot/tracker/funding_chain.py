@@ -138,6 +138,7 @@ class FundedTransfer:
     amount_sol: float
     signature: str
     slot: int | None
+    block_time: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -625,12 +626,14 @@ def _hydrate_transfers(  # noqa: PLR0913
         ):
             if amount_sol > max_sol:
                 continue
+            block_time = entry.get("blockTime")
             transfers.append(
                 FundedTransfer(
                     recipient=counterparty,
                     amount_sol=amount_sol,
                     signature=signature,
                     slot=slot_value,
+                    block_time=block_time if isinstance(block_time, int) else None,
                 )
             )
     return transfers, hydrated

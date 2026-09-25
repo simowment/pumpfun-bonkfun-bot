@@ -164,6 +164,49 @@ def executable_sell_quote(
     )
 
 
+def pump_curve_buy_amounts(
+    *,
+    virtual_quote_reserves: int,
+    virtual_base_reserves: int,
+    spendable_quote_in: int,
+    fee_config: FeeConfig,
+) -> tuple[int, int]:
+    """Return ``(tokens_out, fee)`` for a Pump curve buy on raw virtual reserves.
+
+    Same integer math as :func:`executable_buy_quote`, for callers (replay and
+    backtests) whose reserves are reconstructed rather than decoded on chain.
+    """
+    quote_after_fee, fee_amount = _pump_bonding_curve_net_quote_in(
+        spendable_quote_in=spendable_quote_in, fee_config=fee_config
+    )
+    tokens_out = _constant_product_amount_out(
+        amount_in=max(0, quote_after_fee - 1),
+        input_reserves=virtual_quote_reserves,
+        output_reserves=virtual_base_reserves,
+    )
+    return tokens_out, fee_amount
+
+
+def pump_curve_sell_amounts(
+    *,
+    virtual_quote_reserves: int,
+    virtual_base_reserves: int,
+    base_input_amount: int,
+    fee_config: FeeConfig,
+) -> tuple[int, int]:
+    """Return ``(quote_out, fee)`` for a Pump curve sell on raw virtual reserves.
+
+    Same integer math as :func:`executable_sell_quote`.
+    """
+    quote_before_fee = _constant_product_amount_out(
+        amount_in=base_input_amount,
+        input_reserves=virtual_base_reserves,
+        output_reserves=virtual_quote_reserves,
+    )
+    fee_amount = _ceil_fee_components(quote_before_fee, fee_config)
+    return quote_before_fee - fee_amount, fee_amount
+
+
 def _pump_bonding_curve_net_quote_in(
     *,
     spendable_quote_in: int,

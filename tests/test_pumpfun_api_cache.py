@@ -4,6 +4,8 @@ import urllib.error
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from rugbot.integrations.pumpfun_api import PumpFunApiClient
 from rugbot.integrations.rpc_cache import RpcResponseCache
 
@@ -73,7 +75,7 @@ def test_cursor_page_served_from_cache_without_expiry(tmp_path: Any) -> None:
 
 
 def test_failed_fetch_is_never_cached(tmp_path: Any) -> None:
-    """A failed fetch returns empty twice with two HTTP hits, nothing stored."""
+    """A failed fetch raises twice with two HTTP hits, nothing stored."""
     hits: list[str] = []
 
     def _failing_http(url: str) -> dict[str, Any]:
@@ -87,17 +89,13 @@ def test_failed_fetch_is_never_cached(tmp_path: Any) -> None:
         with patch(
             "rugbot.integrations.pumpfun_api._http_json", side_effect=_failing_http
         ):
-            assert client.fetch_trades("MintX", limit=50) == {
-                "trades": [],
-                "pagination": {},
-            }
+            with pytest.raises(urllib.error.HTTPError):
+                client.fetch_trades("MintX", limit=50)
         with patch(
             "rugbot.integrations.pumpfun_api._http_json", side_effect=_failing_http
         ):
-            assert client.fetch_trades("MintX", limit=50) == {
-                "trades": [],
-                "pagination": {},
-            }
+            with pytest.raises(urllib.error.HTTPError):
+                client.fetch_trades("MintX", limit=50)
     finally:
         cache.close()
     assert len(hits) == 2

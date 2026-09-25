@@ -16,6 +16,9 @@ per-wallet launch resolver.
 
 from __future__ import annotations
 
+import dataclasses
+import itertools
+import statistics
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -42,6 +45,7 @@ class LaunchEvent:
     created_at_ms: int | None
     received_sol: float
     funding_slot: int | None
+    funded_at_s: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +56,38 @@ class EntityLaunchHistory:
     recipients: int
     launches: tuple[LaunchEvent, ...]
     warning: str | None
+
+
+ACTIVE_WINDOW_S = 7 * 24 * 3600
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchActivity:
+    """Whether an entity is still launching, and how often."""
+
+    last_launch_s: int | None
+    launches_last_7d: int
+    median_interval_s: float | None
+    active: bool
+
+
+def launch_activity(history: EntityLaunchHistory, *, now_s: int) -> LaunchActivity:
+    """Summarize launch recency and cadence; active means a launch in 7 days."""
+    times = sorted(
+        event.created_at_ms // 1000
+        for event in history.launches
+        if event.created_at_ms is not None
+    )
+    if not times:
+        return LaunchActivity(None, 0, None, active=False)
+    intervals = [later - earlier for earlier, later in itertools.pairwise(times)]
+    recent = sum(1 for stamp in times if now_s - stamp <= ACTIVE_WINDOW_S)
+    return LaunchActivity(
+        last_launch_s=times[-1],
+        launches_last_7d=recent,
+        median_interval_s=statistics.median(intervals) if intervals else None,
+        active=recent > 0,
+    )
 
 
 def _coin_event(
@@ -101,11 +137,17 @@ def build_launch_history(
     """
     totals: dict[str, float] = {}
     slots: dict[str, int | None] = {}
+    funded_at: dict[str, int] = {}
     for transfer in transfers:
         totals[transfer.recipient] = (
             totals.get(transfer.recipient, 0.0) + transfer.amount_sol
         )
         slots.setdefault(transfer.recipient, transfer.slot)
+        if transfer.block_time is not None:
+            funded_at[transfer.recipient] = min(
+                funded_at.get(transfer.recipient, transfer.block_time),
+                transfer.block_time,
+            )
     events: list[LaunchEvent] = []
     seen_mints: set[str] = set()
     failures = 0
@@ -128,6 +170,16 @@ def build_launch_history(
             )
             if event is None or event.mint in seen_mints:
                 continue
+            # A creator's tokens from before this funder paid it belong to
+            # someone else's history (or an earlier life of the wallet).
+            wallet_funded_at = funded_at.get(wallet)
+            if (
+                wallet_funded_at is not None
+                and event.created_at_ms is not None
+                and event.created_at_ms < wallet_funded_at * 1000
+            ):
+                continue
+            event = dataclasses.replace(event, funded_at_s=wallet_funded_at)
             seen_mints.add(event.mint)
             events.append(event)
     events.sort(key=lambda event: event.created_at_ms or 0)
@@ -180,8 +232,11 @@ def merge_launch_histories(
 
 
 __all__ = [
+    "ACTIVE_WINDOW_S",
     "EntityLaunchHistory",
+    "LaunchActivity",
     "LaunchEvent",
     "build_launch_history",
+    "launch_activity",
     "merge_launch_histories",
 ]

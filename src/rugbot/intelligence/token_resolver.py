@@ -375,7 +375,11 @@ def _complete_signature_history(
     address: str,
     transport: SyncRpcTransport,
 ) -> tuple[dict[str, Any], ...]:
-    """Read a complete bounded finalized signature history or fail closed."""
+    """Read a complete finalized signature history or fail closed.
+
+    The oldest entry is the creation evidence, so a truncated history is an
+    error, never a result.
+    """
 
     signatures: list[dict[str, Any]] = []
     before: str | None = None
@@ -384,36 +388,26 @@ def _complete_signature_history(
             "commitment": "finalized",
             "limit": MAX_PAGE_SIGNATURES,
         }
-        try:
-            page = _rpc_call(
-                endpoint,
-                "getSignaturesForAddress",
-                [address, options],
-                transport,
-            )
-        except Exception:
-            if signatures:
-                return tuple(signatures)
-            raise
-        if not isinstance(page, list):
-            if signatures:
-                return tuple(signatures)
+        if before is not None:
+            options["before"] = before
+        page = _rpc_call(
+            endpoint, "getSignaturesForAddress", [address, options], transport
+        )
+        if not isinstance(page, list) or not all(
+            isinstance(item, dict) for item in page
+        ):
             raise RuntimeError("signature history response is incomplete")
-        typed_page = tuple(item for item in page if isinstance(item, dict))
-        if len(typed_page) != len(page):
-            if signatures:
-                return tuple(signatures)
-            raise RuntimeError("signature history contains malformed entries")
-        signatures.extend(typed_page)
+        signatures.extend(page)
         if len(page) < MAX_PAGE_SIGNATURES:
             return tuple(signatures)
-        candidate = typed_page[-1].get("signature") if typed_page else None
+        candidate = page[-1].get("signature")
         if not isinstance(candidate, str) or not candidate or candidate == before:
-            if signatures:
-                return tuple(signatures)
             raise RuntimeError("signature history pagination did not advance")
         before = candidate
-    return tuple(signatures)
+    raise RuntimeError(
+        f"signature history exceeds {MAX_SIGNATURE_HISTORY_PAGES} pages; "
+        "creation evidence unreachable"
+    )
 
 
 def _account_keys(transaction: Mapping[str, object]) -> tuple[str, ...]:

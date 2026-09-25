@@ -213,17 +213,10 @@ def extract_early_buyers(
 ) -> list[EarlyBuyerRecord]:
     """Extract the first N unique buyer wallets from token trade history."""
     try:
-        data = client.fetch_trades(mint, limit=100)
+        oldest_first = client.fetch_all_trades(mint)
     except Exception as exc:
         logger.warning("Failed fetching trades for mint %s: %s", mint, exc)
         return []
-
-    raw_trades = data.get("trades", [])
-    if not isinstance(raw_trades, list) or not raw_trades:
-        return []
-
-    # Trades from API are returned in reverse-chronological order; reverse to oldest first
-    oldest_first = list(reversed(raw_trades))
 
     records: list[EarlyBuyerRecord] = []
     seen_wallets: set[str] = set()

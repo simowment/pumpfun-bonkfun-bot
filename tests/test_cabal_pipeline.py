@@ -78,29 +78,27 @@ def test_validate_solana_address() -> None:
 def test_extract_early_buyers() -> None:
     """Extract early buyers from trade API response in chronological order."""
     mock_client = MagicMock()
-    # Trades from API are newest-first
-    mock_client.fetch_trades.return_value = {
-        "trades": [
-            {
-                "type": "buy",
-                "userAddress": ADDR_BUYER_2,
-                "amountSol": 2.5,
-                "timestamp": "2026-09-13T20:00:03Z",
-            },
-            {
-                "type": "sell",
-                "userAddress": ADDR_BUYER_1,
-                "amountSol": 1.0,
-                "timestamp": "2026-09-13T20:00:02Z",
-            },
-            {
-                "type": "buy",
-                "userAddress": ADDR_BUYER_1,
-                "amountSol": 5.0,
-                "timestamp": "2026-09-13T20:00:01Z",
-            },
-        ]
-    }
+    # fetch_all_trades returns the complete history oldest-first.
+    mock_client.fetch_all_trades.return_value = [
+        {
+            "type": "buy",
+            "userAddress": ADDR_BUYER_1,
+            "amountSol": 5.0,
+            "timestamp": "2026-09-13T20:00:01Z",
+        },
+        {
+            "type": "sell",
+            "userAddress": ADDR_BUYER_1,
+            "amountSol": 1.0,
+            "timestamp": "2026-09-13T20:00:02Z",
+        },
+        {
+            "type": "buy",
+            "userAddress": ADDR_BUYER_2,
+            "amountSol": 2.5,
+            "timestamp": "2026-09-13T20:00:03Z",
+        },
+    ]
 
     buyers = extract_early_buyers(mock_client, MINT_WINNER_A, buyer_limit=5)
     assert len(buyers) == 2

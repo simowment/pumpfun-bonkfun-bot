@@ -14,6 +14,7 @@ import asyncio
 import base64
 import json
 import struct
+import time
 import urllib.error
 import urllib.request
 from typing import TYPE_CHECKING
@@ -72,6 +73,15 @@ VALID_INTERVALS = {
 }
 
 
+HTTP_TOO_MANY_REQUESTS = 429
+HTTP_RATE_LIMIT_ATTEMPTS = 4
+HTTP_RATE_LIMIT_MAX_WAIT_SECONDS = 30.0
+# swap-api rejects trade pages larger than 100 (verified live).
+TRADES_PAGE_LIMIT = 100
+TRADES_PAGE_PACING_SECONDS = 0.5
+TRADES_MAX_PAGES = 500
+
+
 def _http_json(
     url: str,
     *,
@@ -91,8 +101,24 @@ def _http_json(
     if headers:
         req_headers.update(headers)
     req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode())
+    for attempt in range(HTTP_RATE_LIMIT_ATTEMPTS):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            if exc.code != HTTP_TOO_MANY_REQUESTS or (
+                attempt == HTTP_RATE_LIMIT_ATTEMPTS - 1
+            ):
+                raise
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            wait = float(retry_after) if retry_after and retry_after.isdigit() else 2.0
+            logger.info("pump.fun rate limited; retrying in %.0fs", wait)
+            time.sleep(min(wait, HTTP_RATE_LIMIT_MAX_WAIT_SECONDS))
+    raise AssertionError("unreachable")
+
+
+class PumpFunApiError(RuntimeError):
+    """A pump.fun API response could not be obtained or narrowed."""
 
 
 class PumpFunApiClient:
@@ -235,33 +261,53 @@ class PumpFunApiClient:
         url = f"{self._base_url}/v2/coins/{mint}/trades?limit={limit}"
         if cursor:
             url += f"&cursor={cursor}"
-        try:
-            resp = _http_json(url)
-            if isinstance(resp, dict):
-                page = {
-                    "trades": resp.get("trades", []),
-                    "pagination": resp.get("pagination", {}),
-                }
-                if self._page_cache is not None and isinstance(page["trades"], list):
-                    try:
-                        # Cursor pages are immutable fills: keep forever.
-                        # The newest page stays short-lived via auto TTL.
-                        self._page_cache.store(
-                            "pumpfun/trades",
-                            cache_params,
-                            page,
-                            ttl_override=float("inf") if cursor else None,
-                        )
-                    except Exception:
-                        logger.debug("Pump.fun trade page store failed for %s", mint)
-                return page
-            return {"trades": [], "pagination": {}}
-        except urllib.error.HTTPError as exc:
-            logger.warning("Pump.fun API trades fetch failed (%s): %s", exc.code, exc)
-            return {"trades": [], "pagination": {}}
-        except Exception as exc:
-            logger.warning("Pump.fun API request failed: %s", exc)
-            return {"trades": [], "pagination": {}}
+        resp = _http_json(url)
+        if not isinstance(resp, dict) or not isinstance(resp.get("trades"), list):
+            raise PumpFunApiError(f"malformed trades page for {mint}")  # noqa: TRY003
+        page = {"trades": resp["trades"], "pagination": resp.get("pagination", {})}
+        if self._page_cache is not None:
+            try:
+                # Cursor pages are immutable fills: keep forever.
+                # The newest page stays short-lived via auto TTL.
+                self._page_cache.store(
+                    "pumpfun/trades",
+                    cache_params,
+                    page,
+                    ttl_override=float("inf") if cursor else None,
+                )
+            except Exception:
+                logger.debug("Pump.fun trade page store failed for %s", mint)
+        return page
+
+    def fetch_all_trades(self, mint: str) -> list[dict]:
+        """Return a coin's complete trade history, oldest first.
+
+        Pages the swap-api cursor to exhaustion. Raises instead of returning a
+        truncated history when a page cannot be fetched.
+
+        Args:
+            mint: Coin mint address.
+
+        Returns:
+            Trade dicts ordered by ``slotIndexId`` (slot, then index in slot).
+        """
+        trades: list[dict] = []
+        cursor: str | None = None
+        for _ in range(TRADES_MAX_PAGES):
+            page = self.fetch_trades(mint, limit=TRADES_PAGE_LIMIT, cursor=cursor)
+            trades.extend(page["trades"])
+            pagination = page["pagination"]
+            cursor = (
+                pagination.get("nextCursor") if isinstance(pagination, dict) else None
+            )
+            if not (
+                isinstance(pagination, dict) and pagination.get("hasMore") and cursor
+            ):
+                return sorted(trades, key=lambda trade: str(trade.get("slotIndexId")))
+            time.sleep(TRADES_PAGE_PACING_SECONDS)
+        raise PumpFunApiError(  # noqa: TRY003
+            f"{mint} trade history exceeds {TRADES_MAX_PAGES} pages"
+        )
 
     def fetch_token(self, mint: str) -> dict:
         """Return token metadata for a coin.
