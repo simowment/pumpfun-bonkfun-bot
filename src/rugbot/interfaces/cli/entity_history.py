@@ -15,6 +15,7 @@ import json
 import statistics
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -36,6 +37,7 @@ from rugbot.integrations.pumpfun_api import PumpFunApiError, get_client
 from rugbot.tracker.entity_history import (
     EntityLaunchHistory,
     LaunchActivity,
+    LaunchEvent,
     build_launch_history,
     launch_activity,
     merge_launch_histories,
@@ -55,6 +57,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 logger = get_logger(__name__)
+
+TRADE_FETCH_WORKERS = 3
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -255,24 +259,30 @@ def _render_activity(activity: LaunchActivity) -> None:
 def _replays(
     history: EntityLaunchHistory, costs: ReplayCosts
 ) -> tuple[list[LaunchReplay], list[str]]:
-    """Fetch full trade histories and build replays; failures are reported."""
+    """Fetch full trade histories concurrently and build replays.
+
+    Failures are reported per launch, never dropped silently. Concurrency is
+    bounded because pump.fun rate-limits the trades endpoint.
+    """
     client = get_client()
-    replays: list[LaunchReplay] = []
-    skipped: list[str] = []
-    for event in history.launches:
+
+    def build(event: LaunchEvent) -> LaunchReplay | str:
         try:
             trades = trades_from_swap_api(client.fetch_all_trades(event.mint))
-            replays.append(
-                LaunchReplay(
-                    event.mint,
-                    create_slot=trades[0].slot,
-                    creator=event.creator,
-                    trades=trades,
-                    costs=costs,
-                )
+            return LaunchReplay(
+                event.mint,
+                create_slot=trades[0].slot,
+                creator=event.creator,
+                trades=trades,
+                costs=costs,
             )
         except (PumpFunApiError, LaunchReplayError, IndexError, OSError) as error:
-            skipped.append(f"{event.symbol or event.mint[:8]}: {error}")
+            return f"{event.symbol or event.mint[:8]}: {error}"
+
+    with ThreadPoolExecutor(max_workers=TRADE_FETCH_WORKERS) as pool:
+        outcomes = list(pool.map(build, history.launches))
+    replays = [outcome for outcome in outcomes if isinstance(outcome, LaunchReplay)]
+    skipped = [outcome for outcome in outcomes if isinstance(outcome, str)]
     return replays, skipped
 
 
