@@ -24,6 +24,7 @@ import threading
 import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit, urlunsplit
 
 from sol_trade_sdk.solana.provider_pool import (
     RpcProviderPool,
@@ -376,3 +377,23 @@ def _decoded_result(method: str, status: int, body: bytes) -> object:
             status=status,
         )
     return payload["result"]
+
+
+def resolve_websocket_endpoint(http_endpoint: str | None) -> str | None:
+    """Return the configured Solana WSS URL, or derive it from the HTTP endpoint.
+
+    ``SOLANA_RPC_WEBSOCKET`` wins when set; otherwise the HTTP URL's scheme is
+    swapped (https -> wss, http -> ws) keeping host, path and query (API key).
+    """
+    from rugbot.runtime.config import load_provider_settings  # noqa: PLC0415
+
+    configured = load_provider_settings().rpc_websocket
+    if configured:
+        return configured
+    if not http_endpoint:
+        return None
+    parsed = urlsplit(http_endpoint)
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    return urlunsplit(
+        (scheme, parsed.netloc, parsed.path, parsed.query, parsed.fragment)
+    )

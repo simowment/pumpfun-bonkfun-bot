@@ -422,7 +422,7 @@ def decode_pump_trade_event_proofs(
     _, event_payloads = payload
     decoded: list[tuple[int, PumpTradeEventProof]] = []
     for event_index, event_payload in enumerate(event_payloads):
-        event = _decode_trade_event(event_payload, observation.slot)
+        event = decode_pump_trade_event(event_payload, observation.slot)
         if isinstance(event, AbstainResult):
             return event
         decoded.append((event_index, event))
@@ -630,7 +630,7 @@ def _select_event(
     events: list[PumpTradeEventProof] = []
     expected_event_name = _trade_event_instruction_name(instruction.instruction_name)
     for payload in payloads:
-        event = _decode_trade_event(payload, as_of_slot)
+        event = decode_pump_trade_event(payload, as_of_slot)
         if isinstance(event, AbstainResult):
             return event
         if (
@@ -664,10 +664,11 @@ def _trade_event_instruction_name(instruction_name: str) -> str:
     }.get(instruction_name, instruction_name)
 
 
-def _decode_trade_event(
+def decode_pump_trade_event(
     payload: bytes,
     as_of_slot: int,
 ) -> PumpTradeEventProof | AbstainResult:
+    """Decode one pinned Pump ``TradeEvent`` payload (pre- or post-upgrade)."""
     reader = _TradeEventReader(payload)
     if reader.read_bytes(8) != TRADE_EVENT_DISCRIMINATOR:
         return _abstain(

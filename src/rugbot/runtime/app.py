@@ -9,7 +9,6 @@ import inspect
 import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit, urlunsplit
 
 import base58
 from sol_trade_sdk.pump import derive_bonding_curve_pda
@@ -26,7 +25,7 @@ from rugbot.ingest.pump.pump_create_observation import (
 )
 from rugbot.ingest.pump.pump_stream import PumpPortalLaunchStream
 from rugbot.ingest.rpc_observer import observe_address, observe_finalized_transaction
-from rugbot.integrations.rpc_access import shared_async_pool
+from rugbot.integrations.rpc_access import resolve_websocket_endpoint, shared_async_pool
 from rugbot.integrations.solscan import (
     SolscanClient,
     SolscanProviderError,
@@ -1289,7 +1288,7 @@ def build_ui_runtime(  # noqa: PLR0913
         endpoint=resolved_endpoint,
         fallback_endpoints=resolved_fallback_endpoints,
     )
-    resolved_websocket_endpoint = websocket_endpoint or _resolve_websocket_endpoint(
+    resolved_websocket_endpoint = websocket_endpoint or resolve_websocket_endpoint(
         resolved_endpoint
     )
     launch_observation = None
@@ -1323,19 +1322,6 @@ def build_ui_runtime(  # noqa: PLR0913
     if wallet is not None and repository.get_funder(wallet) is None:
         service.add_funder(wallet, label="Configured target")
     return app
-
-
-def _resolve_websocket_endpoint(http_endpoint: str | None) -> str | None:
-    wss_env = load_provider_settings().rpc_websocket
-    if wss_env:
-        return wss_env
-    if not http_endpoint:
-        return None
-    parsed = urlsplit(http_endpoint)
-    scheme = "wss" if parsed.scheme == "https" else "ws"
-    return urlunsplit(
-        (scheme, parsed.netloc, parsed.path, parsed.query, parsed.fragment)
-    )
 
 
 __all__ = [

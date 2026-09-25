@@ -20,6 +20,10 @@ if TYPE_CHECKING:
     from rugbot.discover.ruggers import RuggerEvidence
 
 
+# lamports per SOL (1e9) over base units per token (1e6).
+LAMPORTS_PER_TOKEN_RATIO = 1_000
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rug_discover",
@@ -50,6 +54,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="stop after a bounded duration; omitted means run continuously",
+    )
+    collect.add_argument(
+        "--record-trades",
+        action="store_true",
+        help="record every collected launch's trades from finalized Pump program "
+        "logs (Solana WebSocket) so scans read the DB instead of pump.fun",
     )
 
     enrich = sub.add_parser("enrich", help="historique batch enrich for wallet or mint")
@@ -296,6 +306,45 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _recorded_trades(state_dir: Path, mint: str) -> list[LaunchTrade] | str:
+    """Return trades the collector recorded from finalized Pump logs.
+
+    Returns an empty list when nothing was recorded, or a skip reason when the
+    launch carries trade events outside the modeled fee set.
+    """
+    import sqlite3
+
+    from rugbot.backtest.launch_replay import LaunchTrade as Trade
+    from rugbot.discover.collector import UNMODELED_SIDE
+
+    with sqlite3.connect(state_dir / "rugbot.db") as connection:
+        rows = connection.execute(
+            "SELECT slot, wallet, side, quote_amount_base_units, raw_json "
+            "FROM discover_trades WHERE mint = ? ORDER BY slot, signature, event_index",
+            (mint,),
+        ).fetchall()
+    if any(side == UNMODELED_SIDE for _, _, side, _, _ in rows):
+        return "holder-reward coin (fees not modeled)"
+    trades = []
+    for slot, wallet, side, quote_lamports, raw_json in rows:
+        event = json.loads(raw_json)
+        trades.append(
+            Trade(
+                slot=slot,
+                timestamp_s=float(event["timestamp"]),
+                wallet=wallet,
+                is_buy=side == "buy",
+                # SOL per whole token from the exact post-trade virtual reserves.
+                price_sol=event["virtual_sol_reserves"]
+                / event["virtual_token_reserves"]
+                / LAMPORTS_PER_TOKEN_RATIO,
+                amount_sol=quote_lamports / 1_000_000_000,
+                on_curve=True,
+            )
+        )
+    return trades
+
+
 def _load_launch_trades(
     state_dir: Path, *, min_age_minutes: float, max_launches: int
 ) -> tuple[dict[str, tuple[str, list[LaunchTrade]]], Counter[str]]:
@@ -343,6 +392,11 @@ def _load_launch_trades(
         )
         if reason is not None:
             return mint, creator, reason
+        recorded = _recorded_trades(state_dir, mint)
+        if isinstance(recorded, str):
+            return mint, creator, recorded
+        if recorded:
+            return mint, creator, recorded
         try:
             return mint, creator, trades_from_swap_api(client.fetch_all_trades(mint))
         except (PumpFunApiError, LaunchReplayError, OSError) as error:
@@ -551,6 +605,7 @@ def main(argv: list[str] | None = None) -> int:
                     use_jsonl=bool(args.jsonl),
                     endpoint=args.endpoint,
                     duration_seconds=args.duration_seconds,
+                    record_trades=bool(args.record_trades),
                 )
             )
         except KeyboardInterrupt:

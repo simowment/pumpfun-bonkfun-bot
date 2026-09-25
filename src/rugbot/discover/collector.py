@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import datetime as dt
 import json
 import os
@@ -15,8 +17,11 @@ from pathlib import Path
 
 import base58
 from sol_trade_sdk.solana.provider_pool import RpcHttpTransport, RpcProviderPool
+from solders.pubkey import Pubkey
 
 from rugbot.backtest.trajectory.finalized_trade_builder import (
+    TRADE_EVENT_DISCRIMINATOR,
+    decode_pump_trade_event,
     decode_pump_trade_event_proofs,
 )
 from rugbot.discover.store import (
@@ -28,12 +33,18 @@ from rugbot.discover.store import (
 )
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.observations import RawChainObservation
+from rugbot.ingest.pump.create_decoder import PUMP_PROGRAM_ID
 from rugbot.ingest.pump.pump_create_observation import decode_pump_create_v2_observation
 from rugbot.ingest.pump.pump_stream import (
     PumpPortalLaunchNotification,
     PumpPortalLaunchStream,
 )
 from rugbot.ingest.rpc_observer import observe_address, observe_finalized_transaction
+from rugbot.integrations.rpc_access import resolve_websocket_endpoint
+from rugbot.integrations.solana_logs_stream import (
+    SolanaLogsStream,
+    WalletLogNotification,
+)
 from rugbot.runtime.config import load_provider_settings, resolve_dotenv
 from rugbot.storage.database import DatabaseManager
 from rugbot.utils.logger import get_logger
@@ -374,6 +385,94 @@ async def _poll_trades_for_mint(
             continue
 
 
+# Trades of each collected launch are recorded from finalized Pump program logs
+# for this long after the create notification.
+TRADE_RECORD_WINDOW_SECONDS = 2 * 3600
+PROGRAM_DATA_PREFIX = "Program data: "
+PUMP_TRADE_MINT_OFFSET = 8
+PUBKEY_BYTES = 32
+# discover_trades side for a launch whose trade events are outside the modeled
+# fee set (holder rewards); scans skip such launches instead of using a gap.
+UNMODELED_SIDE = "unmodeled"
+
+
+def _record_trade_logs(
+    db: DatabaseManager,
+    notification: WalletLogNotification,
+    tracked_until: dict[str, float],
+    stats: CollectStats,
+) -> None:
+    """Persist every Pump TradeEvent of a tracked mint in one finalized tx."""
+    now = time.monotonic()
+    for event_index, line in enumerate(notification.logs):
+        if not line.startswith(PROGRAM_DATA_PREFIX):
+            continue
+        try:
+            payload = base64.b64decode(line[len(PROGRAM_DATA_PREFIX) :], validate=True)
+        except (binascii.Error, ValueError):
+            continue
+        if not payload.startswith(TRADE_EVENT_DISCRIMINATOR):
+            continue
+        mint = str(
+            Pubkey.from_bytes(
+                payload[PUMP_TRADE_MINT_OFFSET : PUMP_TRADE_MINT_OFFSET + PUBKEY_BYTES]
+            )
+        )
+        if tracked_until.get(mint, 0.0) < now:
+            continue
+        event = decode_pump_trade_event(payload, notification.slot)
+        if isinstance(event, AbstainResult):
+            upsert_trade(
+                db,
+                mint=mint,
+                signature=notification.signature,
+                event_index=event_index,
+                slot=notification.slot,
+                side=UNMODELED_SIDE,
+                quote_amount_base_units=0,
+                raw_json=json.dumps({"reason": event.message}),
+            )
+            continue
+        upsert_trade(
+            db,
+            mint=mint,
+            signature=notification.signature,
+            event_index=event_index,
+            slot=notification.slot,
+            side="buy" if event.is_buy else "sell",
+            wallet=event.user,
+            quote_amount_base_units=event.sol_amount_base_units,
+            base_amount=event.token_amount_base_units,
+            raw_json=json.dumps(
+                {
+                    "timestamp": event.timestamp,
+                    "virtual_sol_reserves": event.virtual_sol_reserves_base_units,
+                    "virtual_token_reserves": event.virtual_token_reserves_base_units,
+                }
+            ),
+        )
+        stats.trades += 1
+
+
+async def _run_trade_recorder(
+    stream: SolanaLogsStream,
+    db: DatabaseManager,
+    tracked_until: dict[str, float],
+    stats: CollectStats,
+) -> None:
+    """Consume finalized Pump program logs and record tracked mints' trades."""
+    await stream.reconcile([PUMP_PROGRAM_ID])
+    while True:
+        try:
+            notification = await stream.next_notification()
+        except Exception as exc:
+            stats.errors += 1
+            logger.warning("pump logs stream error: %s", exc)
+            await asyncio.sleep(RECONNECT_MIN_SECONDS)
+            continue
+        _record_trade_logs(db, notification, tracked_until, stats)
+
+
 async def run_collect(
     state_dir: Path,
     *,
@@ -381,6 +480,7 @@ async def run_collect(
     endpoint: str | None = None,
     pumpportal_url: str | None = None,
     duration_seconds: float | None = None,
+    record_trades: bool = False,
 ) -> None:
     """Daemon loop: PumpPortal -> finalized hydration -> SQLite/JSONL -> trade polling."""
 
@@ -422,6 +522,17 @@ async def run_collect(
     stop_event = asyncio.Event()
     trade_tasks: dict[str, asyncio.Task[None]] = {}
     hydration_tasks: set[asyncio.Task[None]] = set()
+    tracked_until: dict[str, float] = {}
+    recorder_task: asyncio.Task[None] | None = None
+    if record_trades:
+        websocket_endpoint = resolve_websocket_endpoint(rpc_endpoint)
+        if websocket_endpoint is None:
+            raise ValueError("record_trades needs a Solana WebSocket endpoint")
+        recorder_task = asyncio.create_task(
+            _run_trade_recorder(
+                SolanaLogsStream(websocket_endpoint), db, tracked_until, stats
+            )
+        )
 
     def _handle_signal(*_args: object) -> None:
         stop_event.set()
@@ -600,12 +711,18 @@ async def run_collect(
                 continue
 
             stats.notifications += 1
+            tracked_until[notification.mint_pubkey] = (
+                time.monotonic() + TRADE_RECORD_WINDOW_SECONDS
+            )
             task = asyncio.create_task(_hydrate_and_store(notification))
             hydration_tasks.add(task)
             task.add_done_callback(hydration_tasks.discard)
     finally:
         stop_event.set()
-        for task in [*hydration_tasks, *trade_tasks.values()]:
+        pending = [*hydration_tasks, *trade_tasks.values()]
+        if recorder_task is not None:
+            pending.append(recorder_task)
+        for task in pending:
             task.cancel()
             try:
                 await task

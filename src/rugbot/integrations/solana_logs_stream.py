@@ -37,6 +37,7 @@ class WalletLogNotification:
     wallet: str
     signature: str
     slot: int
+    logs: tuple[str, ...] = ()
 
 
 class SolanaLogsStream:
@@ -249,7 +250,15 @@ def _notification_from_payload(
         return None
     if type(signature) is not str or not signature:
         return None
-    return WalletLogNotification(wallet=wallet, signature=signature, slot=slot)
+    logs = value.get("logs")
+    return WalletLogNotification(
+        wallet=wallet,
+        signature=signature,
+        slot=slot,
+        logs=tuple(line for line in logs if isinstance(line, str))
+        if isinstance(logs, list)
+        else (),
+    )
 
 
 __all__ = [
