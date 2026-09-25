@@ -650,7 +650,7 @@ def _stub_ruggers_rpc(monkeypatch, counts: dict) -> None:
         config_mod,
         "load_provider_settings",
         lambda environment=None: SimpleNamespace(
-            rpc_http="https://rpc.test", rpc_http_fallbacks=()
+            rpc_http="https://rpc.test", rpc_http_fallbacks=(), rpc_websocket=None
         ),
     )
 

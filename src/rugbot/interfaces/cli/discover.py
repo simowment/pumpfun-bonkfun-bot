@@ -299,6 +299,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="state directory (default: .state/discover)",
     )
 
+    fleet = sub.add_parser(
+        "fleet",
+        help="reconstruct an operator from one launch's bundle wallets: fleet "
+        "births/funders, the operator's other launches, and their backtest",
+    )
+    fleet.add_argument("mint", help="a launch the operator bundled")
+    fleet.add_argument(
+        "--bundle-slots",
+        type=int,
+        default=1,
+        help="slots after create counted as bundle",
+    )
+    fleet.add_argument(
+        "--min-sol", type=float, default=1.0, help="minimum SOL a bundle wallet bought"
+    )
+    fleet.add_argument(
+        "--sample-wallets",
+        type=int,
+        default=3,
+        help="fleet wallets whose recent buys are scanned for other launches",
+    )
+    fleet.add_argument(
+        "--max-transactions",
+        type=int,
+        default=300,
+        help="recent transactions scanned per sampled wallet",
+    )
+    fleet.add_argument("--entry-delay", type=int, default=2)
+    fleet.add_argument("--size", type=float, default=0.1)
+
     patterns = sub.add_parser(
         "patterns",
         help="find repeat creators, block-0 insiders and block-0 pairs in recorded "
@@ -446,6 +476,129 @@ def _load_launch_trades(
     }
     skipped = Counter(trades for _, _, trades in loaded if isinstance(trades, str))
     return launches, skipped
+
+
+def _run_fleet(args: argparse.Namespace) -> int:
+    """Reconstruct and backtest the operator behind one bundled launch."""
+    from collections import Counter as Tally
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import UTC, datetime
+
+    from rugbot.backtest.launch_replay import (
+        LaunchReplay,
+        LaunchReplayError,
+        ReplayCosts,
+        default_exit_rules,
+        describe_exit_rule,
+        summarize_rules,
+        trades_from_swap_api,
+    )
+    from rugbot.discover.fleet import bundle_wallets, create_facts, recent_pump_buys
+    from rugbot.integrations.pumpfun_api import get_client
+    from rugbot.tracker.funding_chain import wallet_birth
+
+    client = get_client()
+
+    raw_trades = client.fetch_all_trades(args.mint)
+    creator, reason = create_facts(args.mint)
+    if creator is None:
+        print(f"cannot resolve {args.mint}: {reason}")
+        return 1
+    trades = trades_from_swap_api(raw_trades)
+    fleet = bundle_wallets(
+        trades, creator=creator, max_delay_slots=args.bundle_slots, min_sol=args.min_sol
+    )
+    print(f"launch {args.mint}  creator {creator}  bundle wallets {len(fleet)}")
+    if not fleet:
+        return 0
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        births = list(pool.map(wallet_birth, fleet))
+    launch_time = trades[0].timestamp_s
+    funders = Tally(birth.funder for birth in births if birth.funder)
+    for birth in births:
+        age = (
+            f"{(launch_time - birth.first_block_time) / 3600:7.1f}h"
+            if birth.first_block_time
+            else "   deep  "
+        )
+        shared = funders[birth.funder] if birth.funder else 0
+        print(
+            f"  {birth.wallet}  created {age} before launch  funder "
+            f"{(birth.funder or '?')[:10]}{f'  (funds {shared} fleet wallets)' if shared > 1 else ''}"
+        )
+    print(
+        f"  distinct funders {len(funders)}; shared by 2+: "
+        f"{sum(1 for count in funders.values() if count > 1)}"
+    )
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        sampled = pool.map(
+            lambda wallet: recent_pump_buys(
+                wallet, max_transactions=args.max_transactions
+            ),
+            fleet[: args.sample_wallets],
+        )
+        candidates = {mint for mints in sampled for mint in mints} | {args.mint}
+    fleet_set = set(fleet)
+
+    def operator_launch(mint: str) -> tuple[str, LaunchReplay | None, str | None]:
+        raw_history = client.fetch_all_trades(mint)
+        if not raw_history:
+            return mint, None, "no trades"
+        mint_creator, skip = create_facts(mint)
+        if mint_creator is None or skip is not None:
+            return mint, None, skip
+        history = trades_from_swap_api(raw_history)
+        early = {
+            trade.wallet
+            for trade in history
+            if trade.is_buy and trade.slot <= history[0].slot + args.bundle_slots
+        }
+        if not early & fleet_set:
+            return mint, None, "no fleet wallet in the first slots"
+        try:
+            replay = LaunchReplay(
+                mint,
+                create_slot=history[0].slot,
+                creator=mint_creator,
+                trades=history,
+                costs=ReplayCosts(
+                    quote_size_sol=args.size, entry_delay_slots=args.entry_delay
+                ),
+            )
+        except LaunchReplayError as error:
+            return mint, None, str(error)
+        return mint, replay, None
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        outcomes = list(pool.map(operator_launch, sorted(candidates)))
+    replays = [replay for _, replay, _ in outcomes if replay is not None]
+    skipped = Tally(reason for _, replay, reason in outcomes if replay is None)
+    print(
+        f"\ncoins bought by {min(args.sample_wallets, len(fleet))} fleet wallets: "
+        f"{len(candidates)}  operator launches (fleet in first slots): {len(replays)}"
+    )
+    for why, count in skipped.most_common():
+        print(f"  skipped {count}: {why}")
+    for replay in sorted(replays, key=lambda item: item.profile.create_slot):
+        profile = replay.profile
+        created = datetime.fromtimestamp(profile.created_at_s, tz=UTC)
+        print(
+            f"  {created:%m-%d %H:%M}  {replay.mint}  entry MC "
+            f"{profile.entry_mc_sol:6.1f} SOL  ATH {profile.ath_multiple:5.2f}x"
+        )
+    if not replays:
+        return 0
+    best = summarize_rules(replays, default_exit_rules())[0]
+    verdict = "EDGE" if best.conservative_ev_sol > 0 else "no edge"
+    small = " (small sample < 10)" if best.samples < BIBLE_MIN_SAMPLES else ""
+    print(
+        f"\nverdict: {verdict}{small}  best [{describe_exit_rule(best.rule)}] "
+        f"N={best.samples} win {best.winrate:.0%}  cons.EV "
+        f"{best.conservative_ev_sol:+.4f}  EV {best.net_ev_sol:+.4f}  EV-best "
+        f"{best.ev_without_best_sol:+.4f} SOL/trade (entry block +{args.entry_delay})"
+    )
+    return 0
 
 
 def _run_patterns(args: argparse.Namespace) -> int:
@@ -1022,6 +1175,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"tokens traded: {report['participating_token_count']}")
         return 0
+    if args.command == "fleet":
+        return _run_fleet(args)
     if args.command == "patterns":
         return _run_patterns(args)
     if args.command == "wallets":

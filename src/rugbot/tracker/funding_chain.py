@@ -48,6 +48,8 @@ PRODUCTION_PACING_SECONDS = 0.35
 # forwards most of what it received to one account. Operators chain several
 # (including seed-derived accounts) between the hub and the creator burner.
 RELAY_MAX_SIGNATURES = 8
+# Pages walked back to reach a wallet's first transaction (1000 sigs each).
+BIRTH_MAX_PAGES = 20
 RELAY_MAX_HOPS = 5
 RELAY_FORWARD_FRACTION = 0.8
 PUMP_CREATE_LOG = "Program log: Instruction: Create"
@@ -233,7 +235,7 @@ def _parsed_balances(
     return keys, list(pre), list(post)
 
 
-def _signatures(
+def signature_page(
     wallet: str,
     *,
     endpoints: RpcEndpoints | Sequence[str] | None,
@@ -255,7 +257,99 @@ def _signatures(
     return [entry for entry in result if isinstance(entry, dict)]
 
 
-def _transaction(
+def _history_to_birth(
+    wallet: str,
+    first_page: list[dict[str, object]],
+    *,
+    endpoints: RpcEndpoints | Sequence[str] | None,
+    transport: Callable[[str, str, list[object]], object] | None,
+) -> list[dict[str, object]] | None:
+    """Page backward until the wallet's first transaction is on the last page.
+
+    The newest page's oldest entry is only the wallet's first transaction when
+    the page is not full; otherwise walk the ``before`` cursor. Returns the page
+    holding the true first transaction, or None when it lies deeper than
+    ``BIRTH_MAX_PAGES`` pages (callers must not guess a funder then).
+    """
+    page = first_page
+    for _ in range(BIRTH_MAX_PAGES):
+        if len(page) < SIGNATURE_PAGE_LIMIT:
+            return page
+        before = page[-1].get("signature")
+        if not isinstance(before, str):
+            return None
+        try:
+            result = _rpc_call(
+                "getSignaturesForAddress",
+                [
+                    wallet,
+                    {
+                        "limit": SIGNATURE_PAGE_LIMIT,
+                        "before": before,
+                        "commitment": "finalized",
+                    },
+                ],
+                endpoints=endpoints,
+                transport=transport,
+            )
+        except RpcAccessError:
+            return None
+        if not isinstance(result, list):
+            return None
+        next_page = [entry for entry in result if isinstance(entry, dict)]
+        if not next_page:
+            return page
+        page = next_page
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class WalletBirth:
+    """A wallet's first finalized transaction and who funded it."""
+
+    wallet: str
+    first_slot: int | None
+    first_block_time: int | None
+    funder: str | None
+    first_signature: str | None = None
+
+
+def wallet_birth(
+    wallet: str,
+    *,
+    endpoints: RpcEndpoints | Sequence[str] | None = None,
+    transport: Callable[[str, str, list[object]], object] | None = None,
+) -> WalletBirth:
+    """Return an account's first transaction and its funder (largest SOL payer).
+
+    For a mint account the first transaction is its creation.
+
+    Raises:
+        FundingChainError: When ``wallet`` is empty.
+    """
+    owner = _require_address(wallet)
+    first_page = signature_page(owner, endpoints=endpoints, transport=transport)
+    page = (
+        _history_to_birth(owner, first_page, endpoints=endpoints, transport=transport)
+        if first_page
+        else None
+    )
+    if not page:
+        return WalletBirth(owner, None, None, None)
+    oldest = page[-1]
+    slot = oldest.get("slot")
+    block_time = oldest.get("blockTime")
+    signature = oldest.get("signature")
+    return WalletBirth(
+        wallet=owner,
+        first_slot=slot if isinstance(slot, int) else None,
+        first_block_time=block_time if isinstance(block_time, int) else None,
+        funder=_parent_of(owner, page, endpoints=endpoints, transport=transport),
+        first_signature=signature if isinstance(signature, str) else None,
+    )
+
+
+def parsed_transaction(
     signature: str,
     *,
     endpoints: RpcEndpoints | Sequence[str] | None,
@@ -303,7 +397,7 @@ def _parent_of(
     if not isinstance(oldest, str):
         return None
     parsed = _parsed_balances(
-        _transaction(oldest, endpoints=endpoints, transport=transport)
+        parsed_transaction(oldest, endpoints=endpoints, transport=transport)
     )
     if parsed is None:
         return None
@@ -425,7 +519,7 @@ def walk_upstream(
         visited.add(current)
         if transport is None and hop > 0:
             time.sleep(PRODUCTION_PACING_SECONDS)
-        signatures = _signatures(current, endpoints=endpoints, transport=transport)
+        signatures = signature_page(current, endpoints=endpoints, transport=transport)
         if signatures is None:
             warning = f"signature fetch failed at {current[:8]}"
             break
@@ -444,8 +538,14 @@ def walk_upstream(
         if is_hub:
             hub = current
             break
-        parent = _parent_of(
+        birth_page = _history_to_birth(
             current, signatures, endpoints=endpoints, transport=transport
+        )
+        if birth_page is None:
+            warning = f"history of {current[:8]} deeper than {BIRTH_MAX_PAGES} pages"
+            break
+        parent = _parent_of(
+            current, birth_page, endpoints=endpoints, transport=transport
         )
         if parent is None:
             warning = f"no upstream parent found above {current[:8]}"
@@ -471,7 +571,7 @@ def _enumerate_direction(  # noqa: PLR0913
         ``(counterparty, amount_sol, signature, slot)`` tuples, newest-first.
     """
     owner = _require_address(wallet)
-    signatures = _signatures(owner, endpoints=endpoints, transport=transport)
+    signatures = signature_page(owner, endpoints=endpoints, transport=transport)
     if not signatures:
         return ()
     rows: list[tuple[str, float, str, int | None]] = []
@@ -485,7 +585,9 @@ def _enumerate_direction(  # noqa: PLR0913
         slot_value = int(slot) if isinstance(slot, int) else None
         if transport is None:
             time.sleep(PRODUCTION_PACING_SECONDS)
-        transaction = _transaction(signature, endpoints=endpoints, transport=transport)
+        transaction = parsed_transaction(
+            signature, endpoints=endpoints, transport=transport
+        )
         for counterparty, amount_sol in _counterparty_transfers(
             transaction, wallet=owner, min_sol=min_sol, receiving=receiving
         ):
@@ -619,7 +721,7 @@ def _hydrate_transfers(  # noqa: PLR0913
             time.sleep(PRODUCTION_PACING_SECONDS)
         hydrated += 1
         for counterparty, amount_sol in _counterparty_transfers(
-            _transaction(signature, endpoints=endpoints, transport=transport),
+            parsed_transaction(signature, endpoints=endpoints, transport=transport),
             wallet=owner,
             min_sol=min_sol,
             receiving=False,
@@ -775,7 +877,7 @@ def resolve_relay_terminal(
     relays: list[str] = []
     amount_sol = received_sol
     for _ in range(max_hops):
-        signatures = _signatures(current, endpoints=endpoints, transport=transport)
+        signatures = signature_page(current, endpoints=endpoints, transport=transport)
         if signatures is None or len(signatures) > RELAY_MAX_SIGNATURES:
             break
         forward: tuple[str, float] | None = None
@@ -786,7 +888,9 @@ def resolve_relay_terminal(
                 continue
             if transport is None:
                 time.sleep(PRODUCTION_PACING_SECONDS)
-            result = _transaction(signature, endpoints=endpoints, transport=transport)
+            result = parsed_transaction(
+                signature, endpoints=endpoints, transport=transport
+            )
             if _created_pump_token(result, current):
                 created = True
                 break
@@ -821,10 +925,14 @@ __all__ = [
     "FundingChainWalk",
     "FundingSource",
     "RelayResolution",
+    "WalletBirth",
     "enumerate_funded",
     "enumerate_funded_paged",
     "enumerate_sources",
     "is_cex_shaped_source",
+    "parsed_transaction",
     "resolve_relay_terminal",
+    "signature_page",
     "walk_upstream",
+    "wallet_birth",
 ]

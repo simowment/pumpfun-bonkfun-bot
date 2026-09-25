@@ -21,6 +21,7 @@ from aiohttp.test_utils import TestServer
 
 from rugbot.backtest.runners import copytrade_backtest_runner
 from rugbot.domain import market_data
+from rugbot.integrations import rpc_access
 from rugbot.integrations.rpc_access import (
     ENDPOINT_SOURCE_DOTENV,
     ENDPOINT_SOURCE_ENVIRON,
@@ -283,6 +284,8 @@ async def test_failures_use_the_transient_vocabulary(
     a contract, not prose.
     """
     stub_dotenv(monkeypatch, {})
+    # No busy-retry: the exhausted pool must surface its error immediately.
+    monkeypatch.setattr(rpc_access, "RPC_BUSY_ATTEMPTS", 1)
 
     async def throttled(_request: web.Request) -> web.Response:
         return web.json_response({"error": "rate limited"}, status=429)

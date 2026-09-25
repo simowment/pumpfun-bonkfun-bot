@@ -21,6 +21,7 @@ import asyncio
 import json
 import os
 import threading
+import time
 import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -150,6 +151,15 @@ def resolve_rpc_endpoints(
     return RpcEndpoints(ordered=ordered, source=source)
 
 
+# Pooled sync requests are spaced and retried when every provider is busy.
+RPC_MIN_REQUEST_SPACING_SECONDS = 0.12
+RPC_BUSY_ATTEMPTS = 5
+RPC_BUSY_BACKOFF_SECONDS = 2.0
+RPC_BUSY_MAX_WAIT_SECONDS = 30.0
+_PACE_LOCK = threading.Lock()
+_last_shared_request = 0.0
+
+
 def shared_sync_pool(endpoints: RpcEndpoints | Sequence[str]) -> SyncRpcProviderPool:
     """Return the process-wide synchronous pool for one endpoint set.
 
@@ -268,13 +278,35 @@ def sync_rpc_result(
         if transport is not None
         else shared_sync_pool(ordered)
     )
-    try:
-        response = caller(ordered[0], body)
-    except RpcProviderPoolError as error:
-        raise RpcAccessError(
-            f"{method} transport failed: {type(error).__name__}", method=method
-        ) from error
+    attempts = 1 if transport is not None else RPC_BUSY_ATTEMPTS
+    for attempt in range(attempts):
+        if transport is None:
+            _pace_shared_requests()
+        try:
+            response = caller(ordered[0], body)
+            break
+        except RpcProviderPoolError as error:
+            if attempt == attempts - 1:
+                raise RpcAccessError(
+                    f"{method} transport failed: {type(error).__name__}",
+                    method=method,
+                ) from error
+            # Every provider throttled or cooling down: wait instead of dropping
+            # the request (callers would otherwise lose data silently).
+            time.sleep(
+                min(RPC_BUSY_BACKOFF_SECONDS * 2**attempt, RPC_BUSY_MAX_WAIT_SECONDS)
+            )
     return _decoded_result(method, response.status, response.body)
+
+
+def _pace_shared_requests() -> None:
+    """Space pooled sync requests process-wide (free RPC tiers cap ~10 req/s)."""
+    global _last_shared_request  # noqa: PLW0603
+    with _PACE_LOCK:
+        wait = _last_shared_request + RPC_MIN_REQUEST_SPACING_SECONDS - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _last_shared_request = time.monotonic()
 
 
 def rpc_health(

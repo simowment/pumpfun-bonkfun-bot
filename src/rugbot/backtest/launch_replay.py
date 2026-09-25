@@ -137,6 +137,7 @@ class LaunchProfile:
 
     mint: str
     create_slot: int
+    created_at_s: float
     entry_slot: int
     entry_mc_sol: float
     ath_mc_sol: float
@@ -317,6 +318,7 @@ class LaunchReplay:
         return LaunchProfile(
             mint=self.mint,
             create_slot=create_slot,
+            created_at_s=created_at,
             entry_slot=entry_slot,
             entry_mc_sol=market_cap_sol(self._entry.price_sol),
             ath_mc_sol=market_cap_sol(ath_trade.price_sol),
