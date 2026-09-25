@@ -280,6 +280,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     wallets.add_argument("--size", type=float, default=0.1, help="copy size in SOL")
     wallets.add_argument(
+        "--recorded-only",
+        action="store_true",
+        help="use only launches whose trades the collector recorded (no pump.fun calls)",
+    )
+    wallets.add_argument(
         "--min-sol",
         type=float,
         default=0.05,
@@ -346,7 +351,11 @@ def _recorded_trades(state_dir: Path, mint: str) -> list[LaunchTrade] | str:
 
 
 def _load_launch_trades(
-    state_dir: Path, *, min_age_minutes: float, max_launches: int
+    state_dir: Path,
+    *,
+    min_age_minutes: float,
+    max_launches: int,
+    recorded_only: bool = False,
 ) -> tuple[dict[str, tuple[str, list[LaunchTrade]]], Counter[str]]:
     """Fetch full trade histories of old-enough standard-curve collected launches.
 
@@ -397,6 +406,8 @@ def _load_launch_trades(
             return mint, creator, recorded
         if recorded:
             return mint, creator, recorded
+        if recorded_only:
+            return mint, creator, "trades not recorded"
         try:
             return mint, creator, trades_from_swap_api(client.fetch_all_trades(mint))
         except (PumpFunApiError, LaunchReplayError, OSError) as error:
@@ -428,6 +439,7 @@ def _run_wallets(args: argparse.Namespace) -> int:
         args.state_dir,
         min_age_minutes=args.min_age_minutes,
         max_launches=args.max_launches,
+        recorded_only=bool(args.recorded_only),
     )
     scores = score_wallets(
         (wallet_launches(mint, trades) for mint, (_, trades) in launches.items()),
