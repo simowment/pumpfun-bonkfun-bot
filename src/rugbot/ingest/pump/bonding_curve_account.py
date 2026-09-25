@@ -12,7 +12,7 @@ from rugbot.domain.version_registry import PumpProtocolVersionSnapshot
 
 PUMP_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 PINNED_PUMP_IDL_SHA256 = (
-    "b90bc471327f671449271d5d1d42354d1fae6f5a06502f5834459a3108138e49"
+    "ffe966c42f1af41652ee753fe2f1e3f7cd4077d7e6f49faf3138959c8b56064b"
 )
 PUMP_BONDING_CURVE_ACCOUNT_DECODER_VERSION = "pump-bonding-curve-account-v1"
 PUMP_BONDING_CURVE_LAYOUT_ARTIFACT_VERSION = "pump-bonding-curve-current-idl-layout-v1"
@@ -97,6 +97,14 @@ def decode_pump_bonding_curve_account(
         return validation_error
 
     data = request.account_state.raw_account_data
+    creator_fee_bps = data[CURRENT_LAYOUT_SIZE : CURRENT_LAYOUT_SIZE + U64_SIZE]
+    if any(creator_fee_bps):
+        # A per-curve creator fee overrides the FeeConfig tiers the quote engine
+        # applies; quoting it with the default fee would misstate costs.
+        return _unsupported(
+            "bonding curve sets a custom creator_fee_bps, which is not modeled",
+            request.account_state.as_of_slot,
+        )
     return PumpBondingCurveAccountSnapshot(
         as_of_slot=request.account_state.as_of_slot,
         account_pubkey=request.account_state.account_pubkey,

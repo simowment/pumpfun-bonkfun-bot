@@ -29,6 +29,8 @@ U64_BYTES = 8
 I64_BYTES = 8
 I128_BYTES = 16
 STRING_LENGTH_BYTES = 4
+# holder_rewards_bps: u64 + holder_rewards: u64 appended by the current program.
+HOLDER_REWARDS_TAIL_BYTES = U64_BYTES * 2
 
 SwapEventDecodeResult = PumpSwapTradeEventEvidence | AbstainResult
 
@@ -204,6 +206,17 @@ def _finish(
     creator_fee: int,
     instruction_name: str,
 ) -> SwapEventDecodeResult:
+    # The current program appends holder_rewards_bps: u64 and holder_rewards: u64.
+    # Holder rewards are not part of the modeled fee set, so a non-zero value
+    # abstains instead of silently understating trade costs.
+    if reader.error is None and reader.remaining == HOLDER_REWARDS_TAIL_BYTES:
+        reader.skip_u64()
+        if reader.read_u64() != 0:
+            return _abstain(
+                AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+                "Pump AMM trade event carries holder rewards, which are not modeled",
+                as_of_slot,
+            )
     if reader.error is not None or reader.remaining != 0:
         return _abstain(
             AbstainReason.UNSUPPORTED_PROTOCOL_STATE,

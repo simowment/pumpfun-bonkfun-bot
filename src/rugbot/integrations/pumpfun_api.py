@@ -554,7 +554,7 @@ async def fetch_token_ohlc_candles(
                             {
                                 "commitment": "finalized",
                                 "encoding": "json",
-                                "maxSupportedTransactionVersion": 0,
+                                "maxSupportedTransactionVersion": 1,
                             },
                         ],
                     }

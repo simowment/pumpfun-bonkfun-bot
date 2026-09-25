@@ -20,6 +20,8 @@ CREATE_EVENT_MIN_DATA_SIZE = 262
 SOL_PUBKEY = "11111111111111111111111111111111"
 PUBKEY_SIZE = 32
 U64_SIZE = 8
+BOOL_SIZE = 1
+CREATE_EVENT_CREATOR_FEE_TAIL_SIZE = U64_SIZE + BOOL_SIZE
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +205,18 @@ def _decode_event_data(  # noqa: C901, PLR0912
     if virtual_quote_result is None:
         return _malformed_event(as_of_slot, "virtual_quote_reserves")
     virtual_quote_reserves, offset = virtual_quote_result
+
+    # The current program appends creator_fee_bps: u64 and is_holder_reward: bool;
+    # events emitted before that upgrade end at virtual_quote_reserves.
+    if len(raw_data) - offset == CREATE_EVENT_CREATOR_FEE_TAIL_SIZE:
+        creator_fee_result = _read_u64(raw_data, offset)
+        if creator_fee_result is None:
+            return _malformed_event(as_of_slot, "creator_fee_bps")
+        _, offset = creator_fee_result
+        holder_reward_result = _read_bool(raw_data, offset)
+        if holder_reward_result is None:
+            return _malformed_event(as_of_slot, "is_holder_reward")
+        _, offset = holder_reward_result
 
     if offset != len(raw_data):
         return _abstain(

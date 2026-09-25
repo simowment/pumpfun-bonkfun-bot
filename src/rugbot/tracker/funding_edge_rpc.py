@@ -134,7 +134,7 @@ def find_outbound_funding_edge(  # noqa: C901, PLR0912, PLR0913
     tx_params: dict[str, object] = {
         "commitment": "finalized",
         "encoding": "jsonParsed",
-        "maxSupportedTransactionVersion": 0,
+        "maxSupportedTransactionVersion": 1,
     }
     try:
         oldest_page: list[Any] = []

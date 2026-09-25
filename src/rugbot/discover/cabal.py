@@ -687,7 +687,7 @@ def fetch_cabal_wallet_activity(
             "getTransaction",
             [
                 sig_hash,
-                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
+                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 1},
             ],
             endpoints=resolved,
             transport=None,

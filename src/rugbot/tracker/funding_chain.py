@@ -250,7 +250,7 @@ def _transaction(
             "getTransaction",
             [
                 signature,
-                {"maxSupportedTransactionVersion": 0, "encoding": "jsonParsed"},
+                {"maxSupportedTransactionVersion": 1, "encoding": "jsonParsed"},
             ],
             endpoints=endpoints,
             transport=transport,

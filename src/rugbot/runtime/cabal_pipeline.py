@@ -701,7 +701,7 @@ class CabalPipeline:
                                 sig_hash,
                                 {
                                     "encoding": "jsonParsed",
-                                    "maxSupportedTransactionVersion": 0,
+                                    "maxSupportedTransactionVersion": 1,
                                 },
                             ],
                             endpoints=resolved_endpoints,

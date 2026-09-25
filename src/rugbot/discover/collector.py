@@ -29,7 +29,10 @@ from rugbot.discover.store import (
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.observations import RawChainObservation
 from rugbot.ingest.pump.pump_create_observation import decode_pump_create_v2_observation
-from rugbot.ingest.pump.pump_stream import PumpPortalLaunchStream
+from rugbot.ingest.pump.pump_stream import (
+    PumpPortalLaunchNotification,
+    PumpPortalLaunchStream,
+)
 from rugbot.ingest.rpc_observer import observe_address, observe_finalized_transaction
 from rugbot.runtime.config import load_provider_settings, resolve_dotenv
 from rugbot.storage.database import DatabaseManager
@@ -41,7 +44,10 @@ HEARTBEAT_SECONDS = 60
 POLL_TRADES_SECONDS = 30
 RECONNECT_MIN_SECONDS = 1.0
 RECONNECT_MAX_SECONDS = 30.0
-STALE_RETRY_SECONDS = 0.5
+STALE_RETRY_SECONDS = 2.0
+# Finalization lags the processed PumpPortal event by ~32 slots (~13 s); waiting
+# first avoids burning RPC credits on guaranteed-pending getTransaction calls.
+FINALITY_DELAY_SECONDS = 14.0
 STALE_TIMEOUT_SECONDS = 60
 # Rate-limit/transport abstains are transient: back off and retry within a
 # bounded budget so throttled launches eventually hydrate instead of being
@@ -65,6 +71,7 @@ INCONSISTENT_FINALIZED_SLOT_MESSAGE = (
 
 @dataclass(slots=True)
 class CollectStats:
+    notifications: int = 0
     launches: int = 0
     trades: int = 0
     errors: int = 0
@@ -414,6 +421,7 @@ async def run_collect(
     stats = CollectStats()
     stop_event = asyncio.Event()
     trade_tasks: dict[str, asyncio.Task[None]] = {}
+    hydration_tasks: set[asyncio.Task[None]] = set()
 
     def _handle_signal(*_args: object) -> None:
         stop_event.set()
@@ -424,6 +432,118 @@ async def run_collect(
             loop.add_signal_handler(sig, _handle_signal)
         except (NotImplementedError, ValueError, RuntimeError):
             pass
+
+    async def _hydrate_and_store(
+        notification: PumpPortalLaunchNotification,
+    ) -> None:
+        """Hydrate one create once finalized, persist it, and start trade polling."""
+        await asyncio.sleep(FINALITY_DELAY_SECONDS)
+        result = await _observe_finalized_with_retry(
+            notification.signature,
+            endpoint=rpc_endpoint,
+            source_id="rug_discover",
+            semaphore=semaphore,
+            transport=rpc_transport,
+        )
+        if result is None or hasattr(result, "reason"):
+            stats.errors += 1
+            logger.warning(
+                "finalized hydration abstained for %s: %s: %s",
+                notification.signature,
+                getattr(result, "reason", "unknown"),
+                getattr(result, "message", "no detail"),
+            )
+            return
+
+        obs = result  # RawChainObservation
+        # persist observation
+        if use_jsonl:
+            try:
+                append_observation(
+                    state_dir,
+                    obs,  # type: ignore[arg-type]
+                    mint=notification.mint_pubkey,
+                )
+            except Exception:
+                logger.warning("jsonl append failed", exc_info=True)
+
+        # decode create_v2
+        try:
+            decoded = decode_pump_create_v2_observation(obs)  # type: ignore[arg-type]
+        except Exception as exc:
+            logger.warning(
+                "decode failed for %s: %s",
+                notification.signature,
+                exc,
+                exc_info=True,
+            )
+            return
+        if decoded is None or hasattr(decoded, "reason"):
+            # not a create_v2 or abstained
+            return
+
+        mint = decoded.mint_pubkey  # type: ignore[union-attr]
+        creator = (
+            decoded.creator_pubkey
+            if hasattr(decoded, "creator_pubkey")
+            else notification.creator_pubkey
+        )  # type: ignore[union-attr]
+        bonding_curve = decoded.bonding_curve_pubkey  # type: ignore[union-attr]
+
+        raw_json = None
+        try:
+            raw_json = (
+                obs.raw_source_payload.decode("utf-8")
+                if obs.raw_source_payload
+                else None
+            )  # type: ignore[union-attr]
+        except Exception:
+            raw_json = None
+
+        try:
+            upsert_launch(
+                db,
+                mint=mint,
+                creator=creator,
+                created_signature=notification.signature,
+                created_slot=obs.slot,  # type: ignore[union-attr]
+                symbol=decoded.symbol,  # type: ignore[union-attr]
+                name=decoded.name,  # type: ignore[union-attr]
+                created_at=_created_at(obs),  # type: ignore[arg-type]
+                bonding_curve=bonding_curve,
+                source="pumpportal",
+                raw_json=raw_json,
+            )
+        except Exception as exc:
+            logger.warning("upsert launch failed for %s: %s", mint, exc, exc_info=True)
+            return
+
+        stats.launches += 1
+        logger.info("launch %s creator %s slot %s", mint, creator, obs.slot)  # type: ignore[union-attr]
+
+        # subscribe trades for bonding_curve if available (gated by env flag)
+        if bonding_curve and mint not in trade_tasks and _discover_trade_poll_enabled():
+            task = asyncio.create_task(
+                _poll_trades_for_mint(
+                    mint,
+                    bonding_curve,
+                    creator=creator,
+                    quote_mint=decoded.quote_mint_pubkey,  # type: ignore[union-attr]
+                    quote_is_sol=decoded.quote_asset == "SOL",  # type: ignore[union-attr]
+                    endpoint=rpc_endpoint,
+                    db=db,
+                    state_dir=state_dir,
+                    stop_event=stop_event,
+                    stats=stats,
+                    use_jsonl=use_jsonl,
+                    transport=rpc_transport,
+                    poll_semaphore=trade_poll_semaphore,
+                )
+            )
+            trade_tasks[mint] = task
+            task.add_done_callback(
+                lambda _task, tracked_mint=mint: trade_tasks.pop(tracked_mint, None)
+            )
 
     last_heartbeat = time.monotonic()
     deadline = (
@@ -443,6 +563,7 @@ async def run_collect(
             if time.monotonic() - last_heartbeat >= HEARTBEAT_SECONDS:
                 health = {
                     "status": "ok",
+                    "notifications": stats.notifications,
                     "launches": stats.launches,
                     "trades": stats.trades,
                     "errors": stats.errors,
@@ -454,7 +575,8 @@ async def run_collect(
                 except OSError:
                     pass
                 logger.info(
-                    "heartbeat launches=%d trades=%d errors=%d",
+                    "heartbeat notifications=%d launches=%d trades=%d errors=%d",
+                    stats.notifications,
                     stats.launches,
                     stats.trades,
                     stats.errors,
@@ -477,133 +599,13 @@ async def run_collect(
                 await asyncio.sleep(RECONNECT_MIN_SECONDS)
                 continue
 
-            # hydrate finalized
-            hydration_remaining = (
-                deadline - time.monotonic() if deadline is not None else None
-            )
-            if hydration_remaining is not None and hydration_remaining <= 0:
-                break
-            try:
-                result = await asyncio.wait_for(
-                    _observe_finalized_with_retry(
-                        notification.signature,
-                        endpoint=rpc_endpoint,
-                        source_id="rug_discover",
-                        semaphore=semaphore,
-                        transport=rpc_transport,
-                    ),
-                    timeout=hydration_remaining,
-                )
-            except TimeoutError:
-                break
-            if result is None or hasattr(result, "reason"):
-                stats.errors += 1
-                logger.warning(
-                    "finalized hydration abstained for %s: %s: %s",
-                    notification.signature,
-                    getattr(result, "reason", "unknown"),
-                    getattr(result, "message", "no detail"),
-                )
-                continue
-
-            obs = result  # RawChainObservation
-            # persist observation
-            if use_jsonl:
-                try:
-                    append_observation(
-                        state_dir,
-                        obs,  # type: ignore[arg-type]
-                        mint=notification.mint_pubkey,
-                    )
-                except Exception:
-                    logger.warning("jsonl append failed", exc_info=True)
-
-            # decode create_v2
-            try:
-                decoded = decode_pump_create_v2_observation(obs)  # type: ignore[arg-type]
-            except Exception as exc:
-                logger.warning(
-                    "decode failed for %s: %s",
-                    notification.signature,
-                    exc,
-                    exc_info=True,
-                )
-                continue
-            if decoded is None or hasattr(decoded, "reason"):
-                # not a create_v2 or abstained
-                continue
-
-            mint = decoded.mint_pubkey  # type: ignore[union-attr]
-            creator = (
-                decoded.creator_pubkey
-                if hasattr(decoded, "creator_pubkey")
-                else notification.creator_pubkey
-            )  # type: ignore[union-attr]
-            bonding_curve = decoded.bonding_curve_pubkey  # type: ignore[union-attr]
-
-            raw_json = None
-            try:
-                raw_json = (
-                    obs.raw_source_payload.decode("utf-8")
-                    if obs.raw_source_payload
-                    else None
-                )  # type: ignore[union-attr]
-            except Exception:
-                raw_json = None
-
-            try:
-                upsert_launch(
-                    db,
-                    mint=mint,
-                    creator=creator,
-                    created_signature=notification.signature,
-                    created_slot=obs.slot,  # type: ignore[union-attr]
-                    symbol=decoded.symbol,  # type: ignore[union-attr]
-                    name=decoded.name,  # type: ignore[union-attr]
-                    created_at=_created_at(obs),  # type: ignore[arg-type]
-                    bonding_curve=bonding_curve,
-                    source="pumpportal",
-                    raw_json=raw_json,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "upsert launch failed for %s: %s", mint, exc, exc_info=True
-                )
-                continue
-
-            stats.launches += 1
-            logger.info("launch %s creator %s slot %s", mint, creator, obs.slot)  # type: ignore[union-attr]
-
-            # subscribe trades for bonding_curve if available (gated by env flag)
-            if (
-                bonding_curve
-                and mint not in trade_tasks
-                and _discover_trade_poll_enabled()
-            ):
-                task = asyncio.create_task(
-                    _poll_trades_for_mint(
-                        mint,
-                        bonding_curve,
-                        creator=creator,
-                        quote_mint=decoded.quote_mint_pubkey,  # type: ignore[union-attr]
-                        quote_is_sol=decoded.quote_asset == "SOL",  # type: ignore[union-attr]
-                        endpoint=rpc_endpoint,
-                        db=db,
-                        state_dir=state_dir,
-                        stop_event=stop_event,
-                        stats=stats,
-                        use_jsonl=use_jsonl,
-                        transport=rpc_transport,
-                        poll_semaphore=trade_poll_semaphore,
-                    )
-                )
-                trade_tasks[mint] = task
-                task.add_done_callback(
-                    lambda _task, tracked_mint=mint: trade_tasks.pop(tracked_mint, None)
-                )
+            stats.notifications += 1
+            task = asyncio.create_task(_hydrate_and_store(notification))
+            hydration_tasks.add(task)
+            task.add_done_callback(hydration_tasks.discard)
     finally:
         stop_event.set()
-        for task in list(trade_tasks.values()):
+        for task in [*hydration_tasks, *trade_tasks.values()]:
             task.cancel()
             try:
                 await task
@@ -621,6 +623,7 @@ async def run_collect(
             pass
         health = {
             "status": "stopped",
+            "notifications": stats.notifications,
             "launches": stats.launches,
             "trades": stats.trades,
             "errors": stats.errors,

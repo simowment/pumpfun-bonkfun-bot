@@ -21,7 +21,7 @@ ASSOCIATED_SPL_PROGRAM_ID = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 MAYHEM_PROGRAM_ID = "MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e"
 WSOL_MINT_ID = "So11111111111111111111111111111111111111112"
 PINNED_PUMP_IDL_SHA256 = (
-    "b90bc471327f671449271d5d1d42354d1fae6f5a06502f5834459a3108138e49"
+    "ffe966c42f1af41652ee753fe2f1e3f7cd4077d7e6f49faf3138959c8b56064b"
 )
 PUMP_CREATE_V2_DECODER_VERSION = "pump-create-v2-instruction-v1"
 CREATE_V2_DISCRIMINATOR = bytes([214, 144, 76, 236, 95, 139, 49, 180])
@@ -29,6 +29,15 @@ DISCRIMINATOR_SIZE = 8
 U32_SIZE = 4
 PUBKEY_SIZE = 32
 BOOL_SIZE = 1
+U64_SIZE = 8
+# Valid byte lengths after is_mayhem_mode: none, +OptionBool,
+# +OptionBool+OptionU64, +OptionBool+OptionU64+OptionBool.
+CREATE_V2_OPTIONAL_TAIL_SIZES = (
+    0,
+    BOOL_SIZE,
+    BOOL_SIZE + U64_SIZE,
+    BOOL_SIZE + U64_SIZE + BOOL_SIZE,
+)
 
 CREATE_V2_ACCOUNT_NAMES = (
     "mint",
@@ -501,23 +510,26 @@ def _decode_create_v2_tail(
         return _unsupported_arg(instruction, "is_mayhem_mode bool is unsupported")
     offset += BOOL_SIZE
 
+    # The trailing Option* args (is_cashback_enabled: OptionBool, creator_fee_bps:
+    # OptionU64, is_holder_reward: OptionBool) are optional on chain: a caller may
+    # omit any suffix of them. Every other tail length is rejected.
     remaining = len(instruction.data) - offset
-    if remaining == 0:
-        # Pump has emitted create_v2 transactions with the optional trailing
-        # OptionBool omitted. The IDL type itself is a one-byte bool struct.
-        return creator_pubkey, is_mayhem_mode, False
-    if remaining != BOOL_SIZE:
+    if remaining not in CREATE_V2_OPTIONAL_TAIL_SIZES:
         return _unsupported_arg(
             instruction,
-            "create_v2 OptionBool has an unsupported layout",
+            "create_v2 optional argument tail has an unsupported layout",
         )
-
-    is_cashback_enabled = _decode_bool(instruction.data[offset])
-    if is_cashback_enabled is None:
-        return _unsupported_arg(
-            instruction,
-            "is_cashback_enabled bool is unsupported",
-        )
+    tail = instruction.data[offset:]
+    # Bool offsets inside the tail: is_cashback_enabled, then is_holder_reward
+    # after the u64 creator_fee_bps.
+    tail_bools = [
+        _decode_bool(tail[index])
+        for index in (0, BOOL_SIZE + U64_SIZE)
+        if index < remaining
+    ]
+    if None in tail_bools:
+        return _unsupported_arg(instruction, "create_v2 optional bool is unsupported")
+    is_cashback_enabled = bool(tail_bools and tail_bools[0])
     return creator_pubkey, is_mayhem_mode, is_cashback_enabled
 
 

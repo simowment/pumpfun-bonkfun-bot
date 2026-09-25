@@ -671,7 +671,7 @@ def resolve_token_or_wallet(
                         {
                             "commitment": "finalized",
                             "encoding": "json",
-                            "maxSupportedTransactionVersion": 0,
+                            "maxSupportedTransactionVersion": 1,
                         },
                     ],
                     rpc_transport,

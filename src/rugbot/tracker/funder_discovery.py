@@ -486,7 +486,7 @@ def _confirm_solscan_funding(
                 {
                     "commitment": "finalized",
                     "encoding": "jsonParsed",
-                    "maxSupportedTransactionVersion": 0,
+                    "maxSupportedTransactionVersion": 1,
                 },
             ],
         )
@@ -527,7 +527,7 @@ def _trace_funding_via_transactions(
         options: dict[str, object] = {
             "transactionDetails": "full",
             "encoding": "jsonParsed",
-            "maxSupportedTransactionVersion": 0,
+            "maxSupportedTransactionVersion": 1,
             "sortOrder": "asc",
             "limit": MAX_FAST_PATH_TRANSACTIONS,
             "commitment": "finalized",
@@ -597,7 +597,7 @@ def _trace_funding_via_signatures(
                 "getTransaction",
                 [
                     signature,
-                    {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
+                    {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 1},
                 ],
             )
         except Exception as exc:
@@ -1148,7 +1148,7 @@ def _nominate_via_free_rpc(
     tx_params = {
         "commitment": "finalized",
         "encoding": "jsonParsed",
-        "maxSupportedTransactionVersion": 0,
+        "maxSupportedTransactionVersion": 1,
     }
     staged: list[StagedTransferCandidate] = []
     before: str | None = None
@@ -1317,7 +1317,7 @@ def find_funding_edges(
                     {
                         "commitment": "finalized",
                         "encoding": "jsonParsed",
-                        "maxSupportedTransactionVersion": 0,
+                        "maxSupportedTransactionVersion": 1,
                     },
                 ],
                 transport=transport,

@@ -29,6 +29,8 @@ from rugbot.storage.jsonl_observation_store import observation_identity
 
 TRADE_EVENT_DISCRIMINATOR = bytes([189, 219, 127, 211, 78, 230, 97, 238])
 SHAREHOLDER_ENTRY_BYTES = 32 + 2
+# holder_rewards_bps: u64 + holder_rewards: u64 appended by the current program.
+HOLDER_REWARDS_TAIL_BYTES = 8 + 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -703,6 +705,17 @@ def _decode_trade_event(
     quote_amount = reader.read_u64()
     virtual_quote_reserves = reader.read_u64()
     real_quote_reserves = reader.read_u64()
+    # The current program appends holder_rewards_bps: u64 and holder_rewards: u64.
+    # Holder rewards are not part of the modeled fee set, so a non-zero value
+    # abstains instead of silently understating trade costs.
+    if reader.error is None and reader.remaining == HOLDER_REWARDS_TAIL_BYTES:
+        reader.skip_u64()
+        if reader.read_u64() != 0:
+            return _abstain(
+                AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+                "Pump trade event carries holder rewards, which are not modeled",
+                as_of_slot,
+            )
     if reader.error is not None or reader.remaining != 0:
         return _abstain(
             AbstainReason.UNSUPPORTED_PROTOCOL_STATE,

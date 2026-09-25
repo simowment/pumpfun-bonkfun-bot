@@ -1,9 +1,9 @@
 """Strict decoder for the canonical Pump Global account.
 
 The layout is pinned to Pump's official ``idl/pump.json`` at commit
-``9c82f61cb711b044a17f770ab8ce9f9bdf78f333``. Its Global struct occupies
-exactly 1,045 bytes including the Anchor discriminator. Any different account
-length is an unsupported protocol state rather than an inferred extension.
+``81091419e4457566469d4e2a27f64ed84d42419c``. The Global account is either the
+1,045-byte layout that predates the creator-fee/holder-reward fields or the
+current 1,087-byte layout. Any other length is an unsupported protocol state.
 """
 
 from dataclasses import dataclass
@@ -21,9 +21,9 @@ from rugbot.ingest.pump.bonding_curve_account import PUMP_PROGRAM_ID
 
 PUMP_GLOBAL_SEED = b"global"
 PUMP_GLOBAL_DISCRIMINATOR = bytes([167, 232, 232, 177, 200, 108, 114, 127])
-PINNED_OFFICIAL_PUMP_IDL_COMMIT = "9c82f61cb711b044a17f770ab8ce9f9bdf78f333"
+PINNED_OFFICIAL_PUMP_IDL_COMMIT = "81091419e4457566469d4e2a27f64ed84d42419c"
 PINNED_OFFICIAL_PUMP_IDL_SHA256 = (
-    "b90bc471327f671449271d5d1d42354d1fae6f5a06502f5834459a3108138e49"
+    "ffe966c42f1af41652ee753fe2f1e3f7cd4077d7e6f49faf3138959c8b56064b"
 )
 
 DISCRIMINATOR_SIZE = 8
@@ -37,6 +37,12 @@ PUMP_GLOBAL_ACCOUNT_SIZE = (
     + BOOL_FIELD_COUNT
     + (U64_FIELD_COUNT * U64_SIZE)
     + (PUBKEY_FIELD_COUNT * PUBKEY_SIZE)
+)
+# The current program appends creator_fee_configurable: bool,
+# max_configurable_creator_fee_bps: u64, holder_reward_claim_authority: pubkey and
+# is_holder_reward_enabled: bool. Accounts are either the pinned size or this one.
+PUMP_GLOBAL_CREATOR_FEE_ACCOUNT_SIZE = (
+    PUMP_GLOBAL_ACCOUNT_SIZE + 1 + U64_SIZE + PUBKEY_SIZE + 1
 )
 
 _PUMP_PROGRAM_PUBKEY = Pubkey.from_string(PUMP_PROGRAM_ID)
@@ -97,7 +103,10 @@ def decode_pump_global_account(  # noqa: PLR0911
         return validation
 
     data = observation.raw_account_data
-    if len(data) != PUMP_GLOBAL_ACCOUNT_SIZE:
+    if len(data) not in (
+        PUMP_GLOBAL_ACCOUNT_SIZE,
+        PUMP_GLOBAL_CREATOR_FEE_ACCOUNT_SIZE,
+    ):
         return _abstain(
             AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
             "Pump Global account length does not match the pinned official IDL",
@@ -137,6 +146,11 @@ def decode_pump_global_account(  # noqa: PLR0911
         buyback_basis_points = reader.u64()
         initial_virtual_quote_reserves = reader.u64()
         whitelisted_quote_mints = reader.pubkeys(1)
+        if len(data) == PUMP_GLOBAL_CREATOR_FEE_ACCOUNT_SIZE:
+            reader.boolean("creator_fee_configurable")
+            reader.u64()
+            reader.pubkey()
+            reader.boolean("is_holder_reward_enabled")
     except _InvalidBooleanError as error:
         return _abstain(
             AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
@@ -144,7 +158,7 @@ def decode_pump_global_account(  # noqa: PLR0911
             observation.slot,
         )
 
-    if reader.offset != PUMP_GLOBAL_ACCOUNT_SIZE:
+    if reader.offset != len(data):
         return _abstain(
             AbstainReason.DECODER_MISMATCH,
             "Pump Global decoder did not consume the pinned layout exactly",

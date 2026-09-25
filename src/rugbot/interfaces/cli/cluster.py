@@ -102,7 +102,7 @@ async def _discover_cluster_tokens_and_wallets(
                             sig_info["signature"],
                             {
                                 "encoding": "jsonParsed",
-                                "maxSupportedTransactionVersion": 0,
+                                "maxSupportedTransactionVersion": 1,
                             },
                         ],
                     )
@@ -161,7 +161,7 @@ async def _discover_cluster_tokens_and_wallets(
                             sig,
                             {
                                 "encoding": "jsonParsed",
-                                "maxSupportedTransactionVersion": 0,
+                                "maxSupportedTransactionVersion": 1,
                             },
                         ],
                     )

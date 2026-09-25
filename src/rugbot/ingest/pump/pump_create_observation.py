@@ -42,6 +42,8 @@ from rugbot.ingest.rpc_observer import JSON_TRANSACTION_FORMAT
 LiveCreateDecodeResult = LaunchCreatedV2 | AbstainResult | None
 LiveCreateMarketStateResult = PumpCreateMarketState | AbstainResult | None
 SIGNATURE_LENGTH = 64
+# Non-SOL quote create_v2 adds quote mint, quote vault and SPL Token program.
+QUOTE_MINT_EXTRA_ACCOUNTS = 3
 TOKEN_2022_INITIALIZE_MINT2 = 20
 TOKEN_2022_INITIALIZE_MINT2_NONE_LEN = 35
 TOKEN_2022_INITIALIZE_MINT2_SOME_LEN = 67
@@ -529,6 +531,13 @@ def _create_instruction(
     if any(index < 0 or index >= len(account_pubkeys) for index in account_indices):
         return _abstain(
             "Pump create_v2 account index is out of bounds",
+            observation.slot,
+        )
+    if len(account_indices) == len(CREATE_V2_ACCOUNT_NAMES) + QUOTE_MINT_EXTRA_ACCOUNTS:
+        # Non-SOL quote launches (e.g. USDC) append quote mint, quote vault and the
+        # SPL Token program. Only SOL-quoted launches are in scope.
+        return _abstain(
+            "Pump create_v2 is quoted in a non-SOL mint, which is out of scope",
             observation.slot,
         )
     if len(account_indices) != len(CREATE_V2_ACCOUNT_NAMES):

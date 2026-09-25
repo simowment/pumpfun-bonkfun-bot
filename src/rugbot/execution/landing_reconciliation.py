@@ -86,7 +86,7 @@ async def reconcile_finalized_landing(  # noqa: PLR0913
                 {
                     "encoding": "jsonParsed",
                     "commitment": "finalized",
-                    "maxSupportedTransactionVersion": 0,
+                    "maxSupportedTransactionVersion": 1,
                 },
             ],
         }

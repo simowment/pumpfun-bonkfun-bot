@@ -467,7 +467,7 @@ def _fetch_onchain_copytrade_samples(wallet: str) -> tuple[CopytradeSample, ...]
             return results
         tx_data = _call_rpc(
             "getTransaction",
-            [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+            [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 1}],
         )
         if not isinstance(tx_data, dict):
             return results

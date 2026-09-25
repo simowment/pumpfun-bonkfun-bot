@@ -631,7 +631,7 @@ def _fetch_early_onchain_trades(
                 {
                     "commitment": "finalized",
                     "encoding": "jsonParsed",
-                    "maxSupportedTransactionVersion": 0,
+                    "maxSupportedTransactionVersion": 1,
                 },
             ],
         )
@@ -792,7 +792,7 @@ def _fetch_supply_via_rpc(
                 PumpBondingCurveDecodeRequest(
                     account_state=state,
                     protocol_snapshot=proto,  # type: ignore
-                    idl_hash="b90bc471327f671449271d5d1d42354d1fae6f5a06502f5834459a3108138e49",
+                    idl_hash="ffe966c42f1af41652ee753fe2f1e3f7cd4077d7e6f49faf3138959c8b56064b",
                     base_decimals=6,
                     quote_decimals=9,
                     base_mint=mint,

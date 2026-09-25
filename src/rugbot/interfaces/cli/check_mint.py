@@ -239,7 +239,7 @@ async def _collect_funding_rows_async(
                         sig,
                         {
                             "encoding": "jsonParsed",
-                            "maxSupportedTransactionVersion": 0,
+                            "maxSupportedTransactionVersion": 1,
                             "commitment": "finalized",
                         },
                     ],
