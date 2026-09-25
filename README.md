@@ -6,6 +6,12 @@ Autonomous on-chain insider intelligence, funding cluster reconstruction, and as
 
 > 📖 **Operator Guide**: See [Memecoin Bible Operator Guide](docs/MEMECOIN_BIBLE_OPERATOR_GUIDE.md) for the complete target discovery, cluster reconstruction, Jito B0 bundle forensics, and mathematical risk playbook based on the *Memecoin Bible*.
 
+> ⏱️ **Block 0 is the target, not a hard rule.** Landing in the creation block
+> (B0) is the ideal entry, but it needs paid low-latency infrastructure
+> (shred/gRPC feeds and Jito). A target qualifies if its net EV stays positive at
+> the entry we can actually reach. Paper mode records the detection slot next to
+> the create slot, so that entry delay is measured, not assumed.
+
 ---
 
 ## 1. Insider Cabal Sniping Strategy
