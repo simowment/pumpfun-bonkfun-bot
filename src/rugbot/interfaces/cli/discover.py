@@ -270,6 +270,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     wallets.add_argument("--size", type=float, default=0.1, help="copy size in SOL")
     wallets.add_argument(
+        "--min-sol",
+        type=float,
+        default=0.05,
+        help="minimum median SOL a wallet puts into a launch (drops dust bots)",
+    )
+    wallets.add_argument(
         "--state-dir",
         type=Path,
         default=Path(".state/discover"),
@@ -307,31 +313,33 @@ def _load_launch_trades(
         nonstandard_curve_reason,
         trades_from_swap_api,
     )
+    from rugbot.domain.decisions import AbstainResult
+    from rugbot.ingest.pump.create_event_decoder import decode_pump_create_event_logs
     from rugbot.integrations.pumpfun_api import PumpFunApiError, get_client
 
     cutoff = (datetime.now(UTC) - timedelta(minutes=min_age_minutes)).isoformat()
     with sqlite3.connect(state_dir / "rugbot.db") as connection:
         rows = connection.execute(
-            "SELECT mint, creator FROM discover_launches WHERE created_at <= ? "
-            "ORDER BY created_at DESC LIMIT ?",
+            "SELECT mint, creator, created_slot, raw_json FROM discover_launches "
+            "WHERE created_at <= ? ORDER BY created_at DESC LIMIT ?",
             (cutoff, max_launches),
         ).fetchall()
     client = get_client()
 
-    def load(row: tuple[str, str]) -> tuple[str, str, list[LaunchTrade] | str]:
-        mint, creator = row
-        token = client.fetch_token(mint)
-        reserves = (
-            token.get("virtual_sol_reserves"),
-            token.get("virtual_token_reserves"),
-        )
-        invariant = (
-            reserves[0] * reserves[1]
-            if all(isinstance(value, int) for value in reserves)
-            else None
-        )
+    def load(
+        row: tuple[str, str, int, str | None],
+    ) -> tuple[str, str, list[LaunchTrade] | str]:
+        mint, creator, created_slot, raw_json = row
+        # Mayhem flag and initial reserves come from the finalized create
+        # transaction the collector stored, so no metadata API call is needed.
+        payload = json.loads(raw_json) if raw_json else {}
+        logs = payload.get("result", payload).get("meta", {}).get("logMessages", [])
+        event = decode_pump_create_event_logs(logs, as_of_slot=created_slot)
+        if event is None or isinstance(event, AbstainResult):
+            return mint, creator, "create event unavailable"
         reason = nonstandard_curve_reason(
-            invariant, mayhem=bool(token.get("mayhem_state"))
+            event.virtual_sol_reserves * event.virtual_token_reserves,
+            mayhem=event.is_mayhem_mode,
         )
         if reason is not None:
             return mint, creator, reason
@@ -370,6 +378,7 @@ def _run_wallets(args: argparse.Namespace) -> int:
     scores = score_wallets(
         (wallet_launches(mint, trades) for mint, (_, trades) in launches.items()),
         min_launches=args.min_launches,
+        min_median_sol_in=args.min_sol,
     )
     print(f"launches scanned {len(launches)}   wallets scored {len(scores)}")
     for reason, count in skipped.most_common():

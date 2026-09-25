@@ -83,16 +83,26 @@ def wallet_launches(
 
 
 def score_wallets(
-    per_launch: Iterable[dict[str, WalletLaunch]], *, min_launches: int
+    per_launch: Iterable[dict[str, WalletLaunch]],
+    *,
+    min_launches: int,
+    min_median_sol_in: float = 0.0,
 ) -> list[WalletScore]:
-    """Rank wallets seen on at least ``min_launches`` launches, most reliable first."""
+    """Rank wallets seen on at least ``min_launches`` launches, most reliable first.
+
+    ``min_median_sol_in`` drops wallets whose typical position is too small to
+    copy (volume bots cycling dust).
+    """
     by_wallet: dict[str, list[WalletLaunch]] = {}
     for launch in per_launch:
         for wallet, activity in launch.items():
             by_wallet.setdefault(wallet, []).append(activity)
     scores: list[WalletScore] = []
     for wallet, activity in by_wallet.items():
-        if len(activity) < min_launches:
+        if (
+            len(activity) < min_launches
+            or statistics.median(item.sol_in for item in activity) < min_median_sol_in
+        ):
             continue
         wins = sum(1 for item in activity if item.realized_pnl_sol > 0)
         floor, _ = wilson_interval(wins, len(activity))
