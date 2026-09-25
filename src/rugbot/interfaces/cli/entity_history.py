@@ -10,6 +10,7 @@ to any per-wallet view.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 from datetime import UTC, datetime
@@ -25,8 +26,10 @@ from rugbot.tracker.funder_discovery import STAGED_MAX_SOL, STAGED_MIN_SOL
 from rugbot.tracker.funding_chain import (
     DEFAULT_HISTORY_PAGES,
     DEFAULT_HISTORY_TRANSACTIONS,
+    FundedTransfer,
     FundingChainError,
     enumerate_funded_paged,
+    resolve_relay_terminal,
 )
 from rugbot.utils.logger import get_logger
 
@@ -104,6 +107,31 @@ def _launch_fetch(wallet: str) -> list[object] | None:
         return None
     coins = page.get("coins")
     return coins if isinstance(coins, list) else None
+
+
+def _through_relays(
+    transfers: Sequence[FundedTransfer],
+) -> tuple[list[FundedTransfer], int]:
+    """Re-point each transfer at the wallet its SOL reached after relay hops.
+
+    Returns:
+        ``(transfers, relayed)`` where ``relayed`` counts recipients that were
+        relays rather than the final holder of the funds.
+    """
+    received: dict[str, float] = {}
+    for transfer in transfers:
+        received[transfer.recipient] = max(
+            received.get(transfer.recipient, 0.0), transfer.amount_sol
+        )
+    terminals = {
+        recipient: resolve_relay_terminal(recipient, received_sol=amount_sol)
+        for recipient, amount_sol in received.items()
+    }
+    relayed = sum(1 for resolution in terminals.values() if resolution.relays)
+    return [
+        dataclasses.replace(transfer, recipient=terminals[transfer.recipient].terminal)
+        for transfer in transfers
+    ], relayed
 
 
 def _format_when(created_at_ms: int | None) -> str:
@@ -188,9 +216,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 min_slot=args.slot_from,
                 max_slot=args.slot_to,
             )
+            resolved, relayed = _through_relays(transfers)
+            if relayed:
+                logger.info(
+                    "%s: %d recipients were relays; followed to terminal wallets",
+                    funder[:8],
+                    relayed,
+                )
             per_history = build_launch_history(
                 funder,
-                transfers=transfers,
+                transfers=resolved,
                 launch_fetch=_launch_fetch,
             )
             collected.append((per_history, len(transfers)))
@@ -208,7 +243,3 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     _render(history, scanned)
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

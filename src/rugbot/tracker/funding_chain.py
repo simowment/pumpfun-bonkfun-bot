@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from rugbot.ingest.pump.create_decoder import PUMP_PROGRAM_ID
 from rugbot.integrations.rpc_access import (
     RpcAccessError,
     RpcEndpoints,
@@ -43,6 +44,13 @@ DEFAULT_MAX_HUB_TRANSACTIONS = 60
 DEFAULT_HISTORY_PAGES = 3
 DEFAULT_HISTORY_TRANSACTIONS = 200
 PRODUCTION_PACING_SECONDS = 0.35
+# Downstream relay resolution: a relay is a short-lived pass-through wallet that
+# forwards most of what it received to one account. Operators chain several
+# (including seed-derived accounts) between the hub and the creator burner.
+RELAY_MAX_SIGNATURES = 8
+RELAY_MAX_HOPS = 5
+RELAY_FORWARD_FRACTION = 0.8
+PUMP_CREATE_LOG = "Program log: Instruction: Create"
 ROLE_ORIGIN = "origin"
 ROLE_RELAY = "relay"
 ROLE_HUB = "hub"
@@ -130,6 +138,14 @@ class FundedTransfer:
     amount_sol: float
     signature: str
     slot: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class RelayResolution:
+    """Where a funded wallet's SOL ended up after single-use relay hops."""
+
+    terminal: str
+    relays: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -706,12 +722,93 @@ def enumerate_funded_paged(  # noqa: PLR0913
     return tuple(transfers)
 
 
+def _created_pump_token(result: object, wallet: str) -> bool:
+    """Return True when ``wallet`` fee-paid a Pump create in this transaction."""
+    if not isinstance(result, dict):
+        return False
+    transaction = result.get("transaction")
+    message = transaction.get("message") if isinstance(transaction, dict) else None
+    keys = _account_keys(message)
+    meta = result.get("meta")
+    logs = meta.get("logMessages") if isinstance(meta, dict) else None
+    return (
+        bool(keys)
+        and keys[0] == wallet
+        and PUMP_PROGRAM_ID in keys
+        and isinstance(logs, list)
+        and any(
+            isinstance(line, str) and line.startswith(PUMP_CREATE_LOG) for line in logs
+        )
+    )
+
+
+def resolve_relay_terminal(
+    wallet: str,
+    *,
+    received_sol: float,
+    max_hops: int = RELAY_MAX_HOPS,
+    endpoints: RpcEndpoints | Sequence[str] | None = None,
+    transport: Callable[[str, str, list[object]], object] | None = None,
+) -> RelayResolution:
+    """Follow a funded wallet forward through single-use relay hops.
+
+    A wallet is treated as a relay while it has at most
+    ``RELAY_MAX_SIGNATURES`` signatures, never fee-paid a Pump create, and
+    forwarded at least ``RELAY_FORWARD_FRACTION`` of the SOL it received to one
+    account. Value is followed through balance deltas, so hops through
+    seed-derived accounts or decoy program calls are not lost.
+
+    Args:
+        wallet: Wallet that received SOL from the funder.
+        received_sol: SOL it received; the forwarding threshold scales from it.
+        max_hops: Maximum relay hops followed.
+        endpoints: Resolved endpoints; defaults to precedence resolution.
+        transport: Optional test seam replacing the pooled transport.
+
+    Returns:
+        The terminal wallet (candidate creator) and the relays crossed.
+    """
+    current = _require_address(wallet)
+    relays: list[str] = []
+    amount_sol = received_sol
+    for _ in range(max_hops):
+        signatures = _signatures(current, endpoints=endpoints, transport=transport)
+        if signatures is None or len(signatures) > RELAY_MAX_SIGNATURES:
+            break
+        forward: tuple[str, float] | None = None
+        created = False
+        for entry in signatures:
+            signature = entry.get("signature")
+            if not isinstance(signature, str) or entry.get("err") is not None:
+                continue
+            if transport is None:
+                time.sleep(PRODUCTION_PACING_SECONDS)
+            result = _transaction(signature, endpoints=endpoints, transport=transport)
+            if _created_pump_token(result, current):
+                created = True
+                break
+            for counterparty, sent_sol in _counterparty_transfers(
+                result,
+                wallet=current,
+                min_sol=amount_sol * RELAY_FORWARD_FRACTION,
+                receiving=False,
+            ):
+                if forward is None or sent_sol > forward[1]:
+                    forward = (counterparty, sent_sol)
+        if created or forward is None or forward[0] in relays:
+            break
+        relays.append(current)
+        current, amount_sol = forward
+    return RelayResolution(terminal=current, relays=tuple(relays))
+
+
 __all__ = [
     "CEX_MIN_RECIPIENTS",
     "DEFAULT_MAX_HOPS",
     "DEFAULT_MAX_HUB_TRANSACTIONS",
     "HUB_MIN_SIGNATURES",
     "MIN_TRANSFER_SOL",
+    "RELAY_MAX_HOPS",
     "ROLE_HUB",
     "ROLE_ORIGIN",
     "ROLE_RELAY",
@@ -720,9 +817,11 @@ __all__ = [
     "FundingChainNode",
     "FundingChainWalk",
     "FundingSource",
+    "RelayResolution",
     "enumerate_funded",
     "enumerate_funded_paged",
     "enumerate_sources",
     "is_cex_shaped_source",
+    "resolve_relay_terminal",
     "walk_upstream",
 ]
