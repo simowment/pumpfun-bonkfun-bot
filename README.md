@@ -110,11 +110,11 @@ The bridge serves a UI-agnostic JSON API and a live WebSocket event stream:
 Configuration is read from validated environment variables: `RUG_WEB_HOST`
 (default `127.0.0.1`), `RUG_WEB_PORT` (default `8787`), and `RUGBOT_STATE_DIR`
 (default `.state/web`). Watcher config and portfolio are DB-only in
-`state.sqlite3` / `rugbot.db` via `rugbot config set` (or `rug_config set --file`
+`state.sqlite3` / `rugbot.db` via `rug_config set --key` (or `rug_config set --file`
 as a one-shot import). CORS is permissive for local development.
 
 Portfolio wallets are stored DB-only (`portfolio` config type) and watched from
-the primary `rugbot config` state. Each portfolio wallet is polled through the
+the primary `rug_config` state. Each portfolio wallet is polled through the
 same finalized observation path.
 
 Inspect wallet history and linked-wallet evidence:
