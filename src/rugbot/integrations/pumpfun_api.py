@@ -244,6 +244,13 @@ class PumpFunApiClient:
         configured. The newest page stays short-lived. Every rerun then
         resumes where throttling stopped instead of re-paging from zero.
         """
+        page, _ = self._trade_page(mint, limit=limit, cursor=cursor)
+        return page
+
+    def _trade_page(
+        self, mint: str, *, limit: int, cursor: str | None
+    ) -> tuple[dict, bool]:
+        """Return ``(page, served_from_cache)`` for one trades page."""
         cache_params = {"mint": mint, "limit": limit, "cursor": cursor or ""}
         if self._page_cache is not None:
             try:
@@ -254,8 +261,7 @@ class PumpFunApiClient:
                 return {
                     "trades": hit["trades"],
                     "pagination": hit.get("pagination", {}),
-                    "cached": True,
-                }
+                }, True
         url = f"{self._base_url}/v2/coins/{mint}/trades?limit={limit}"
         if cursor:
             url += f"&cursor={cursor}"
@@ -275,7 +281,7 @@ class PumpFunApiClient:
                 )
             except Exception:
                 logger.debug("Pump.fun trade page store failed for %s", mint)
-        return page
+        return page, False
 
     def fetch_all_trades(self, mint: str) -> list[dict]:
         """Return a coin's complete trade history, oldest first.
@@ -292,7 +298,9 @@ class PumpFunApiClient:
         trades: list[dict] = []
         cursor: str | None = None
         for _ in range(TRADES_MAX_PAGES):
-            page = self.fetch_trades(mint, limit=TRADES_PAGE_LIMIT, cursor=cursor)
+            page, from_cache = self._trade_page(
+                mint, limit=TRADES_PAGE_LIMIT, cursor=cursor
+            )
             trades.extend(page["trades"])
             pagination = page["pagination"]
             cursor = (
@@ -302,7 +310,7 @@ class PumpFunApiClient:
                 isinstance(pagination, dict) and pagination.get("hasMore") and cursor
             ):
                 return sorted(trades, key=lambda trade: str(trade.get("slotIndexId")))
-            if not page.get("cached"):
+            if not from_cache:
                 time.sleep(TRADES_PAGE_PACING_SECONDS)
         raise PumpFunApiError(  # noqa: TRY003
             f"{mint} trade history exceeds {TRADES_MAX_PAGES} pages"
