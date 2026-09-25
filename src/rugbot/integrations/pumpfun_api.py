@@ -17,17 +17,14 @@ import struct
 import time
 import urllib.error
 import urllib.request
-from typing import TYPE_CHECKING
 
 from solders.pubkey import Pubkey
 
 from rugbot.domain.ohlc import OHLCCandle, TradeTick, build_ohlc_candles
+from rugbot.integrations.rpc_cache import RpcResponseCache
 from rugbot.integrations.solana_rpc import SolanaClient
 from rugbot.runtime.config import load_provider_settings, resolve_dotenv
 from rugbot.utils.logger import get_logger
-
-if TYPE_CHECKING:
-    from rugbot.integrations.rpc_cache import RpcResponseCache
 
 logger = get_logger(__name__)
 
@@ -257,6 +254,7 @@ class PumpFunApiClient:
                 return {
                     "trades": hit["trades"],
                     "pagination": hit.get("pagination", {}),
+                    "cached": True,
                 }
         url = f"{self._base_url}/v2/coins/{mint}/trades?limit={limit}"
         if cursor:
@@ -304,7 +302,8 @@ class PumpFunApiClient:
                 isinstance(pagination, dict) and pagination.get("hasMore") and cursor
             ):
                 return sorted(trades, key=lambda trade: str(trade.get("slotIndexId")))
-            time.sleep(TRADES_PAGE_PACING_SECONDS)
+            if not page.get("cached"):
+                time.sleep(TRADES_PAGE_PACING_SECONDS)
         raise PumpFunApiError(  # noqa: TRY003
             f"{mint} trade history exceeds {TRADES_MAX_PAGES} pages"
         )
@@ -473,7 +472,7 @@ def get_client() -> PumpFunApiClient:
     """Return the process-wide API client, creating it on first call."""
     global _client  # noqa: PLW0603
     if _client is None:
-        _client = PumpFunApiClient()
+        _client = PumpFunApiClient(page_cache=RpcResponseCache())
     return _client
 
 

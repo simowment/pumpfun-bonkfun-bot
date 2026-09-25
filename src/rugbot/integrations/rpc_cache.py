@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -127,7 +128,9 @@ class RpcResponseCache:
         """
         self._db_path = resolve_rpc_cache_path(db_path)
         self._now_fn = now_fn or time.time
-        self._conn = sqlite3.connect(str(self._db_path))
+        # Shared by fetch worker threads; every statement runs under the lock.
+        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        self._lock = threading.Lock()
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS rpc_cache ("
             "cache_key TEXT PRIMARY KEY, "
@@ -146,6 +149,11 @@ class RpcResponseCache:
             logger.debug("RPC cache close failed for %s", self._db_path)
 
     def lookup(self, method: str, params: object) -> dict[str, Any] | None:
+        """Return the cached response for (method, params), if fresh."""
+        with self._lock:
+            return self._lookup(method, params)
+
+    def _lookup(self, method: str, params: object) -> dict[str, Any] | None:
         """Return the cached response for (method, params), if fresh.
 
         Args:
@@ -189,6 +197,18 @@ class RpcResponseCache:
         return parsed if isinstance(parsed, dict) else None
 
     def store(
+        self,
+        method: str,
+        params: object,
+        response: dict[str, Any],
+        *,
+        ttl_override: float | None = None,
+    ) -> None:
+        """Persist a successful response; failures must never call this."""
+        with self._lock:
+            self._store(method, params, response, ttl_override=ttl_override)
+
+    def _store(
         self,
         method: str,
         params: object,
