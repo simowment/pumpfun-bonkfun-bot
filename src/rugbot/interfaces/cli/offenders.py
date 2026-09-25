@@ -648,7 +648,3 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     render_report(coverage, filtered_bands, full_address=bool(args.full_address))
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

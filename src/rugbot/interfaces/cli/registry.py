@@ -128,7 +128,3 @@ def _set_enabled(registry: WalletRegistry, wallet: str, *, enabled: bool) -> boo
     except WalletRegistryError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return False
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

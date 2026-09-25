@@ -405,7 +405,3 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     print("reference: min-launches and win multiple are reference lines only")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

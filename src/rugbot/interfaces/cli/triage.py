@@ -542,7 +542,3 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"  next action: {next_action}")
     print("  reference: N>=10 is an activity/sample-size indicator only")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

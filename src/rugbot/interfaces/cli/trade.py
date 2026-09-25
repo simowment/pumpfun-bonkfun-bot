@@ -570,7 +570,3 @@ def main() -> None:
     args = parser.parse_args()
     code = asyncio.run(run_cli(args))
     sys.exit(code)
-
-
-if __name__ == "__main__":
-    main()

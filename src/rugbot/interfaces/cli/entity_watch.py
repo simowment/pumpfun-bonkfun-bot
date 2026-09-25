@@ -419,7 +419,3 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.seed or args.once or not args.loop:
         return _run_once_mode(graph, state, webhook_url, args)
     return _run_watch_loop(graph, state, webhook_url, max(args.interval, 10))
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

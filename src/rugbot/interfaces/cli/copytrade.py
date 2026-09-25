@@ -297,7 +297,3 @@ def main(argv: Sequence[str] | None = None) -> int:
     trades = asyncio.run(observe(source, seconds=args.seconds, as_json=args.json))
     print_summary(trades, as_json=args.json)
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

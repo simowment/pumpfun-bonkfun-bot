@@ -671,7 +671,3 @@ def _json_result(result: WatchCycleResult | AbstainResult) -> dict[str, object]:
             for receipt in result.receipts
         ],
     }
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

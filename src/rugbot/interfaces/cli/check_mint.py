@@ -1447,7 +1447,3 @@ def main(argv: list[str] | None = None) -> int:
                         print(f"  --apply failed (fail-closed): {exc}", file=sys.stderr)
     print("  live: rug_watch --stream  |  rug_live  |  rug_web")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

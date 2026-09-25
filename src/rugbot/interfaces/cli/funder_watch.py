@@ -353,7 +353,3 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     except KeyboardInterrupt:
         print("funder watch stopped")
         return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

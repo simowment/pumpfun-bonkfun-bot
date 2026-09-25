@@ -444,7 +444,3 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901, PLR0911
             f"qualifies={summary.qualifies}"
         )
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -676,7 +676,3 @@ def main(argv: list[str] | None = None) -> int:
         as_json: bool = bool(args.json)
         return _print_status(state_dir, as_json)
     return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
