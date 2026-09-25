@@ -313,12 +313,16 @@ def _render_backtest(
             f"graduated {sum(p.graduated for p in profiles)}   median first dev/"
             f"bundle sell {statistics.median(insider) if insider else 'n/a'}s"
         )
-        print("\n   best exit rules (net EV per trade, after pump fees + tx costs):")
+        print(
+            "\n   best exit rules, ranked by conservative EV (winrate at its 95%"
+            " lower bound; SOL per trade after pump fees + tx costs):"
+        )
         for summary in summaries[:8]:
             print(
                 f"   {_describe_rule(summary):<38} N={summary.samples:<3} "
-                f"win {summary.winrate:5.0%}  EV {summary.net_ev_sol:+.4f} SOL  "
-                f"ROI {summary.roi_pct:+6.1f}%  worst {summary.worst_loss_sol:+.4f}"
+                f"win {summary.winrate:5.0%}  cons.EV {summary.conservative_ev_sol:+.4f}"
+                f"  EV {summary.net_ev_sol:+.4f}  EV-best "
+                f"{summary.ev_without_best_sol:+.4f}  ROI {summary.roi_pct:+6.1f}%"
             )
         dev_rule = next(s for s in summaries if s.rule.exit_on_dev_sell)
         print(

@@ -18,6 +18,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
+from rugbot.backtest.pairs_lab import wilson_interval
 from rugbot.domain.fees import FeeConfig
 from rugbot.domain.quote_engine import pump_curve_buy_amounts, pump_curve_sell_amounts
 
@@ -360,6 +361,8 @@ class RuleSummary:
     roi_pct: float
     fees_sol: float
     worst_loss_sol: float
+    conservative_ev_sol: float
+    ev_without_best_sol: float
     results: tuple[LaunchResult, ...]
 
 
@@ -380,10 +383,25 @@ def default_exit_rules() -> list[ExitRule]:
     return rules
 
 
+def _conservative_ev(pnls: Sequence[float]) -> float:
+    """Bible EV with the winrate at its 95% Wilson lower bound.
+
+    ``EV = p * avg_win - (1 - p) * avg_loss``. A take-profit that only a few
+    outliers reach has a wide interval, so its lower-bound winrate (and EV)
+    drops; a level many launches reach keeps most of its EV.
+    """
+    wins = [pnl for pnl in pnls if pnl > 0]
+    losses = [-pnl for pnl in pnls if pnl <= 0]
+    win_floor, _ = wilson_interval(len(wins), len(pnls))
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = sum(losses) / len(losses) if losses else 0.0
+    return win_floor * avg_win - (1 - win_floor) * avg_loss
+
+
 def summarize_rules(
     replays: Sequence[LaunchReplay], rules: Sequence[ExitRule]
 ) -> list[RuleSummary]:
-    """Evaluate every rule on every launch, best net EV per trade first."""
+    """Evaluate every rule on every launch, best conservative EV first."""
     summaries: list[RuleSummary] = []
     for rule in rules:
         results = tuple(replay.run(rule) for replay in replays)
@@ -392,6 +410,7 @@ def summarize_rules(
         wins = sum(1 for result in results if result.net_pnl_sol > 0)
         net_total = sum(result.net_pnl_sol for result in results)
         stake = sum(replay.costs.quote_size_sol for replay in replays)
+        pnls = sorted(result.net_pnl_sol for result in results)
         summaries.append(
             RuleSummary(
                 rule=rule,
@@ -402,8 +421,14 @@ def summarize_rules(
                 net_total_sol=net_total,
                 roi_pct=100 * net_total / stake,
                 fees_sol=sum(result.fees_sol for result in results),
-                worst_loss_sol=min(result.net_pnl_sol for result in results),
+                worst_loss_sol=pnls[0],
+                conservative_ev_sol=_conservative_ev(pnls),
+                ev_without_best_sol=(
+                    sum(pnls[:-1]) / (len(pnls) - 1) if len(pnls) > 1 else 0.0
+                ),
                 results=results,
             )
         )
-    return sorted(summaries, key=lambda summary: summary.net_ev_sol, reverse=True)
+    return sorted(
+        summaries, key=lambda summary: summary.conservative_ev_sol, reverse=True
+    )
