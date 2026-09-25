@@ -237,6 +237,7 @@ def poll_once(
                 continue
             token_name = token_symbol = ""
             market_cap_usd = 0.0
+            pool_address = ""
             try:
                 meta = client.fetch_token(mint)
             except Exception as exc:  # noqa: BLE001 - meta is best effort
@@ -246,6 +247,12 @@ def poll_once(
                 token_name = str(meta.get("name", ""))
                 token_symbol = str(meta.get("symbol", ""))
                 market_cap_usd = _to_float(meta.get("usd_market_cap"))
+                pool_address = str(
+                    meta.get("pump_swap_pool")
+                    or (meta.get("pool_address") if meta.get("complete") else None)
+                    or meta.get("bonding_curve")
+                    or ""
+                )
             payload = build_entity_launch_payload(
                 NewMintAlert(
                     mint=mint,
@@ -253,6 +260,7 @@ def poll_once(
                     token_name=token_name,
                     token_symbol=token_symbol,
                     market_cap_usd=market_cap_usd,
+                    pool_address=pool_address,
                 ),
                 graph,
             )

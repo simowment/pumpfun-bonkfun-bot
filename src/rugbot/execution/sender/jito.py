@@ -10,6 +10,7 @@ import time
 from typing import ClassVar
 
 import aiohttp
+import base58
 from solders.instruction import Instruction
 from solders.pubkey import Pubkey
 from solders.system_program import TransferParams, transfer
@@ -150,6 +151,58 @@ class JitoSender:
                         acknowledged=True,
                     )
                 err_msg = str(data.get("error", "Unknown Jito submission error"))
+                return SubmissionResult(
+                    sender_name=self.name,
+                    signature="",
+                    ack_ms=ack_ms,
+                    acknowledged=False,
+                    error_message=err_msg,
+                )
+        except Exception as error:  # noqa: BLE001
+            ack_ms = (time.perf_counter() - start_t) * 1000.0
+            return SubmissionResult(
+                sender_name=self.name,
+                signature="",
+                ack_ms=ack_ms,
+                acknowledged=False,
+                error_message=f"{type(error).__name__}: {error}",
+            )
+
+    async def send_bundle(self, raw_tx_bytes_list: list[bytes]) -> SubmissionResult:
+        """Send base58-encoded raw transactions as an atomic bundle to Jito Block Engine."""
+        start_t = time.perf_counter()
+        session = await self._get_session()
+
+        b58_bundle = [
+            base58.b58encode(raw).decode("ascii") for raw in raw_tx_bytes_list
+        ]
+        bundle_url = self.block_engine_url.replace("/transactions", "/bundles")
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendBundle",
+            "params": [
+                b58_bundle,
+            ],
+        }
+
+        try:
+            async with session.post(
+                bundle_url,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=4.0),
+            ) as response:
+                ack_ms = (time.perf_counter() - start_t) * 1000.0
+                data = await response.json()
+                if "result" in data and isinstance(data["result"], str):
+                    return SubmissionResult(
+                        sender_name=self.name,
+                        signature=data["result"],
+                        ack_ms=ack_ms,
+                        acknowledged=True,
+                    )
+                err_msg = str(data.get("error", "Unknown Jito bundle error"))
                 return SubmissionResult(
                     sender_name=self.name,
                     signature="",

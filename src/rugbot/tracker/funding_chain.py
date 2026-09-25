@@ -26,6 +26,7 @@ from rugbot.integrations.rpc_access import (
     resolve_rpc_endpoints,
     sync_rpc_result,
 )
+from rugbot.integrations.rpc_cache import RpcResponseCache
 from rugbot.tracker.models import LAMPORTS_PER_SOL
 from rugbot.utils.logger import get_logger
 
@@ -45,12 +46,65 @@ PRODUCTION_PACING_SECONDS = 0.35
 ROLE_ORIGIN = "origin"
 ROLE_RELAY = "relay"
 ROLE_HUB = "hub"
+CEX_MIN_RECIPIENTS = 50
 
 _ERR_ADDRESS = "wallet address must be a non-empty string"
 _ERR_MAX_HOPS = "max_hops must be at least 1"
 _ERR_NO_ENDPOINT = "no RPC endpoint is configured"
 _WARN_CYCLE = "cycle detected in funding chain"
 _WARN_HOP_CAP = "hop cap reached before a hub"
+
+_funding_rpc_cache: RpcResponseCache | None = None
+
+
+def _cache_ttl(method: str, params: Sequence[object]) -> float | None:
+    """Return an infinite TTL for an immutable call, else None (do not cache)."""
+    if method == "getTransaction":
+        return float("inf")
+    if method == "getSignaturesForAddress":
+        if len(params) >= 2 and isinstance(params[1], dict) and "before" in params[1]:  # noqa: PLR2004
+            return float("inf")
+        return None
+    return None
+
+
+def _get_funding_rpc_cache() -> RpcResponseCache | None:
+    """Return the shared funding-chain RPC cache, building it lazily once."""
+    global _funding_rpc_cache  # noqa: PLW0603
+    if _funding_rpc_cache is not None:
+        return _funding_rpc_cache
+    try:
+        _funding_rpc_cache = RpcResponseCache()
+    except Exception:  # noqa: BLE001
+        logger.debug("funding chain rpc cache unavailable")
+        return None
+    return _funding_rpc_cache
+
+
+def _fetch_cached(
+    method: str,
+    params: Sequence[object],
+    *,
+    endpoints: RpcEndpoints | Sequence[str] | None,
+    cache: RpcResponseCache | None,
+) -> object:
+    """Fetch one RPC result, serving immutable calls from the durable cache."""
+    ttl = _cache_ttl(method, params)
+    if cache is not None and ttl is not None:
+        try:
+            hit = cache.lookup(method, params)
+        except Exception:  # noqa: BLE001
+            logger.debug("funding chain rpc cache lookup failed")
+            hit = None
+        if isinstance(hit, dict) and "result" in hit:
+            return hit["result"]
+    result = sync_rpc_result(method, params, endpoints=endpoints)
+    if cache is not None and ttl is not None:
+        try:
+            cache.store(method, params, {"result": result}, ttl_override=ttl)
+        except Exception:  # noqa: BLE001
+            logger.debug("funding chain rpc cache store failed")
+    return result
 
 
 class FundingChainError(ValueError):
@@ -113,7 +167,9 @@ def _rpc_call(
 ) -> object:
     """Perform one JSON-RPC call through the pooled path or a test seam."""
     if transport is None:
-        return sync_rpc_result(method, params, endpoints=endpoints)
+        return _fetch_cached(
+            method, params, endpoints=endpoints, cache=_get_funding_rpc_cache()
+        )
     resolved = resolve_rpc_endpoints() if endpoints is None else endpoints
     endpoint = resolved.primary if isinstance(resolved, RpcEndpoints) else resolved[0]
     if endpoint is None:
@@ -286,6 +342,30 @@ def _counterparty_transfers(
             continue
         pairs.append((keys[index], amount_sol))
     return pairs
+
+
+def is_cex_shaped_source(
+    *,
+    source_creation_count: int,
+    source_recipient_count: int,
+    min_recipients: int = CEX_MIN_RECIPIENTS,
+) -> bool:
+    """Return True when a funding source looks like an exchange hot wallet.
+
+    A wallet that creates nothing but pays many wallets is an exchange or
+    shared hot wallet; its recipients are unrelated users and MUST NOT be
+    attributed to one entity (AGENTS.md section 9.1; bible CEX warning).
+
+    Args:
+        source_creation_count: Tokens created by the source wallet itself.
+        source_recipient_count: Distinct wallets the source funded.
+        min_recipients: Recipient threshold for the CEX shape.
+
+    Returns:
+        True when the source created nothing and funded at least
+        ``min_recipients`` distinct wallets.
+    """
+    return source_creation_count == 0 and source_recipient_count >= min_recipients
 
 
 def walk_upstream(
@@ -543,7 +623,7 @@ def _hydrate_transfers(  # noqa: PLR0913
 def enumerate_funded_paged(  # noqa: PLR0913
     wallet: str,
     *,
-    max_pages: int = DEFAULT_HISTORY_PAGES,
+    max_pages: int | None = DEFAULT_HISTORY_PAGES,
     per_page: int = SIGNATURE_PAGE_LIMIT,
     max_transactions: int = DEFAULT_HISTORY_TRANSACTIONS,
     min_sol: float = MIN_TRANSFER_SOL,
@@ -562,7 +642,8 @@ def enumerate_funded_paged(  # noqa: PLR0913
 
     Args:
         wallet: Wallet whose outbound transfers to enumerate.
-        max_pages: Maximum signature pages requested.
+        max_pages: Maximum signature pages requested. None walks the cursor
+            to exhaustion, bounded by ``max_transactions``.
         per_page: Signatures requested per page (RPC caps this at 1000).
         max_transactions: Maximum transactions hydrated across all pages.
         min_sol: Ignore transfers below this SOL amount.
@@ -582,7 +663,8 @@ def enumerate_funded_paged(  # noqa: PLR0913
     transfers: list[FundedTransfer] = []
     hydrated = 0
     before: str | None = None
-    for _ in range(max_pages):
+    pages_walked = 0
+    while max_pages is None or pages_walked < max_pages:
         if hydrated >= max_transactions:
             break
         params: dict[str, object] = {
@@ -603,6 +685,7 @@ def enumerate_funded_paged(  # noqa: PLR0913
             break
         if not isinstance(page, list) or not page:
             break
+        pages_walked += 1
         page_transfers, used = _hydrate_transfers(
             owner,
             page,
@@ -624,6 +707,7 @@ def enumerate_funded_paged(  # noqa: PLR0913
 
 
 __all__ = [
+    "CEX_MIN_RECIPIENTS",
     "DEFAULT_MAX_HOPS",
     "DEFAULT_MAX_HUB_TRANSACTIONS",
     "HUB_MIN_SIGNATURES",
@@ -639,5 +723,6 @@ __all__ = [
     "enumerate_funded",
     "enumerate_funded_paged",
     "enumerate_sources",
+    "is_cex_shaped_source",
     "walk_upstream",
 ]

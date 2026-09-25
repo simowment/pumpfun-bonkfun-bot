@@ -77,6 +77,16 @@ class TradeSellRequest(BaseModel):
     mode: str = Field(default="paper")
 
 
+class EntityBacktestRequest(BaseModel):
+    """Validated request for historical entity backtesting."""
+
+    target_address: str = Field(default="")
+    quote_size_sol: float = Field(default=0.25, gt=0.0)
+    slippage_pct: float = Field(default=1.5, ge=0.0, le=100.0)
+    trail_pct: float = Field(default=15.0, ge=0.0, le=100.0)
+    interval: str = Field(default="1m")
+
+
 def create_fastapi_app(  # noqa: C901, PLR0915
     core: RugbotApp, dist_dir: Path | None = None
 ) -> FastAPI:
@@ -257,14 +267,72 @@ def create_fastapi_app(  # noqa: C901, PLR0915
         }
 
     @app.post("/api/entity/backtest")
-    async def api_entity_backtest() -> None:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "No finalized launch-outcome dataset is available for this entity; "
-                "a backtest would be fabricated"
-            ),
+    async def api_entity_backtest(
+        payload: EntityBacktestRequest | None = None,
+    ) -> dict[str, object]:
+        if payload is None or not payload.target_address.strip():
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "No finalized launch-outcome dataset is available for this entity; "
+                    "a backtest would be fabricated"
+                ),
+            )
+        target = payload.target_address.strip()
+        from rugbot.integrations.pumpfun_api import get_client  # noqa: PLC0415
+        from rugbot.interfaces.cli.cabal import (  # noqa: PLC0415
+            _replay_candlestick_series,
         )
+        from rugbot.runtime.cabal_pipeline import CabalPipeline  # noqa: PLC0415
+
+        client = get_client()
+        pipeline = CabalPipeline(pump_client=client)
+
+        import argparse  # noqa: PLC0415
+
+        mock_args = argparse.Namespace(
+            interval=payload.interval,
+            size_sol=payload.quote_size_sol,
+            trail=payload.trail_pct,
+            tp2x=0.50,
+            tp5x=0.25,
+        )
+
+        replay_result = await _replay_candlestick_series(
+            pipeline, client, target, mock_args
+        )
+        if not replay_result:
+            launches = [
+                launch
+                for launch in core.launches()
+                if target in (launch.creator_wallet, launch.root_funder)
+            ]
+            if launches:
+                results = []
+                for launch in launches[:5]:
+                    r = await _replay_candlestick_series(
+                        pipeline, client, launch.mint, mock_args
+                    )
+                    if r:
+                        results.append(r)
+                if results:
+                    return {
+                        "ok": True,
+                        "target_address": target,
+                        "total_tested": len(results),
+                        "results": results,
+                    }
+
+            raise HTTPException(
+                status_code=404,
+                detail=f"No finalized candlestick data found for target {target}",
+            )
+
+        return {
+            "ok": True,
+            "target_address": target,
+            "result": replay_result,
+        }
 
     @app.post("/api/trade/buy")
     async def api_trade_buy(payload: TradeBuyRequest) -> dict[str, object]:

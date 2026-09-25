@@ -401,6 +401,39 @@ def test_fastapi_has_no_seeded_cluster_or_token_routes(tmp_path: Path) -> None:
     assert "would be fabricated" in response.json()["detail"]
 
 
+def test_fastapi_entity_backtest_with_target(monkeypatch, tmp_path: Path) -> None:
+    core = build_ui_runtime(state_dir=tmp_path)
+    app = create_fastapi_app(core)
+
+    async def fake_replay(*_args, **_kwargs):
+        return {
+            "mint": "So11111111111111111111111111111111111111112",
+            "symbol": "TESTCOIN",
+            "entry_price": 0.0001,
+            "peak_price": 0.0003,
+            "realized_pnl_sol": 0.25,
+            "roi_pct": 100.0,
+            "exit_reason": "tp_completed",
+        }
+
+    monkeypatch.setattr(
+        "rugbot.interfaces.cli.cabal._replay_candlestick_series",
+        fake_replay,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/entity/backtest",
+            json={"target_address": "So11111111111111111111111111111111111111112"},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["result"]["symbol"] == "TESTCOIN"
+    assert data["result"]["roi_pct"] == 100.0
+
+
 def test_fastapi_rejects_unresolved_tracking(tmp_path: Path) -> None:
     core = build_ui_runtime(state_dir=tmp_path)
     app = create_fastapi_app(core)

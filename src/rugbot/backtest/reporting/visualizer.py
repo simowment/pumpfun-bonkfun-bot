@@ -466,8 +466,8 @@ def export_mplfinance_png_chart(
     """Export a high-resolution real OHLC candlestick chart with human-readable Market Cap in USD ($k) and equal-width bars."""
     import datetime
 
-    import matplotlib.patches as patches
     import matplotlib.pyplot as plt
+    from matplotlib import patches
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)

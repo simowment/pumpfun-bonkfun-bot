@@ -29,6 +29,10 @@ dependencies = [
     "lightweight-charts>=2.1",
     "mplfinance>=0.12.10b0",
     "matplotlib>=3.11.1",
+    "eth-account>=0.14.0",
+    "web3>=8.0.0",
+    "requests>=2.34.2",
+    "pyarrow>=25.0.1",
 ]
 
 [tool.uv.sources]
@@ -62,6 +66,20 @@ rug_trade = "rugbot.interfaces.cli.trade:main"
 rug_chain = "rugbot.interfaces.cli.chain:main"
 rug_graph = "rugbot.interfaces.cli.graph:main"
 rug_entity_history = "rugbot.interfaces.cli.entity_history:main"
+rug_entity_ath = "rugbot.interfaces.cli.entity_ath:main"
+rug_triage = "rugbot.interfaces.cli.triage:main"
+rug_offenders = "rugbot.interfaces.cli.offenders:main"
+rug_creators = "rugbot.interfaces.cli.creators:main"
+rug_entity = "rugbot.interfaces.cli.entity_profile:main"
+rug_funder_watch = "rugbot.interfaces.cli.funder_watch:main"
+rug_features = "rugbot.interfaces.cli.features:main"
+rug_collect = "rugbot.interfaces.cli.collect:main"
+rug_themes = "rugbot.interfaces.cli.themes:main"
+rug_registry = "rugbot.interfaces.cli.registry:main"
+rug_copytrade = "rugbot.interfaces.cli.copytrade:main"
+rug_cabal = "rugbot.interfaces.cli.cabal:main"
+cabal = "rugbot.interfaces.cli.cabal:main"
+cabal_sniper = "rugbot.interfaces.cli.cabal:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]

@@ -315,11 +315,6 @@ def _validate_account_data_layout_from_state(
     bool_error = _validate_bool_fields(data, state.as_of_slot)
     if bool_error is not None:
         return bool_error
-    if any(byte != 0 for byte in data[CURRENT_LAYOUT_SIZE:]):
-        return _unsupported(
-            "nonzero trailing bonding-curve account bytes are unsupported",
-            state.as_of_slot,
-        )
     return None
 
 

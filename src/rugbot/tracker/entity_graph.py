@@ -188,11 +188,14 @@ def _expand(  # noqa: PLR0913
     min_sol: float,
     endpoints: RpcEndpoints | Sequence[str] | None,
     transport: Callable[[str, str, list[object]], object] | None,
+    on_step: Callable[[dict[str, int], list[GraphEdge]], None] | None = None,
 ) -> tuple[dict[str, int], list[GraphEdge], bool]:
     """Breadth-first expand outbound and inbound edges from seed wallets.
 
     Args:
         seeds: Wallets to start from (the seed plus its upstream spine).
+        on_step: Optional callback invoked with ``(depths, edges)`` after
+            each wallet's outbound and inbound expansion completes.
 
     Returns:
         ``(depth_by_wallet, edges, truncated)`` where ``truncated`` is True
@@ -241,6 +244,8 @@ def _expand(  # noqa: PLR0913
                 )
             )
             _enqueue(source.sender, depth, max_depth, max_nodes, depths, queue)
+        if on_step is not None:
+            on_step(depths, edges)
     return depths, edges, truncated
 
 
@@ -302,6 +307,7 @@ def discover_entity_graph(  # noqa: PLR0913
     launch_lookup: Callable[[str], int | None] | None = None,
     endpoints: RpcEndpoints | Sequence[str] | None = None,
     transport: Callable[[str, str, list[object]], object] | None = None,
+    on_progress: Callable[[EntityGraph], None] | None = None,
 ) -> EntityGraph:
     """Assemble and classify the entity graph reachable from one seed.
 
@@ -316,6 +322,9 @@ def discover_entity_graph(  # noqa: PLR0913
         launch_lookup: Optional ``wallet -> launch count`` resolver.
         endpoints: Resolved endpoints; defaults to precedence resolution.
         transport: Optional test seam replacing the pooled transport.
+        on_progress: Optional callback receiving a partial ``EntityGraph``
+            after each wallet expansion (launch counts may be zero
+            mid-scan). Persistence stays with the caller.
 
     Returns:
         EntityGraph with classified nodes, edges, and funding batches.
@@ -324,6 +333,21 @@ def discover_entity_graph(  # noqa: PLR0913
         seed, max_hops=spine_hops, endpoints=endpoints, transport=transport
     )
     spine = [node.wallet for node in walk.nodes] or [seed]
+
+    def on_step(depths: dict[str, int], step_edges: list[GraphEdge]) -> None:
+        """Build a partial graph snapshot and forward it to the caller."""
+        if on_progress is None:
+            return
+        on_progress(
+            EntityGraph(
+                seed=seed,
+                nodes=_build_nodes(depths, step_edges, {}),
+                edges=tuple(step_edges),
+                batches=_group_batches(step_edges, batch_min_recipients),
+                warning=None,
+            )
+        )
+
     depths, edges, truncated = _expand(
         spine,
         max_depth=max_depth,
@@ -332,6 +356,7 @@ def discover_entity_graph(  # noqa: PLR0913
         min_sol=min_sol,
         endpoints=endpoints,
         transport=transport,
+        on_step=on_step if on_progress is not None else None,
     )
     counts = _resolve_launch_counts(list(depths), launch_lookup)
     batches = _group_batches(edges, batch_min_recipients)

@@ -233,7 +233,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             "optimal_tp": report.optimal_tp,
             "optimal_sl": report.optimal_sl,
             "optimal_ev": report.optimal_ev,
+            "optimal_tp_observed": report.optimal_tp_observed,
+            "optimal_ev_observed": report.optimal_ev_observed,
+            "exit_models": list(report.exit_models),
             "robust_zone": [list(x) for x in report.robust_zone],
+            "entry_basis_counts": [list(x) for x in report.entry_basis_counts],
+            "tp_only_evaluations": [
+                {
+                    "tp_pct": e.tp_pct,
+                    "sl_pct": e.sl_pct,
+                    "wins": e.wins,
+                    "losses": e.losses,
+                    "winrate_pct": e.winrate_pct,
+                    "gross_pnl_sol": e.gross_pnl_sol,
+                    "fees_sol": e.fees_sol,
+                    "net_pnl_sol": e.net_pnl_sol,
+                    "net_ev_sol": e.net_ev_sol,
+                    "net_roi_pct": e.net_roi_pct,
+                    "max_drawdown_sol": e.max_drawdown_sol,
+                    "robust": e.robust,
+                }
+                for e in report.tp_only_evaluations
+            ],
             "evaluations": [
                 {
                     "tp_pct": e.tp_pct,
@@ -263,9 +284,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         f"=== rug_backtest {report.target} mode={report.mode} samples={len(report.samples)} ==="
     )
+    print(
+        f"Observed (no-stop) headline: optimal TP +{report.optimal_tp_observed}% | "
+        f"EV {report.optimal_ev_observed:+.4f} SOL "
+        "(exit at TP or observed dev/bundle sell-leg print)"
+    )
     # matrix header
     header = "TP\\SL | " + " | ".join(f"-{int(sl)}% " for sl in config.sl_grid)
-    print(header)
+    print(header + "  [scenario only (fixed stop does not fill on a rug)]")
     print("-" * len(header))
     for tp in config.tp_grid:
         row_cells: list[str] = []

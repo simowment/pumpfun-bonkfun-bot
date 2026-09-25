@@ -140,10 +140,12 @@ def _launch_lookup(*, enabled: bool) -> Callable[[str], int | None] | None:
     return lookup
 
 
-def _persist(graph: EntityGraph) -> tuple[int, int]:
+def _persist(
+    graph: EntityGraph, repo: SQLiteTrackerRepository | None = None
+) -> tuple[int, int]:
     """Merge the graph into the tracker database, returning saved counts."""
     now = datetime.now(UTC).isoformat()
-    repo = SQLiteTrackerRepository(DatabaseManager(DEFAULT_STATE_DB))
+    target = repo or SQLiteTrackerRepository(DatabaseManager(DEFAULT_STATE_DB))
     nodes = [
         EntityNodeRecord(
             wallet=node.wallet,
@@ -167,7 +169,7 @@ def _persist(graph: EntityGraph) -> tuple[int, int]:
         )
         for edge in graph.edges
     ]
-    return (repo.save_entity_nodes(nodes), repo.save_entity_edges(edges))
+    return (target.save_entity_nodes(nodes), target.save_entity_edges(edges))
 
 
 def _as_payload(graph: EntityGraph) -> dict[str, object]:
@@ -255,6 +257,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         Process exit code: 0 on success, 1 on validation failure.
     """
     args = _build_parser().parse_args(argv)
+    repo: SQLiteTrackerRepository | None = None
+    on_progress: Callable[[EntityGraph], None] | None = None
+    if not args.no_persist:
+        repo = SQLiteTrackerRepository(DatabaseManager(DEFAULT_STATE_DB))
+        warned = False
+
+        def on_progress(partial: EntityGraph) -> None:
+            """Persist a partial graph so an interruption keeps progress."""
+            nonlocal warned
+            try:
+                _persist(partial, repo)
+            except Exception as error:  # noqa: BLE001 - never abort scan
+                if not warned:
+                    logger.warning(
+                        "entity graph progress persist failed: %s",
+                        type(error).__name__,
+                    )
+                    warned = True
+
     try:
         graph = discover_entity_graph(
             args.seed,
@@ -265,6 +286,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             min_sol=args.min_sol,
             batch_min_recipients=args.batch_min,
             launch_lookup=_launch_lookup(enabled=not args.no_launches),
+            on_progress=on_progress,
         )
     except FundingChainError as error:
         if args.json:
@@ -276,7 +298,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     persisted: tuple[int, int] | None = None
     if not args.no_persist:
         try:
-            persisted = _persist(graph)
+            persisted = _persist(graph, repo)
         except Exception as error:  # noqa: BLE001 - persistence never breaks output
             logger.warning("entity graph persist failed: %s", type(error).__name__)
 

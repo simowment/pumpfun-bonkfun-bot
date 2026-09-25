@@ -5,10 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 from rugbot.integrations.rpc_access import RpcEndpoints
+from rugbot.integrations.rpc_cache import RpcResponseCache
 from rugbot.tracker.funding_chain import (
     ROLE_HUB,
     ROLE_ORIGIN,
     ROLE_RELAY,
+    _cache_ttl,
+    _fetch_cached,
     enumerate_funded,
     walk_upstream,
 )
@@ -143,3 +146,52 @@ def test_enumerate_funded_lists_recipients() -> None:
     recipients = [transfer.recipient for transfer in funded]
     assert recipients == ["siblingA"]
     assert funded[0].amount_sol == 3.5
+
+
+def test_cache_ttl_rules() -> None:
+    """Only immutable RPC calls receive an infinite TTL."""
+    assert _cache_ttl("getTransaction", ["sig", {}]) == float("inf")
+    before = ["w", {"limit": 1000, "before": "X"}]
+    assert _cache_ttl("getSignaturesForAddress", before) == float("inf")
+    newest = ["w", {"limit": 1000, "commitment": "finalized"}]
+    assert _cache_ttl("getSignaturesForAddress", newest) is None
+    assert _cache_ttl("getBalance", ["w"]) is None
+
+
+def test_fetch_cached_round_trip(tmp_path: Any, monkeypatch: Any) -> None:
+    """First call stores, second call is served from cache (no network)."""
+    cache = RpcResponseCache(db_path=tmp_path / "cache.sqlite3")
+    calls = {"count": 0}
+    payload = [{"signature": "s1", "slot": 9}]
+
+    def fake_sync(method: str, params: Any, **kwargs: Any) -> object:
+        calls["count"] += 1
+        return list(payload)
+
+    monkeypatch.setattr("rugbot.tracker.funding_chain.sync_rpc_result", fake_sync)
+    params: list[object] = ["w", {"limit": 2, "before": "X"}]
+    first = _fetch_cached(
+        "getSignaturesForAddress", params, endpoints=None, cache=cache
+    )
+    second = _fetch_cached(
+        "getSignaturesForAddress", params, endpoints=None, cache=cache
+    )
+    assert first == payload
+    assert second == payload
+    assert calls["count"] == 1
+
+
+def test_fetch_cached_skips_newest_page(tmp_path: Any, monkeypatch: Any) -> None:
+    """Newest signature pages are never cached (no ``before`` cursor)."""
+    cache = RpcResponseCache(db_path=tmp_path / "cache.sqlite3")
+    calls = {"count": 0}
+
+    def fake_sync(method: str, params: Any, **kwargs: Any) -> object:
+        calls["count"] += 1
+        return [{"signature": "s1", "slot": 9}]
+
+    monkeypatch.setattr("rugbot.tracker.funding_chain.sync_rpc_result", fake_sync)
+    params: list[object] = ["w", {"limit": 2, "commitment": "finalized"}]
+    _fetch_cached("getSignaturesForAddress", params, endpoints=None, cache=cache)
+    _fetch_cached("getSignaturesForAddress", params, endpoints=None, cache=cache)
+    assert calls["count"] == 2

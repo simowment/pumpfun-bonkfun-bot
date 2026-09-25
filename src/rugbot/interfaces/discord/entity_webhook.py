@@ -15,6 +15,7 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from rugbot.integrations.axiom import build_axiom_url
 from rugbot.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -73,6 +74,7 @@ class NewMintAlert:
     token_name: str = ""
     token_symbol: str = ""
     market_cap_usd: float = 0.0
+    pool_address: str = ""
 
 
 def _usd_compact(value: float) -> str:
@@ -98,6 +100,7 @@ def build_entity_launch_payload(
     """
 
     title_symbol = alert.token_symbol or "New Token"
+    axiom_url = build_axiom_url(alert.mint, pool_address=alert.pool_address or None)
     fields: list[dict[str, object]] = [
         {"name": "Mint", "value": f"`{alert.mint}`", "inline": False},
         {
@@ -146,13 +149,13 @@ def build_entity_launch_payload(
     fields.extend(
         [
             {
-                "name": "DexScreener",
-                "value": f"[chart](https://dexscreener.com/solana/{alert.mint})",
+                "name": "Axiom",
+                "value": f"[trade]({axiom_url})",
                 "inline": True,
             },
             {
-                "name": "Solscan",
-                "value": f"[txs](https://solscan.io/account/{alert.mint})",
+                "name": "DexScreener",
+                "value": f"[chart](https://dexscreener.com/solana/{alert.mint})",
                 "inline": True,
             },
             {
@@ -160,13 +163,19 @@ def build_entity_launch_payload(
                 "value": f"[pump](https://pump.fun/coin/{alert.mint})",
                 "inline": True,
             },
+            {
+                "name": "Solscan",
+                "value": f"[txs](https://solscan.io/account/{alert.mint})",
+                "inline": True,
+            },
         ]
     )
     return {
-        "content": f"🚀 **{graph.name}** new launch: **{title_symbol}**",
+        "content": f"🚀 **{graph.name}** new launch: **[{title_symbol}]({axiom_url})**",
         "embeds": [
             {
                 "title": f"🚀 Entity Launch · {title_symbol}",
+                "url": axiom_url,
                 "color": EMBED_COLOR_NEW_LAUNCH,
                 "fields": fields,
                 "footer": {"text": "rugbot entity watch · observe-only alert"},
