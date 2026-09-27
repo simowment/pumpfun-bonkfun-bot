@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from rugbot.decision.playbook_rules import CopySellMode
 from rugbot.domain.amounts import LAMPORTS_PER_SOL, PPM_SCALE
 from rugbot.runtime.config import (
     ExecutionMode,
@@ -126,6 +127,8 @@ FLAG_KEYS: tuple[tuple[str, str, Callable[[Any], object]], ...] = (
     ("cooldown", "rules.follow_cooldown_seconds", int),
     ("buy_once", "rules.buy_only_once", bool),
     ("max_losses", "rules.max_consecutive_losses", int),
+    ("copy_sells", "rules.sell.copy_sells", str),
+    ("sell_delay_ms", "rules.sell.copy_sell_delay_ms", int),
 )
 
 
@@ -217,6 +220,12 @@ def _edit_flags() -> argparse.ArgumentParser:
     edit.add_argument("--cooldown", type=int, help="follow cooldown in seconds")
     edit.add_argument("--buy-once", action=argparse.BooleanOptionalAction)
     edit.add_argument("--max-losses", type=int, help="pause after N losses in a row")
+    edit.add_argument(
+        "--copy-sells",
+        choices=[mode.value for mode in CopySellMode],
+        help="when the tracked wallet sells a held coin: sell all, or its %%",
+    )
+    edit.add_argument("--sell-delay-ms", type=int, help="delay before a copy sell")
     edit.add_argument("--group")
     edit.add_argument(
         "--set",

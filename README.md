@@ -111,7 +111,11 @@ TP (the list marks it). Invalid rules are rejected before they are saved.
 ### Paper desk (`rug_run`)
 Paper-trades every enabled `paper` tracker from one `logsSubscribe` on the Pump
 program (confirmed commitment, uses `SOLANA_RPC_HTTP`/`SOLANA_RPC_WEBSOCKET`).
-Supports `new_token_creations` and `track_buys`. A decision in slot `s` fills
+Modes: `new_token_creations` (snipe a dev's creates), `track_buys` (copy a
+wallet's buys) and `buy_on_dev_sell` (buy when the tracked dev sells). Any
+tracker can mirror its wallet's sells of a held coin with `--copy-sells all`
+or `--copy-sells percent` (same share they sold), optionally after
+`--sell-delay-ms`. A decision in slot `s` fills
 at the curve state at the end of slot `s + --landing-slots` (default 2), with
 the fee rates the coin's trades actually paid plus each tracker's priority fee
 and Jito tip. USDC/other-quote and Mayhem coins are skipped. Coins that

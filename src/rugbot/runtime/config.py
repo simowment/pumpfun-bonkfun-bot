@@ -22,6 +22,7 @@ from rugbot.decision.playbook_rules import (
     PROBABILITY_PPM_DENOMINATOR,
     BigBuySellLevel,
     BuyTheDipLevel,
+    CopySellMode,
     PlaybookRules,
     SellLevel,
     SellRules,
@@ -75,6 +76,7 @@ class TrackingMode(StrEnum):
 
     NEW_TOKEN_CREATIONS = "new_token_creations"
     TRACK_BUYS = "track_buys"
+    BUY_ON_DEV_SELL = "buy_on_dev_sell"
 
 
 class ListenerKind(StrEnum):
@@ -550,7 +552,7 @@ def _parse_risk(
 def _parse_tracking_mode(raw: object) -> TrackingMode:
     if not isinstance(raw, str) or raw not in {item.value for item in TrackingMode}:
         raise SniperConfigError(
-            "tracking_mode must be new_token_creations or track_buys"
+            f"tracking_mode must be one of {[mode.value for mode in TrackingMode]}"
         )
     return TrackingMode(raw)
 
@@ -965,9 +967,19 @@ def _parse_sell_rules(raw: object) -> SellRules:
             "trailing_levels",
             "no_activity_seconds",
             "auto_sell_big_buy",
+            "copy_sells",
+            "copy_sell_delay_ms",
         },
         "rules.sell",
     )
+    copy_sells = mapping.get("copy_sells", CopySellMode.OFF.value)
+    if copy_sells not in {mode.value for mode in CopySellMode}:
+        raise SniperConfigError(
+            f"rules.sell.copy_sells must be one of {[m.value for m in CopySellMode]}"
+        )
+    copy_sell_delay_ms = mapping.get("copy_sell_delay_ms", 0)
+    if type(copy_sell_delay_ms) is not int or copy_sell_delay_ms < 0:
+        raise SniperConfigError("rules.sell.copy_sell_delay_ms must be >= 0")
     return SellRules(
         take_profit_levels=_parse_sell_levels(
             mapping.get("take_profit_levels", []),
@@ -988,6 +1000,8 @@ def _parse_sell_rules(raw: object) -> SellRules:
         auto_sell_big_buy_levels=_parse_big_buy_levels(
             mapping.get("auto_sell_big_buy")
         ),
+        copy_sells=CopySellMode(copy_sells),
+        copy_sell_delay_ms=copy_sell_delay_ms,
     )
 
 

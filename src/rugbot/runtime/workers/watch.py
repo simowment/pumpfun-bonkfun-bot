@@ -1046,10 +1046,10 @@ def _tracking_mode_abstention(
     *,
     as_of_slot: int,
 ) -> AbstainResult:
-    if mode is TrackingMode.TRACK_BUYS:
+    if isinstance(mode, TrackingMode):
         return _abstain(
             AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
-            "track_buys requires finalized buy evidence",
+            f"{mode.value} runs in the rug_run paper desk, not the watch path",
             as_of_slot=as_of_slot,
         )
     return _abstain(

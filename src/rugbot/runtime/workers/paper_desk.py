@@ -3,8 +3,11 @@
 One ``logsSubscribe`` on the Pump program carries every create and trade with
 exact post-trade reserves, so a single socket serves any number of trackers:
 
-* a tracked dev's create (``new_token_creations``) or a tracked wallet's buy
-  (``track_buys``) opens a pending entry, gated by the tracker's entry rules;
+* a tracked dev's create (``new_token_creations``), a tracked wallet's buy
+  (``track_buys``) or a tracked dev's sell (``buy_on_dev_sell``) opens a
+  pending entry, gated by the tracker's entry rules;
+* a tracked wallet selling a coin its tracker holds is mirrored when the
+  tracker's ``copy_sells`` is ``all`` or ``percent``;
 * every trade of a held coin marks its positions to market through the
   canonical exit rules (multi-level TP/SL, trailing stop, no-activity).
 
@@ -27,6 +30,7 @@ from rugbot.backtest.trajectory.finalized_trade_builder import (
     pump_trade_payloads,
 )
 from rugbot.decision.playbook_rules import (
+    CopySellMode,
     EntryRuleAction,
     EntryRuleInput,
     EntryRuleState,
@@ -65,6 +69,12 @@ if TYPE_CHECKING:
     from rugbot.storage.paper_journal import PaperJournal
 
 DEFAULT_LANDING_SLOTS = 2
+SLOT_MS = 400
+# Which tracked-wallet trade opens an entry, per tracking mode.
+WALLET_TRIGGERS = {
+    TrackingMode.TRACK_BUYS: (True, "copy_buy"),
+    TrackingMode.BUY_ON_DEV_SELL: (False, "dev_sell"),
+}
 MICROLAMPORTS_PER_LAMPORT = 1_000_000
 JITO_ROUTING = "jito"
 BUY = "buy"
@@ -142,6 +152,8 @@ class PaperDesk:
         self._markets: dict[str, CurveMarket] = {}
         self._pending: list[PendingOrder] = []
         self._reported_skips: set[tuple[str, str, str]] = set()
+        # Tokens each tracked wallet holds per coin, from trades seen this session.
+        self._wallet_tokens: dict[tuple[str, str], int] = {}
         self._slot = 0
         self._trackers: dict[str, Tracker] = {}
         self.set_trackers(trackers)
@@ -203,10 +215,12 @@ class PaperDesk:
             event = decode_pump_trade_event(payload, slot)
             if isinstance(event, AbstainResult):
                 continue
-            if event.is_buy:
-                triggers += self._copy_triggers(event, slot, now, lines)
+            if event.user in self._trackers:
+                triggers += self._wallet_triggers(event, slot, now, lines)
             if event.mint in self._markets:
                 lines += self._on_trade(event, slot, now)
+            if event.user in self._trackers:
+                self._copy_sell(event)
         for order in triggers:
             self._pending.append(order)
             lines += self._advance_entry(order, now)
@@ -264,19 +278,17 @@ class PaperDesk:
             for wallet in trackers
         ]
 
-    def _copy_triggers(
+    def _wallet_triggers(
         self, event: PumpTradeEventProof, slot: int, now: int, lines: list[str]
     ) -> list[PendingOrder]:
+        trigger = WALLET_TRIGGERS.get(self._trackers[event.user].config.tracking_mode)
+        if trigger is None or trigger[0] != event.is_buy:
+            return []
         orders = [
             PendingOrder(
-                wallet, event.mint, BUY, "copy_buy", event_ms=now, is_copytrade=True
+                event.user, event.mint, BUY, trigger[1], event_ms=now, is_copytrade=True
             )
-            for wallet, tracker in self._trackers.items()
-            if wallet == event.user
-            and tracker.config.tracking_mode is TrackingMode.TRACK_BUYS
         ]
-        if not orders:
-            return []
         skip = _unsupported_reason(
             event.quote_mint,
             event.virtual_sol_reserves_base_units
@@ -550,13 +562,54 @@ class PaperDesk:
             tracker, mint, outcome.next_state, tokens, ",".join(outcome.reason_codes)
         )
 
-    def _queue_sell(
+    def _copy_sell(self, event: PumpTradeEventProof) -> None:
+        """Mirror a tracked wallet's sell of a coin its tracker holds."""
+
+        key = (event.user, event.mint)
+        before = self._wallet_tokens.get(key, 0)
+        change = (
+            event.token_amount_base_units
+            if event.is_buy
+            else -min(before, event.token_amount_base_units)
+        )
+        self._wallet_tokens[key] = before + change
+        sell = self._trackers[event.user].config.rules.sell
+        if (
+            event.is_buy
+            or key not in self._positions
+            or sell.copy_sells is (CopySellMode.OFF)
+        ):
+            return
+        state = self._positions[key]
+        held = state.current_position_base_units
+        # Mirror the share sold when their balance is known; otherwise sell all.
+        tokens = (
+            held * event.token_amount_base_units // before
+            if sell.copy_sells is CopySellMode.PERCENT
+            and before > event.token_amount_base_units
+            else held
+        )
+        if tokens > 0:
+            self._queue_sell(
+                event.user,
+                event.mint,
+                dataclasses.replace(
+                    state, current_position_base_units=TokenBaseUnits(held - tokens)
+                ),
+                tokens,
+                "copy_sell",
+                delay_slots=-(-sell.copy_sell_delay_ms // SLOT_MS),
+            )
+
+    def _queue_sell(  # noqa: PLR0913
         self,
         tracker: str,
         mint: str,
         next_state: PaperPositionState,
         tokens: int,
         reason: str,
+        *,
+        delay_slots: int = 0,
     ) -> list[str]:
         closes = next_state.current_position_base_units == 0
         if closes:
@@ -572,7 +625,7 @@ class PaperDesk:
                 SELL,
                 reason,
                 event_ms=self._clock_ms(),
-                fill_slot=self._slot + self._landing_slots,
+                fill_slot=self._slot + self._landing_slots + delay_slots,
                 tokens=tokens,
                 closes_position=closes,
             )

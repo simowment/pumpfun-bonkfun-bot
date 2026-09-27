@@ -407,6 +407,8 @@ def sniper_to_mapping(cfg: CoreSniperConfig) -> dict[str, Any]:
                         for level in cfg.rules.sell.auto_sell_big_buy_levels
                     ]
                 },
+                "copy_sells": cfg.rules.sell.copy_sells.value,
+                "copy_sell_delay_ms": cfg.rules.sell.copy_sell_delay_ms,
             },
         },
     }

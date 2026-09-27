@@ -28,6 +28,7 @@ from rugbot.intelligence.wallet_behavior import (
 MAX_DIP_LEVELS = 3
 MAX_SELL_LEVELS = 5
 MAX_BIG_BUY_LEVELS = 3
+MAX_COPY_SELL_DELAY_MS = 300_000
 
 
 class EntryRuleAction(StrEnum):
@@ -79,6 +80,14 @@ class TrailingStopLevel:
     drawdown_ppm: int
 
 
+class CopySellMode(StrEnum):
+    """How a position follows its tracked wallet selling the same coin."""
+
+    OFF = "off"
+    ALL = "all"
+    PERCENT = "percent"
+
+
 @dataclass(frozen=True, slots=True)
 class SellRules:
     """Multi-level exit rules for one position."""
@@ -88,6 +97,8 @@ class SellRules:
     trailing_levels: tuple[TrailingStopLevel, ...] = ()
     no_activity_timeout_ms: int | None = None
     auto_sell_big_buy_levels: tuple[BigBuySellLevel, ...] = ()
+    copy_sells: CopySellMode = CopySellMode.OFF
+    copy_sell_delay_ms: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -655,6 +666,15 @@ def _validate_sell_rules(sell: SellRules, as_of_slot: int) -> AbstainResult | No
         return _abstain(
             AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
             "no-activity timeout is invalid",
+            as_of_slot,
+        )
+    if not isinstance(sell.copy_sells, CopySellMode) or not (
+        type(sell.copy_sell_delay_ms) is int
+        and 0 <= sell.copy_sell_delay_ms <= MAX_COPY_SELL_DELAY_MS
+    ):
+        return _abstain(
+            AbstainReason.UNSUPPORTED_PROTOCOL_STATE,
+            "copy-sell settings are invalid",
             as_of_slot,
         )
     return None
@@ -1250,6 +1270,7 @@ def _abstain(reason: AbstainReason, message: str, as_of_slot: int) -> AbstainRes
 __all__ = [
     "BigBuySellLevel",
     "BuyTheDipLevel",
+    "CopySellMode",
     "EntryRuleAction",
     "EntryRuleDecision",
     "EntryRuleInput",

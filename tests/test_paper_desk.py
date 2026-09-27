@@ -166,3 +166,62 @@ def test_copy_tracker_exits_on_no_activity(state: Path) -> None:
     assert fills[-1].position_closed
     assert "no_activity" in fills[-1].reason
     desk.close()
+
+
+def _first_buy_then_sell(launch: dict, min_gap_slots: int) -> tuple[str, int, int]:
+    """A wallet that bought, then sold at least ``min_gap_slots`` later."""
+    first_buy: dict[str, int] = {}
+    for slot, event in _trades(launch):
+        if event.is_buy:
+            first_buy.setdefault(event.user, slot)
+        elif event.user in first_buy and slot - first_buy[event.user] >= min_gap_slots:
+            return event.user, first_buy[event.user], slot
+    pytest.fail("fixture has no buy-then-sell wallet")
+
+
+def test_copy_sells_mirror_the_tracked_wallet(state: Path) -> None:
+    launch = _launch()
+    copied, _, sell_slot = _first_buy_then_sell(launch, min_gap_slots=10)
+    assert (
+        tracker_cli(
+            [
+                "--state-dir", str(state), "add", copied, "--mode", "track_buys",
+                "--size", "0.05", "--tp", "none", "--sl", "none", "--trail", "none",
+                "--copy-sells", "all", "--max-age", "0", "--max-mc", "1000",
+            ]
+        )
+        == 0
+    )  # fmt: skip
+    clock = [0]
+    desk, journal = _desk(state, clock)
+    _replay(desk, launch, clock, launch["notifications"])
+    buy, sell, *_ = journal.fills(copied)
+    assert buy.side == "buy"
+    assert sell.side == "sell"
+    assert sell.reason == "copy_sell"
+    assert sell.slot >= sell_slot
+    assert sell.tokens == buy.tokens
+    assert sell.position_closed
+    desk.close()
+
+
+def test_buy_on_dev_sell_enters_after_the_wallet_sells(state: Path) -> None:
+    launch = _launch()
+    seller, _, sell_slot = _first_buy_then_sell(launch, min_gap_slots=10)
+    assert (
+        tracker_cli(
+            [
+                "--state-dir", str(state), "add", seller, "--mode", "buy_on_dev_sell",
+                "--size", "0.05", "--max-age", "0", "--max-mc", "1000",
+            ]
+        )
+        == 0
+    )  # fmt: skip
+    clock = [0]
+    desk, journal = _desk(state, clock)
+    _replay(desk, launch, clock, launch["notifications"])
+    buy = journal.fills(seller)[0]
+    assert buy.side == "buy"
+    assert buy.reason == "dev_sell"
+    assert buy.slot >= sell_slot
+    desk.close()
