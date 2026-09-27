@@ -11,10 +11,9 @@ from rugbot.runtime.config import SniperConfigError, resolve_state_dir
 from rugbot.storage.config_store import (
     load_scalper_config_db,
     load_sniper_config_db,
-    load_wallet_portfolio_db,
-    portfolio_to_mapping,
     scalper_to_mapping,
     set_config_db,
+    set_dotted,
     sniper_to_mapping,
 )
 from rugbot.utils.logger import get_logger
@@ -39,12 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="cmd", required=True)
     show = sub.add_parser("show")
-    show.add_argument(
-        "--type", choices=["sniper", "portfolio", "scalper"], default="sniper"
-    )
+    show.add_argument("--type", choices=["sniper", "scalper"], default="sniper")
     show.add_argument("--json", action="store_true")
     s = sub.add_parser("set")
-    s.add_argument("--type", choices=["sniper", "portfolio", "scalper"], required=True)
+    s.add_argument("--type", choices=["sniper", "scalper"], required=True)
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument(
         "--key", help="dotted key e.g. execution.quote_size_lamports or wallets"
@@ -69,9 +66,6 @@ def main(argv: list[str] | None = None) -> int:
             if args.type == "sniper":
                 cfg = load_sniper_config_db(state_dir)
                 mapping = sniper_to_mapping(cfg)
-            elif args.type == "portfolio":
-                cfg = load_wallet_portfolio_db(state_dir)
-                mapping = portfolio_to_mapping(cfg)
             else:
                 cfg = load_scalper_config_db(state_dir)
                 mapping = scalper_to_mapping(cfg)
@@ -101,27 +95,13 @@ def main(argv: list[str] | None = None) -> int:
                     print("--value required with --key", file=sys.stderr)
                     return 1
                 # load existing mapping
-                if args.type == "sniper":
-                    cur = sniper_to_mapping(load_sniper_config_db(state_dir))
-                elif args.type == "portfolio":
-                    cur = portfolio_to_mapping(load_wallet_portfolio_db(state_dir))
-                else:
-                    cur = scalper_to_mapping(load_scalper_config_db(state_dir))
-                # apply dotted key
-                keys = args.key.split(".")
+                cur = (
+                    sniper_to_mapping(load_sniper_config_db(state_dir))
+                    if args.type == "sniper"
+                    else scalper_to_mapping(load_scalper_config_db(state_dir))
+                )
                 val = _parse_value(args.value)
-                target = cur
-                for k in keys[:-1]:
-                    if k not in target or not isinstance(target[k], dict):
-                        # fail-closed unknown key path
-                        print(f"unknown key path: {args.key}", file=sys.stderr)
-                        return 1
-                    target = target[k]
-                leaf = keys[-1]
-                if leaf not in target:
-                    print(f"unknown key: {args.key}", file=sys.stderr)
-                    return 1
-                target[leaf] = val
+                set_dotted(cur, args.key, val)
                 set_config_db(state_dir, args.type, cur)
                 print(f"{args.type}.{args.key} = {val!r}")
                 return 0

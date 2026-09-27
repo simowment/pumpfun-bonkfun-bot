@@ -26,11 +26,11 @@ from rugbot.decision.playbook_rules import (
     SellLevel,
     SellRules,
     TrailingStopLevel,
+    validate_rules,
 )
 
 PUBKEY_LENGTH = 32
 MAX_SLIPPAGE_BPS = 10_000
-MAX_PORTFOLIO_WALLETS = 100
 MAX_STRATEGY_HISTORY_SAMPLES = 100
 MAX_STRATEGY_BUYS_PER_HOUR = 10_000
 MAX_STRATEGY_ENTRY_INDEX = 20
@@ -167,13 +167,6 @@ class CoreSniperConfig:
     rules: PlaybookRules = field(default_factory=PlaybookRules)
     volume_sizing: VolumeSizingPolicy = field(default_factory=VolumeSizingPolicy)
     strategy: StrategyFilterSettings = field(default_factory=StrategyFilterSettings)
-
-
-@dataclass(frozen=True, slots=True)
-class WalletPortfolio:
-    """Strict, ordered set of creator wallets watched by the runtime."""
-
-    wallets: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -392,36 +385,6 @@ def resolve_dotenv(*, include_signing: bool = False) -> None:
                 os.environ[key] = value
 
 
-def parse_wallet_portfolio_dict(
-    document: object, *, source: str = "dict"
-) -> WalletPortfolio:
-    """Validate portfolio mapping (fail-closed)."""
-
-    if type(document) is not dict:
-        raise SniperConfigError("wallet portfolio must be one mapping")
-    if "schema" in document or "version" in document:  # type: ignore[operator]
-        raise SniperConfigError("schema and version fields are forbidden")
-    _require_exact_keys(document, {"wallets"}, "wallet portfolio")  # type: ignore[arg-type]
-    wallets = document["wallets"]  # type: ignore[index]
-    if type(wallets) is not list or not wallets:
-        raise SniperConfigError("wallet portfolio.wallets must be a non-empty list")
-    if len(wallets) > MAX_PORTFOLIO_WALLETS:
-        raise SniperConfigError(
-            "wallet portfolio.wallets must contain at most "
-            f"{MAX_PORTFOLIO_WALLETS} wallets"
-        )
-    parsed: list[str] = []
-    seen: set[str] = set()
-    for index, wallet in enumerate(wallets):
-        field_name = f"wallet portfolio.wallets[{index}]"
-        _validate_pubkey(wallet, field_name)
-        if wallet in seen:
-            raise SniperConfigError(f"duplicate wallet in portfolio: {wallet}")
-        seen.add(wallet)
-        parsed.append(wallet)
-    return WalletPortfolio(wallets=tuple(parsed))
-
-
 def _reject_duplicate_keys(mapping: object, *, source: str = "dict") -> None:  # noqa: ARG001
     """Placeholder for duplicate-key logic when validating plain dicts (already rejected by YAML loader)."""
     return
@@ -503,12 +466,6 @@ def default_sniper_config() -> CoreSniperConfig:
         },
         source="default",
     )
-
-
-def default_wallet_portfolio() -> WalletPortfolio:
-    """Empty portfolio default (no wallets)."""
-
-    return WalletPortfolio(wallets=())
 
 
 def parse_sniper_config_dict(
@@ -943,7 +900,7 @@ def _parse_rules(raw: object) -> PlaybookRules:
         "rules.max_consecutive_losses",
         maximum=20,
     )
-    return PlaybookRules(
+    rules = PlaybookRules(
         snipe_delay_ms=snipe_delay_ms,
         min_market_cap_quote_base_units=min_market_cap,
         max_market_cap_quote_base_units=max_market_cap,
@@ -954,6 +911,10 @@ def _parse_rules(raw: object) -> PlaybookRules:
         sell=_parse_sell_rules(mapping.get("sell")),
         max_consecutive_losses=max_losses,
     )
+    invalid = validate_rules(rules, 0)
+    if invalid is not None:
+        raise SniperConfigError(f"rules: {invalid.message}")
+    return rules
 
 
 def _parse_dip_levels(raw: object) -> tuple[BuyTheDipLevel, ...]:

@@ -88,6 +88,26 @@ uv sync
 
 The CLI entry points `cabal` and `cabal_sniper` are registered in `pyproject.toml` (with `rug_cabal` preserved as an alias).
 
+### Trackers (`rug_tracker`)
+A tracker is one wallet plus its full config: tracking mode, paper/observe
+execution, buy size, entry filters and multi-level exits. Trackers live in the
+state database (`.state/watch/rugbot.db`); new ones start from the `rug_config`
+sniper template, or from a saved preset.
+
+```bash
+# Snipe this dev's next creations with 0.1 SOL: sell 50% at +100%, the rest at +300%, stop at -30%
+uv run rug_tracker add <WALLET> --size 0.1 --tp 100:50,300:100 --sl 30:100 --trail none --group burners
+# Copy a wallet's buys with a 20% trailing stop (30% once market cap passes 100 SOL)
+uv run rug_tracker add <WALLET> --mode track_buys --size 0.05 --trail 20,30@100 --max-age 5
+uv run rug_tracker list [--group burners]
+uv run rug_tracker set <WALLET> --dip 40:0.05 --no-activity 30 --set rules.follow_cooldown_seconds=10
+uv run rug_tracker preset save burner --from <WALLET>   # then: add <WALLET> --preset burner
+uv run rug_tracker disable|enable|show|rm <WALLET>
+```
+
+TP/SL sell percentages are cumulative, and an active trailing stop overrides
+TP (the list marks it). Invalid rules are rejected before they are saved.
+
 ### Step 1: Ingest & Refresh Cabal Clusters
 Reverse-engineers recent Pump.fun winners, extracts earliest unique buyers, clusters them by funder origin, and persists to `.state/cabal/cabal_clusters.sqlite3`:
 ```powershell

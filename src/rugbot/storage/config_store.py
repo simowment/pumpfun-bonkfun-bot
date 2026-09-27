@@ -1,43 +1,74 @@
 """DB-backed config store (app_config table) for Rugbot."""
 
+# ruff: noqa: TRY003
+
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from rugbot.domain.scalper_strategy import ScalperConfig
 from rugbot.runtime.config import (
     CoreSniperConfig,
     SniperConfigError,
-    WalletPortfolio,
+    TargetKind,
     default_sniper_config,
-    default_wallet_portfolio,
     parse_sniper_config_dict,
-    parse_wallet_portfolio_dict,
     resolve_tracker_db_path,
 )
 from rugbot.storage.database import DatabaseManager
 from rugbot.utils.logger import get_logger
 
 if TYPE_CHECKING:
+    import sqlite3
     from pathlib import Path
 
 logger = get_logger(__name__)
 
-CONFIG_TYPES = {"sniper", "portfolio", "scalper"}
+CONFIG_TYPES = {"sniper", "scalper"}
+MAX_TRACKERS = 100
 
 
-def _ensure_app_config_table(db: DatabaseManager) -> None:
-    db.connection.execute(
+@dataclass(frozen=True, slots=True)
+class Tracker:
+    """One tracked wallet: its full sniper config plus operator bookkeeping."""
+
+    wallet: str
+    group: str | None
+    enabled: bool
+    config: CoreSniperConfig
+
+
+def _ensure_tables(db: DatabaseManager) -> None:
+    for statement in (
         """
         CREATE TABLE IF NOT EXISTS app_config (
             config_type TEXT PRIMARY KEY,
             payload_json TEXT NOT NULL,
             updated_at INTEGER NOT NULL
         )
+        """,
         """
-    )
+        CREATE TABLE IF NOT EXISTS trackers (
+            wallet TEXT PRIMARY KEY,
+            group_name TEXT,
+            enabled INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS tracker_presets (
+            name TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+        """,
+    ):
+        db.connection.execute(statement)
     db.connection.execute("PRAGMA journal_mode=WAL")
 
 
@@ -51,7 +82,7 @@ class ConfigStore:
             self._db = db
         else:
             self._db = DatabaseManager(resolve_tracker_db_path(state_dir))
-        _ensure_app_config_table(self._db)
+        _ensure_tables(self._db)
 
     def get_config(self, config_type: str) -> dict[str, Any] | None:
         if config_type not in CONFIG_TYPES:
@@ -83,8 +114,6 @@ class ConfigStore:
         # validate via dict parsers
         if config_type == "sniper":
             parse_sniper_config_dict(mapping, source="db")
-        elif config_type == "portfolio":
-            parse_wallet_portfolio_dict(mapping, source="db")
         elif config_type == "scalper":
             _validate_scalper_dict(mapping)
         payload_json = json.dumps(mapping, sort_keys=True)
@@ -108,6 +137,142 @@ class ConfigStore:
             self._db.connection.commit()
         except Exception as exc:
             raise SniperConfigError(f"config DB delete failed: {exc}") from exc
+
+    def list_trackers(self, group: str | None = None) -> tuple[Tracker, ...]:
+        """Return every tracker, optionally only one group, ordered by wallet."""
+
+        rows = self._db.connection.execute(
+            "SELECT wallet, group_name, enabled, payload_json FROM trackers "
+            "WHERE ? IS NULL OR group_name = ? ORDER BY wallet",
+            (group, group),
+        ).fetchall()
+        return tuple(_tracker_from_row(row) for row in rows)
+
+    def get_tracker(self, wallet: str) -> Tracker | None:
+        """Return one tracker, or ``None`` when the wallet is not tracked."""
+
+        row = self._db.connection.execute(
+            "SELECT wallet, group_name, enabled, payload_json FROM trackers "
+            "WHERE wallet = ?",
+            (wallet,),
+        ).fetchone()
+        return None if row is None else _tracker_from_row(row)
+
+    def save_tracker(
+        self,
+        mapping: dict[str, Any],
+        *,
+        group: str | None,
+        enabled: bool,
+    ) -> Tracker:
+        """Validate one sniper config mapping and upsert it as a tracker.
+
+        The tracked wallet is the config's ``target.id``.
+        """
+
+        config = parse_sniper_config_dict(mapping, source="tracker")
+        if config.target.kind is not TargetKind.WALLET:
+            raise SniperConfigError("a tracker must target a wallet")
+        wallet = config.target.id
+        if self.get_tracker(wallet) is None and len(self.list_trackers()) >= (
+            MAX_TRACKERS
+        ):
+            raise SniperConfigError(f"at most {MAX_TRACKERS} trackers are allowed")
+        self._db.connection.execute(
+            "INSERT INTO trackers(wallet,group_name,enabled,payload_json,updated_at) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(wallet) DO UPDATE SET "
+            "group_name=excluded.group_name, enabled=excluded.enabled, "
+            "payload_json=excluded.payload_json, updated_at=excluded.updated_at",
+            (
+                wallet,
+                group,
+                int(enabled),
+                json.dumps(sniper_to_mapping(config), sort_keys=True),
+                int(time.time()),
+            ),
+        )
+        self._db.connection.commit()
+        return Tracker(wallet=wallet, group=group, enabled=enabled, config=config)
+
+    def delete_tracker(self, wallet: str) -> bool:
+        """Remove one tracker; return whether it existed."""
+
+        cursor = self._db.connection.execute(
+            "DELETE FROM trackers WHERE wallet = ?", (wallet,)
+        )
+        self._db.connection.commit()
+        return cursor.rowcount > 0
+
+    def list_presets(self) -> tuple[str, ...]:
+        """Return saved preset names in order."""
+
+        rows = self._db.connection.execute(
+            "SELECT name FROM tracker_presets ORDER BY name"
+        ).fetchall()
+        return tuple(row["name"] for row in rows)
+
+    def get_preset(self, name: str) -> dict[str, Any] | None:
+        """Return one preset's sniper config mapping, or ``None``."""
+
+        row = self._db.connection.execute(
+            "SELECT payload_json FROM tracker_presets WHERE name = ?", (name,)
+        ).fetchone()
+        return None if row is None else json.loads(row["payload_json"])
+
+    def save_preset(self, name: str, config: CoreSniperConfig) -> None:
+        """Save one validated sniper config as a reusable preset."""
+
+        self._db.connection.execute(
+            "INSERT INTO tracker_presets(name,payload_json,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(name) DO UPDATE SET payload_json=excluded.payload_json, "
+            "updated_at=excluded.updated_at",
+            (
+                name,
+                json.dumps(sniper_to_mapping(config), sort_keys=True),
+                int(time.time()),
+            ),
+        )
+        self._db.connection.commit()
+
+    def delete_preset(self, name: str) -> bool:
+        """Remove one preset; return whether it existed."""
+
+        cursor = self._db.connection.execute(
+            "DELETE FROM tracker_presets WHERE name = ?", (name,)
+        )
+        self._db.connection.commit()
+        return cursor.rowcount > 0
+
+
+def _tracker_from_row(row: sqlite3.Row) -> Tracker:
+    try:
+        mapping = json.loads(row["payload_json"])
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise SniperConfigError(f"tracker payload corrupt for {row['wallet']}") from exc
+    return Tracker(
+        wallet=row["wallet"],
+        group=row["group_name"],
+        enabled=bool(row["enabled"]),
+        config=parse_sniper_config_dict(mapping, source="tracker"),
+    )
+
+
+def set_dotted(mapping: dict[str, Any], key: str, value: object) -> None:
+    """Set one existing dotted key (``rules.sell.no_activity_seconds``) in place.
+
+    Unknown paths raise instead of creating keys, so typos never pass silently.
+    """
+
+    *parents, leaf = key.split(".")
+    target = mapping
+    for part in parents:
+        child = target.get(part)
+        if not isinstance(child, dict):
+            raise SniperConfigError(f"unknown key path: {key}")
+        target = child
+    if leaf not in target:
+        raise SniperConfigError(f"unknown key: {key}")
+    target[leaf] = value
 
 
 def _validate_scalper_dict(mapping: dict[str, Any]) -> ScalperConfig:
@@ -162,13 +327,6 @@ def load_sniper_config_db(state_dir: Path | str | None = None) -> CoreSniperConf
     return parse_sniper_config_dict(mapping, source="db")
 
 
-def load_wallet_portfolio_db(state_dir: Path | str | None = None) -> WalletPortfolio:
-    mapping = get_config(state_dir, "portfolio")
-    if mapping is None:
-        return default_wallet_portfolio()
-    return parse_wallet_portfolio_dict(mapping, source="db")
-
-
 def load_scalper_config_db(state_dir: Path | str | None = None) -> ScalperConfig:
     mapping = get_config(state_dir, "scalper")
     if mapping is None:
@@ -186,8 +344,6 @@ def set_config_db(
 
 
 def sniper_to_mapping(cfg: CoreSniperConfig) -> dict[str, Any]:
-    import dataclasses
-
     # manual mapping mirrors yaml structure
     return {
         "target": {"kind": cfg.target.kind.value, "id": cfg.target.id},
@@ -254,10 +410,6 @@ def sniper_to_mapping(cfg: CoreSniperConfig) -> dict[str, Any]:
             },
         },
     }
-
-
-def portfolio_to_mapping(pf: WalletPortfolio) -> dict[str, Any]:
-    return {"wallets": list(pf.wallets)}
 
 
 def scalper_to_mapping(cfg: ScalperConfig) -> dict[str, Any]:

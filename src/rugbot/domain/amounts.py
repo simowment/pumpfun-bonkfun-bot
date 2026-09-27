@@ -11,3 +11,4 @@ MicroLamportsPerComputeUnit = NewType("MicroLamportsPerComputeUnit", int)
 
 PROBABILITY_PPM_DENOMINATOR: Final[int] = 1_000_000
 PPM_SCALE: Final[int] = 1_000_000
+LAMPORTS_PER_SOL: Final[int] = 1_000_000_000

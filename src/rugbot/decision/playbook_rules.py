@@ -460,7 +460,7 @@ def _validate_entry_inputs(
             "entry amounts are malformed",
             evidence.as_of_slot,
         )
-    return _validate_rules(rules, evidence.as_of_slot)
+    return validate_rules(rules, evidence.as_of_slot)
 
 
 def _validate_exit_inputs(
@@ -541,10 +541,11 @@ def _validate_exit_inputs(
             "exit fraction is invalid",
             evidence.as_of_slot,
         )
-    return _validate_rules(rules, evidence.as_of_slot)
+    return validate_rules(rules, evidence.as_of_slot)
 
 
-def _validate_rules(rules: PlaybookRules, as_of_slot: int) -> AbstainResult | None:
+def validate_rules(rules: PlaybookRules, as_of_slot: int) -> AbstainResult | None:
+    """Return why ``rules`` cannot be evaluated, or ``None`` when they are valid."""
     integer_fields = (
         rules.snipe_delay_ms,
         rules.copytrade_cooldown_ms,
@@ -1260,4 +1261,5 @@ __all__ = [
     "advance_root_loss_counter",
     "evaluate_entry_rules",
     "evaluate_exit_rules",
+    "validate_rules",
 ]
