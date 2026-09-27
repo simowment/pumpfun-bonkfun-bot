@@ -6,9 +6,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import NewType
 
-from rugbot.domain.amounts import Lamports, Slot
-
-LAMPORTS_PER_SOL = 1_000_000_000
+from rugbot.domain.amounts import LAMPORTS_PER_SOL, Lamports, Slot
 
 WalletAddress = NewType("WalletAddress", str)
 MintAddress = NewType("MintAddress", str)

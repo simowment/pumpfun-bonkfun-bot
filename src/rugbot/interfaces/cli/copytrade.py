@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit, urlunsplit
 
 from rugbot.analysis.wallet_registry import WalletRegistry
+from rugbot.domain.amounts import LAMPORTS_PER_SOL
 from rugbot.domain.decisions import AbstainResult
 from rugbot.ingest.pump.pump_trade_observation import decode_pump_trade_observation
 from rugbot.runtime.config import load_provider_settings, resolve_dotenv
@@ -40,7 +41,6 @@ OBSERVE_ONLY_MARKER = "observe-only: no orders, no execution ports"
 DEFAULT_STORE_SUBPATH = Path(".state/copytrade/registry.sqlite3")
 DEFAULT_SECONDS = 60
 MAX_SECONDS = 300
-LAMPORTS_PER_SOL = 1_000_000_000
 
 
 @dataclass(frozen=True, slots=True)

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from rugbot.domain.amounts import LAMPORTS_PER_SOL
 from rugbot.domain.decisions import AbstainResult
 from rugbot.integrations.pumpfun_creator_index import fetch_pumpfun_created_tokens
 from rugbot.integrations.rpc_cache import RpcResponseCache
@@ -51,7 +52,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-LAMPORTS_PER_SOL = 1_000_000_000
 
 # Staged funding window shared with the cluster model Launch role (0.2-5 SOL).
 # The skill playbook's narrower 0.2-3.0 SOL band is a strict subset of this

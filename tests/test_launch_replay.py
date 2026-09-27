@@ -10,12 +10,16 @@ from rugbot.backtest.launch_replay import (
     LaunchReplay,
     LaunchReplayError,
     ReplayCosts,
-    _virtual_reserves,
+    _price_multiple,
     market_cap_sol,
     summarize_rules,
     trades_from_swap_api,
 )
-from rugbot.domain.pump_curve import INITIAL_VIRTUAL_BASE, INITIAL_VIRTUAL_QUOTE
+from rugbot.domain.pump_curve import (
+    INITIAL_VIRTUAL_BASE,
+    INITIAL_VIRTUAL_QUOTE,
+    reserves_at_multiple,
+)
 
 DEV = "dev"
 BUNDLER = "bundler"
@@ -60,7 +64,7 @@ def _replay(**costs: float) -> LaunchReplay:
 
 
 def test_reserves_round_trip_launch_state() -> None:
-    quote, base = _virtual_reserves(LAUNCH_PRICE)
+    quote, base = reserves_at_multiple(_price_multiple(LAUNCH_PRICE))
     assert abs(quote - INITIAL_VIRTUAL_QUOTE) / INITIAL_VIRTUAL_QUOTE < 1e-6
     assert abs(base - INITIAL_VIRTUAL_BASE) / INITIAL_VIRTUAL_BASE < 1e-6
 

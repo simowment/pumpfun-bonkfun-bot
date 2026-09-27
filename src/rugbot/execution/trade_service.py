@@ -20,7 +20,7 @@ from solders.message import Message
 from solders.pubkey import Pubkey
 from solders.transaction import Transaction
 
-from rugbot.domain.amounts import Slot
+from rugbot.domain.amounts import LAMPORTS_PER_SOL, Slot
 from rugbot.execution.auto_router import AutoRouter, RouteVenue
 from rugbot.execution.live import LivePumpExecutionPort
 from rugbot.execution.ports import (
@@ -54,7 +54,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-LAMPORTS_PER_SOL = 1_000_000_000
 MICROLAMPORTS_PER_SOL = 1_000_000_000_000
 PPM_DENOMINATOR = 1_000_000
 DEFAULT_BUY_SLIPPAGE_PCT = 5.0
@@ -622,29 +621,17 @@ class TradingService:
 
             try:
                 receipt: ExecutionReceipt = await adapter.submit(intent)
-                if not receipt.accepted:
-                    if not is_live:
-                        # Fallback to canonical initial Pump.fun CPMM curve for mock/test/completed tokens in paper mode
-                        tokens = int(
-                            (1_073_000_000_000_000 * spec.quote_lamports)
-                            / (30_000_000_000 + spec.quote_lamports)
-                        )
-                    else:
-                        return TradeResult(
-                            ok=False,
-                            side=TradeSide.BUY,
-                            mint=spec.mint,
-                            mode=spec.mode,
-                            sol_amount=spec.amount_sol,
-                            token_amount=0,
-                            error=receipt.message
-                            or "Order rejected by execution engine",
-                        )
-                else:
-                    tokens = receipt.simulated_output_base_units or int(
-                        (1_073_000_000_000_000 * spec.quote_lamports)
-                        / (30_000_000_000 + spec.quote_lamports)
+                if not receipt.accepted or not receipt.simulated_output_base_units:
+                    return TradeResult(
+                        ok=False,
+                        side=TradeSide.BUY,
+                        mint=spec.mint,
+                        mode=spec.mode,
+                        sol_amount=spec.amount_sol,
+                        token_amount=0,
+                        error=receipt.message or "Order rejected by execution engine",
                     )
+                tokens = receipt.simulated_output_base_units
                 sol = spec.amount_sol
                 ui_tokens = tokens / 1_000_000.0 if tokens > 0 else 0.0
                 price = (sol / ui_tokens) if ui_tokens > 0 else 0.0
@@ -783,32 +770,17 @@ class TradingService:
 
             try:
                 receipt: ExecutionReceipt = await adapter.submit(intent)
-                if not receipt.accepted:
-                    if not is_live:
-                        # Fallback to canonical initial Pump.fun CPMM curve for mock/test/completed tokens in paper mode
-                        sol = (
-                            float(
-                                (30_000_000_000 * sell_tokens)
-                                / (1_073_000_000_000_000 + sell_tokens)
-                            )
-                            / LAMPORTS_PER_SOL
-                        )
-                    else:
-                        return TradeResult(
-                            ok=False,
-                            side=TradeSide.SELL,
-                            mint=spec.mint,
-                            mode=spec.mode,
-                            sol_amount=0.0,
-                            token_amount=sell_tokens,
-                            error=receipt.message
-                            or "Sell rejected by execution engine",
-                        )
-                else:
-                    sol = (
-                        float(receipt.simulated_output_base_units or 0)
-                        / LAMPORTS_PER_SOL
+                if not receipt.accepted or not receipt.simulated_output_base_units:
+                    return TradeResult(
+                        ok=False,
+                        side=TradeSide.SELL,
+                        mint=spec.mint,
+                        mode=spec.mode,
+                        sol_amount=0.0,
+                        token_amount=sell_tokens,
+                        error=receipt.message or "Sell rejected by execution engine",
                     )
+                sol = receipt.simulated_output_base_units / LAMPORTS_PER_SOL
                 tokens = sell_tokens
                 ui_tokens = tokens / 1_000_000.0 if tokens > 0 else 0.0
                 price = (sol / ui_tokens) if ui_tokens > 0 else 0.0
@@ -927,9 +899,14 @@ class TradingService:
                     / (quote_reserves + spec.quote_lamports)
                 )
             else:
-                expected_tokens = int(
-                    (206_900_000_000_000 * spec.quote_lamports)
-                    / (30_000_000_000 + spec.quote_lamports)
+                return TradeResult(
+                    ok=False,
+                    side=TradeSide.BUY,
+                    mint=spec.mint,
+                    mode=spec.mode,
+                    sol_amount=spec.amount_sol,
+                    token_amount=0,
+                    error="PumpSwap pool reserves unavailable",
                 )
 
             min_tokens_out = max(
@@ -1121,9 +1098,14 @@ class TradingService:
                         (quote_reserves * sell_tokens) / (base_reserves + sell_tokens)
                     )
                 else:
-                    expected_lamports = int(
-                        (30_000_000_000 * sell_tokens)
-                        / (206_900_000_000_000 + sell_tokens)
+                    return TradeResult(
+                        ok=False,
+                        side=TradeSide.SELL,
+                        mint=spec.mint,
+                        mode=spec.mode,
+                        sol_amount=0.0,
+                        token_amount=sell_tokens,
+                        error="PumpSwap pool reserves unavailable",
                     )
                 min_sol_out = max(
                     0, int(expected_lamports * (1.0 - spec.slippage_pct / 100.0))
@@ -1201,9 +1183,14 @@ class TradingService:
                         (quote_reserves * sell_tokens) / (base_reserves + sell_tokens)
                     )
                 else:
-                    expected_lamports = int(
-                        (30_000_000_000 * sell_tokens)
-                        / (206_900_000_000_000 + sell_tokens)
+                    return TradeResult(
+                        ok=False,
+                        side=TradeSide.SELL,
+                        mint=spec.mint,
+                        mode=spec.mode,
+                        sol_amount=0.0,
+                        token_amount=sell_tokens,
+                        error="PumpSwap pool reserves unavailable",
                     )
                 sol = expected_lamports / LAMPORTS_PER_SOL
                 fee_sol = (
@@ -1319,10 +1306,7 @@ class TradingService:
                             / (base_reserves + pos.token_amount)
                         )
                     else:
-                        expected_lamports = int(
-                            (30_000_000_000 * pos.token_amount)
-                            / (206_900_000_000_000 + pos.token_amount)
-                        )
+                        continue
                     current_sol = float(expected_lamports) / LAMPORTS_PER_SOL
                 else:
                     sim_intent = ExecutionIntent(

@@ -25,10 +25,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from rugbot.backtest.trajectory.finalized_trade_builder import (
-    decode_pump_trade_event,
-    pump_trade_payloads,
-)
 from rugbot.decision.playbook_rules import (
     CopySellMode,
     EntryRuleAction,
@@ -54,6 +50,10 @@ from rugbot.ingest.pump.create_event_decoder import (
     SOL_PUBKEY,
     PumpCreateEvent,
     decode_pump_create_event_logs,
+)
+from rugbot.ingest.pump.trade_event_decoder import (
+    decode_pump_trade_event,
+    pump_trade_payloads,
 )
 from rugbot.runtime.config import ExecutionMode, TrackingMode
 from rugbot.storage.paper_journal import MarketSnapshot, PaperFill

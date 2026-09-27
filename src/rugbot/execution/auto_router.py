@@ -4,7 +4,7 @@ Auto-detects whether a token mint is still trading on the canonical bonding curv
 or has completed and graduated to the PumpSwap AMM pool.
 """
 
-# ruff: noqa: C901, BLE001, TRY300
+# ruff: noqa: BLE001
 
 from __future__ import annotations
 
@@ -118,59 +118,37 @@ class AutoRouter:
             self._client = SolanaClient(rpc_url)
             self._owns_client = True
 
+    async def _account(self, address: Pubkey) -> dict[str, Any] | None:
+        """``getAccountInfo`` value (``owner``, base64 ``data``), or None if absent."""
+        response = await self._client.post_rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getAccountInfo",
+                "params": [
+                    str(address),
+                    {"encoding": "base64", "commitment": "confirmed"},
+                ],
+            }
+        )
+        result = response.get("result") if isinstance(response, dict) else None
+        value = result.get("value") if isinstance(result, dict) else None
+        return value if isinstance(value, dict) else None
+
+    @staticmethod
+    def _account_bytes(value: dict[str, Any] | None) -> bytes | None:
+        data = value.get("data") if value else None
+        return base64.b64decode(data[0]) if isinstance(data, list) and data else None
+
     async def detect_venue(self, mint: str | Pubkey) -> RouteVenue:
-        """Query on-chain account state to auto-detect the active trading venue.
-
-        Checks the bonding curve account first. If completed, returns PUMPSWAP_AMM.
-        If bonding curve account is missing or closed, checks the PumpSwap AMM pool PDA.
-        """
+        """Detect the active venue: PumpSwap once the curve completes or is gone."""
         mint_pk = _to_pubkey(mint)
-        bonding_curve_addr = derive_bonding_curve_address(mint_pk)
-
-        try:
-            bc_resp = await self._client.get_account_info(str(bonding_curve_addr))
-            if bc_resp and isinstance(bc_resp, dict):
-                val = bc_resp.get("value")
-                if val and isinstance(val, dict):
-                    raw_data = val.get("data")
-                    if isinstance(raw_data, list) and raw_data:
-                        raw_bytes = base64.b64decode(raw_data[0])
-                        if len(raw_bytes) >= BONDING_CURVE_MIN_SIZE:
-                            if raw_bytes[BONDING_CURVE_COMPLETE_OFFSET] == 1:
-                                logger.debug(
-                                    "Token %s bonding curve is complete -> graduated to PumpSwap AMM",
-                                    str(mint_pk)[:8],
-                                )
-                                return RouteVenue.PUMPSWAP_AMM
-                            return RouteVenue.BONDING_CURVE
-        except Exception as exc:
-            logger.debug("Failed to inspect bonding curve for %s: %s", mint_pk, exc)
-
-        # Bonding curve missing or unconfirmed: inspect PumpSwap AMM pool directly
-        try:
-            pool_addr = derive_amm_pool(mint_pk)
-            pool_resp = await self._client.get_account_info(str(pool_addr))
-            if pool_resp and isinstance(pool_resp, dict):
-                val = pool_resp.get("value")
-                if val and isinstance(val, dict):
-                    owner = val.get("owner")
-                    raw_data = val.get("data")
-                    if (
-                        owner == PUMP_AMM_PROGRAM_ID
-                        and isinstance(raw_data, list)
-                        and raw_data
-                    ):
-                        raw_bytes = base64.b64decode(raw_data[0])
-                        if len(raw_bytes) >= PUMPSWAP_POOL_DATA_MIN_SIZE:
-                            logger.debug(
-                                "Token %s PumpSwap AMM pool found (%s) -> PUMPSWAP_AMM",
-                                str(mint_pk)[:8],
-                                str(pool_addr)[:8],
-                            )
-                            return RouteVenue.PUMPSWAP_AMM
-        except Exception as exc:
-            logger.debug("Failed to inspect PumpSwap pool for %s: %s", mint_pk, exc)
-
+        curve = await self._account(derive_bonding_curve_address(mint_pk))
+        if curve is not None:
+            return detect_venue_from_bonding_curve_data(self._account_bytes(curve))
+        pool = await self._account(derive_amm_pool(mint_pk))
+        if pool is not None and pool.get("owner") == PUMP_AMM_PROGRAM_ID:
+            return detect_venue_from_pool_data(self._account_bytes(pool))
         return RouteVenue.BONDING_CURVE
 
     async def is_graduated(self, mint: str | Pubkey) -> bool:
@@ -184,22 +162,12 @@ class AutoRouter:
         """Fetch and decode the binary PumpSwap pool for a token mint, if it exists."""
         mint_pk = _to_pubkey(mint)
         pool_addr = derive_amm_pool(mint_pk)
-        try:
-            resp = await self._client.get_account_info(str(pool_addr))
-            if not resp or not isinstance(resp, dict):
-                return None
-            val = resp.get("value")
-            if not val or not isinstance(val, dict):
-                return None
-            raw_data = val.get("data")
-            if not isinstance(raw_data, list) or not raw_data:
-                return None
-            pool_bytes = base64.b64decode(raw_data[0])
-            parsed = parse_pumpswap_pool_data(pool_bytes, validate_discriminator=False)
-            return pool_addr, parsed
-        except Exception as exc:
-            logger.debug("Could not fetch PumpSwap pool info for %s: %s", mint_pk, exc)
+        pool_bytes = self._account_bytes(await self._account(pool_addr))
+        if pool_bytes is None:
             return None
+        return pool_addr, parse_pumpswap_pool_data(
+            pool_bytes, validate_discriminator=False
+        )
 
     async def get_pool_reserves(
         self, pool_dict: dict[str, Any]

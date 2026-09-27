@@ -6,21 +6,26 @@ Supported intervals: 1s, 15s, 30s, 1m, 5m, 15m, 30m, 1h, 4h, 6h, 12h, 24h.
 No authentication is required for candlestick and market data.
 """
 
-# ruff: noqa: C901, PLR0912, PLR0915, BLE001, TRY300, S112, S310, PLC0415
+# ruff: noqa: C901, PLR0912, PLR0915, BLE001, TRY300, S310, PLC0415
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
-import struct
 import time
 import urllib.error
 import urllib.request
 
 from solders.pubkey import Pubkey
 
+from rugbot.domain.amounts import LAMPORTS_PER_SOL
+from rugbot.domain.decisions import AbstainResult
 from rugbot.domain.ohlc import OHLCCandle, TradeTick, build_ohlc_candles
+from rugbot.domain.pump_curve import TOKEN_DECIMALS
+from rugbot.ingest.pump.trade_event_decoder import (
+    decode_pump_trade_event,
+    pump_trade_payloads,
+)
 from rugbot.integrations.rpc_cache import RpcResponseCache
 from rugbot.integrations.solana_rpc import SolanaClient
 from rugbot.runtime.config import load_provider_settings, resolve_dotenv
@@ -32,7 +37,6 @@ PUMPFUN_SWAP_API_BASE = "https://swap-api.pump.fun"
 PUMPFUN_FRONTEND_API_BASE = "https://frontend-api-v3.pump.fun"
 PUMPFUN_ORIGIN = "https://pump.fun"
 PUMP_PROGRAM_ID_STR = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
-_TRADE_EVENT_DISCRIMINATOR = bytes([189, 219, 127, 211, 78, 230, 97, 238])
 TOKEN_CACHE_TTL_SECONDS = 300.0
 USER_COINS_CACHE_TTL_SECONDS = 120.0
 RECENT_LAUNCHES_CACHE_TTL_SECONDS = 60.0
@@ -625,30 +629,25 @@ async def fetch_token_ohlc_candles(
             bt = res.get("blockTime")
             if not bt:
                 continue
-            for log in res.get("meta", {}).get("logMessages", []):
-                if log.startswith("Program data: "):
-                    try:
-                        raw_data = base64.b64decode(log[14:])
-                        if (
-                            len(raw_data) >= 8 + 32 + 8 + 8 + 1
-                            and raw_data[:8] == _TRADE_EVENT_DISCRIMINATOR
-                        ):
-                            sol_amt = struct.unpack_from("<Q", raw_data, 8 + 32)[0]
-                            tok_amt = struct.unpack_from("<Q", raw_data, 8 + 32 + 8)[0]
-                            is_buy = bool(raw_data[8 + 32 + 8 + 8])
-                            if sol_amt > 0 and tok_amt > 0:
-                                price = (sol_amt / 1e9) / (tok_amt / 1e6)
-                                ticks.append(
-                                    TradeTick(
-                                        timestamp=int(bt),
-                                        price=price,
-                                        volume=sol_amt / 1e9,
-                                        is_buy=is_buy,
-                                        signature=sig,
-                                    )
-                                )
-                    except Exception:
-                        continue
+            logs = res.get("meta", {}).get("logMessages", [])
+            for _, payload in pump_trade_payloads(logs):
+                event = decode_pump_trade_event(payload, res.get("slot", 0))
+                if (
+                    isinstance(event, AbstainResult)
+                    or event.token_amount_base_units <= 0
+                ):
+                    continue
+                sol = event.sol_amount_base_units / LAMPORTS_PER_SOL
+                ticks.append(
+                    TradeTick(
+                        timestamp=int(bt),
+                        price=sol
+                        / (event.token_amount_base_units / 10**TOKEN_DECIMALS),
+                        volume=sol,
+                        is_buy=event.is_buy,
+                        signature=sig,
+                    )
+                )
 
         if ticks:
             ticks.sort(key=lambda t: t.timestamp)

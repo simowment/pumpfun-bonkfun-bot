@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from rugbot.execution.ports import ExecutionMode
@@ -13,6 +15,12 @@ from rugbot.execution.trade_service import (
 )
 
 VALID_MINT = "279mMFSUjS2kg4S3yQwwv3zZBqCtZ1Quvmg8FUHYpump"
+
+
+LIVE = pytest.mark.skipif(
+    os.environ.get("RUGBOT_LIVE_TESTS") != "1" or not os.environ.get("SOLANA_RPC_HTTP"),
+    reason="paper trades simulate against mainnet: RUGBOT_LIVE_TESTS=1 + RPC",
+)
 
 
 def test_buy_order_spec_validation() -> None:
@@ -62,6 +70,7 @@ def test_sell_order_spec_validation() -> None:
         SellOrderSpec(mint=VALID_MINT, percent=150.0).validate()
 
 
+@LIVE
 @pytest.mark.anyio
 async def test_trading_service_paper_lifecycle() -> None:
     """Test full buy -> position -> sell lifecycle in paper execution mode."""

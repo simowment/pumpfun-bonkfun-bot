@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Final
 
-LAMPORTS_PER_SOL = 1_000_000_000
+from rugbot.domain.amounts import LAMPORTS_PER_SOL
 
 SHORT_IDENTIFIER_LIMIT: Final[int] = 14
 PPM_SCALE: Final[int] = 1_000_000

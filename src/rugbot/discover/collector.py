@@ -18,9 +18,7 @@ from sol_trade_sdk.solana.provider_pool import RpcHttpTransport, RpcProviderPool
 from solders.pubkey import Pubkey
 
 from rugbot.backtest.trajectory.finalized_trade_builder import (
-    decode_pump_trade_event,
     decode_pump_trade_event_proofs,
-    pump_trade_payloads,
 )
 from rugbot.discover.store import (
     append_observation,
@@ -36,6 +34,10 @@ from rugbot.ingest.pump.pump_create_observation import decode_pump_create_v2_obs
 from rugbot.ingest.pump.pump_stream import (
     PumpPortalLaunchNotification,
     PumpPortalLaunchStream,
+)
+from rugbot.ingest.pump.trade_event_decoder import (
+    decode_pump_trade_event,
+    pump_trade_payloads,
 )
 from rugbot.ingest.rpc_observer import observe_address, observe_finalized_transaction
 from rugbot.integrations.rpc_access import resolve_websocket_endpoint

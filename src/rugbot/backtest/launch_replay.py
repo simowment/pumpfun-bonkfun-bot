@@ -21,13 +21,14 @@ from typing import TYPE_CHECKING
 from rugbot.backtest.pairs_lab import wilson_interval
 from rugbot.domain.amounts import LAMPORTS_PER_SOL
 from rugbot.domain.pump_curve import (
-    CURVE_INVARIANT,
     INITIAL_VIRTUAL_QUOTE,
-    PUMP_CURVE_FEE_CONFIG,
     TOKEN_DECIMALS,
     TOKEN_SUPPLY_UI,
+    curve_buy,
+    curve_sell,
+    price_multiple,
+    reserves_at_multiple,
 )
-from rugbot.domain.quote_engine import pump_curve_buy_amounts, pump_curve_sell_amounts
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
@@ -172,39 +173,22 @@ def trades_from_swap_api(
     return trades
 
 
-def _virtual_reserves(price_sol: float) -> tuple[int, int]:
-    """Reconstruct ``(virtual_quote, virtual_base)`` from a spot price.
-
-    On the constant-product curve ``quote * base = k`` and the spot price is
-    ``quote / base``, so ``quote = sqrt(k * price)``.
-    """
-    virtual_quote = math.isqrt(
-        int(CURVE_INVARIANT * price_sol * PRICE_TO_RESERVE_RATIO)
-    )
-    return virtual_quote, CURVE_INVARIANT // max(1, virtual_quote)
+def _price_multiple(price_sol: float) -> float:
+    """Launch-price multiple for a price in SOL per whole token."""
+    return price_multiple(price_sol * PRICE_TO_RESERVE_RATIO)
 
 
 def _buy_tokens(price_sol: float, quote_lamports: int) -> tuple[int, int]:
     """Return ``(tokens_out, fee_lamports)`` for a curve buy at this price."""
-    virtual_quote, virtual_base = _virtual_reserves(price_sol)
-    return pump_curve_buy_amounts(
-        virtual_quote_reserves=virtual_quote,
-        virtual_base_reserves=virtual_base,
-        spendable_quote_in=quote_lamports,
-        fee_config=PUMP_CURVE_FEE_CONFIG,
-    )
+    return curve_buy(_price_multiple(price_sol), quote_lamports)
 
 
 def _sell_lamports(trade: LaunchTrade, tokens: int) -> tuple[int, int]:
     """Return ``(proceeds, fee)`` in lamports for selling into this trade's state."""
     if trade.on_curve:
-        virtual_quote, virtual_base = _virtual_reserves(trade.price_sol)
-        proceeds, fee = pump_curve_sell_amounts(
-            virtual_quote_reserves=virtual_quote,
-            virtual_base_reserves=virtual_base,
-            base_input_amount=tokens,
-            fee_config=PUMP_CURVE_FEE_CONFIG,
-        )
+        multiple = _price_multiple(trade.price_sol)
+        proceeds, fee = curve_sell(multiple, tokens)
+        virtual_quote, _ = reserves_at_multiple(multiple)
         # The curve cannot pay out more SOL than it holds.
         return min(proceeds, max(0, virtual_quote - INITIAL_VIRTUAL_QUOTE)), fee
     # Graduated pool: no curve state; price at spot less PumpSwap fees. Pool

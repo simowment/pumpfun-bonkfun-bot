@@ -58,6 +58,7 @@ class PumpFeeConfigAccount:
     flat_fees: FeeConfig
     fee_tiers: tuple[PumpFeeTier, ...]
     stable_fee_tiers: tuple[PumpFeeTier, ...]
+    exotic_flat_fees: FeeConfig | None = None
 
 
 PumpFeeConfigDecodeResult: TypeAlias = PumpFeeConfigAccount | AbstainResult
@@ -100,6 +101,17 @@ def decode_pump_fee_config_account(  # noqa: PLR0911
     if isinstance(stable_result, AbstainResult):
         return stable_result
     stable_fee_tiers, next_offset = stable_result
+    # The current program appends exotic_flat_fees: Fees after the stable tiers.
+    exotic_flat_fees = None
+    if len(data) >= next_offset + FEES_SIZE and any(
+        data[next_offset : next_offset + FEES_SIZE]
+    ):
+        exotic = _decode_fees(data, next_offset)
+        fee_error = _validate_fees(exotic, observation.slot)
+        if fee_error is not None:
+            return fee_error
+        exotic_flat_fees = _fee_config(exotic, observation.slot)
+        next_offset += FEES_SIZE
     if any(data[next_offset:]):
         return _unknown(
             "Pump FeeConfig account has non-zero trailing bytes", observation.slot
@@ -116,6 +128,7 @@ def decode_pump_fee_config_account(  # noqa: PLR0911
         flat_fees=_fee_config(flat_fees, observation.slot),
         fee_tiers=fee_tiers,
         stable_fee_tiers=stable_fee_tiers,
+        exotic_flat_fees=exotic_flat_fees,
     )
 
 

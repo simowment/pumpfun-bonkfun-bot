@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from rugbot.interfaces.web.fastapi_app import create_fastapi_app
@@ -12,6 +14,13 @@ from rugbot.runtime.app import build_ui_runtime
 VALID_MINT = "279mMFSUjS2kg4S3yQwwv3zZBqCtZ1Quvmg8FUHYpump"
 
 
+LIVE = pytest.mark.skipif(
+    os.environ.get("RUGBOT_LIVE_TESTS") != "1" or not os.environ.get("SOLANA_RPC_HTTP"),
+    reason="paper trades simulate against mainnet: RUGBOT_LIVE_TESTS=1 + RPC",
+)
+
+
+@LIVE
 def test_fastapi_trade_lifecycle(tmp_path: Path) -> None:
     """Test full web trading workflow: buy -> check positions -> sell -> delete."""
     core = build_ui_runtime(state_dir=tmp_path)

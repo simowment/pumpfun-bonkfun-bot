@@ -8,60 +8,16 @@ Accurately models:
 
 from __future__ import annotations
 
-import math
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from rugbot.domain.fees import FeeConfig
-from rugbot.domain.quote_engine import (
-    PoolReserves,
-    executable_buy_quote,
-    executable_sell_quote,
-)
-from rugbot.domain.quotes import ExecutableQuote, QuotePath
+from rugbot.domain.amounts import LAMPORTS_PER_SOL
+from rugbot.domain.pump_curve import curve_buy, curve_sell
 from rugbot.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-LAMPORTS_PER_SOL = 1_000_000_000
-
-DEFAULT_FEE_CONFIG = FeeConfig(
-    version="pump-global-v1",
-    protocol_fee_bps=95,
-    creator_fee_bps=30,
-    is_known=True,
-    program_config_version="pump-global-v1",
-    valid_from_slot=0,
-    valid_to_slot=None,
-    source_artifact_version="pump-global-v1",
-    lp_fee_bps=0,
-)
-
-_SYNTH_VIRTUAL_BASE: int = 1_073_000_000_000_000
-_SYNTH_REAL_BASE: int = 800_000_000_000_000
-_SYNTH_REAL_QUOTE: int = 30_000_000_000
-
-
-def _synthetic_reserves(multiplier: float, slot: int) -> PoolReserves:
-    mult = max(0.001, float(multiplier))
-    sqrt_m = math.sqrt(mult)
-    v_quote = max(1, int(_SYNTH_REAL_QUOTE * sqrt_m))
-    v_base = max(1, int(_SYNTH_VIRTUAL_BASE / sqrt_m))
-    return PoolReserves(
-        virtual_base_reserves=v_base,
-        virtual_quote_reserves=v_quote,
-        real_base_reserves=_SYNTH_REAL_BASE,
-        real_quote_reserves=_SYNTH_REAL_QUOTE,
-        is_complete=False,
-        as_of_slot=slot,
-        base_decimals=6,
-        quote_decimals=9,
-        decoder_version="pump-bc-v1-synth",
-        idl_hash="synthetic",
-        program_config_version="pump-global-v1",
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,51 +102,21 @@ def _net_pnl_for_copytrade(
     entry_lag_multiplier: float,
     config: CopytradeBacktestConfig,
 ) -> tuple[float, float, float]:
-    """Compute (gross_pnl, fees, net_pnl) in SOL for a copytrade outcome with exact CPMM math."""
+    """(gross_pnl, fees, net_pnl) in SOL on the real curve.
+
+    Curve outputs are already net of Pump fees; ``gross_pnl`` is after them and
+    ``net_pnl`` also pays the transaction costs.
+    """
     entry_quote = int(config.quote_size_sol * LAMPORTS_PER_SOL)
-    reserves_in = _synthetic_reserves(multiplier=entry_lag_multiplier, slot=1)
-
-    buy_quote = executable_buy_quote(
-        path=QuotePath.PUMP_BONDING_CURVE,
-        reserves=reserves_in,
-        quote_input_amount=entry_quote,
-        fee_config=DEFAULT_FEE_CONFIG,
+    tokens, buy_fee = curve_buy(entry_lag_multiplier, entry_quote)
+    proceeds, sell_fee = curve_sell(exit_multiplier, tokens)
+    tx_fees = (config.gas_fee_sol * 2) + config.jito_tip_sol
+    gross_pnl = (proceeds - entry_quote) / LAMPORTS_PER_SOL
+    return (
+        gross_pnl,
+        tx_fees + (buy_fee + sell_fee) / LAMPORTS_PER_SOL,
+        gross_pnl - tx_fees,
     )
-    if not isinstance(buy_quote, ExecutableQuote):
-        tokens_received = int(
-            (entry_quote * _SYNTH_VIRTUAL_BASE)
-            / (reserves_in.virtual_quote_reserves + entry_quote)
-        )
-        entry_protocol_fee = entry_quote * 0.0125 / LAMPORTS_PER_SOL
-    else:
-        tokens_received = buy_quote.output_amount_base_units
-        entry_protocol_fee = buy_quote.fee_amount_base_units / LAMPORTS_PER_SOL
-
-    # Exit price calculation
-    eff_exit_mult = max(0.001, exit_multiplier)
-    reserves_out = _synthetic_reserves(multiplier=eff_exit_mult, slot=2)
-    sell_quote = executable_sell_quote(
-        path=QuotePath.PUMP_BONDING_CURVE,
-        reserves=reserves_out,
-        base_input_amount=tokens_received,
-        fee_config=DEFAULT_FEE_CONFIG,
-    )
-    if not isinstance(sell_quote, ExecutableQuote):
-        exit_quote_sol = config.quote_size_sol * (
-            eff_exit_mult / max(1.0, entry_lag_multiplier)
-        )
-        exit_protocol_fee = exit_quote_sol * 0.0125
-    else:
-        exit_quote_sol = sell_quote.output_amount_base_units / LAMPORTS_PER_SOL
-        exit_protocol_fee = sell_quote.fee_amount_base_units / LAMPORTS_PER_SOL
-
-    # Transaction costs
-    total_tx_fees = (config.gas_fee_sol * 2) + config.jito_tip_sol
-    total_fees = total_tx_fees + entry_protocol_fee + exit_protocol_fee
-
-    gross_pnl = exit_quote_sol - config.quote_size_sol
-    net_pnl = gross_pnl - total_fees
-    return gross_pnl, total_fees, net_pnl
 
 
 def _eval_copytrade_single_sample(

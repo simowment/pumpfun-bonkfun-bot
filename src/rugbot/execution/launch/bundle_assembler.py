@@ -15,6 +15,8 @@ from solders.message import Message
 from solders.pubkey import Pubkey
 from solders.transaction import Transaction
 
+from rugbot.domain.amounts import LAMPORTS_PER_SOL
+from rugbot.domain.pump_curve import INITIAL_VIRTUAL_BASE, INITIAL_VIRTUAL_QUOTE
 from rugbot.execution.create_builder import build_create_v2_instruction
 from rugbot.execution.sender.jito import (
     JITO_FALLBACK_TIP_ACCOUNTS,
@@ -35,10 +37,7 @@ PUMP_CANONICAL_FEE_RECIPIENT: Final[str] = (
 PUMP_CANONICAL_BUYBACK_RECIPIENT: Final[str] = (
     "FWsPcmCoPD5N4t5iQdfNuimkWupq55nnJyTFsmvvwGia"
 )
-INITIAL_VIRTUAL_TOKEN_RESERVES: Final[int] = 1_073_000_000_000_000
-INITIAL_VIRTUAL_SOL_RESERVES: Final[int] = 30_000_000_000
 SOLANA_TX_MTU_BYTES: Final[int] = 1232
-LAMPORTS_PER_SOL: Final[int] = 1_000_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,9 +67,7 @@ def calculate_initial_buy_tokens(sol_lamports: int) -> int:
         return 0
     # 100 bps protocol fee deducted on Pump
     net_sol = sol_lamports * 9900 // 10000
-    return (INITIAL_VIRTUAL_TOKEN_RESERVES * net_sol) // (
-        INITIAL_VIRTUAL_SOL_RESERVES + net_sol
-    )
+    return (INITIAL_VIRTUAL_BASE * net_sol) // (INITIAL_VIRTUAL_QUOTE + net_sol)
 
 
 def assemble_launch_bundle(
@@ -223,8 +220,6 @@ def assemble_launch_bundle(
 
 
 __all__ = [
-    "INITIAL_VIRTUAL_SOL_RESERVES",
-    "INITIAL_VIRTUAL_TOKEN_RESERVES",
     "LAMPORTS_PER_SOL",
     "PUMP_CANONICAL_BUYBACK_RECIPIENT",
     "PUMP_CANONICAL_FEE_RECIPIENT",

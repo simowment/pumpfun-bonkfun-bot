@@ -1,6 +1,6 @@
 """Paper replay of scalper strategy on finalized discover_trades.
 
-Uses synthetic quote_engine execution to apply real fees (ceil) on buy/sell.
+Fills use the standard-curve math at each trade's price (fees and impact).
 No live orders. Deterministic over finalized SQLite trades.
 """
 
@@ -8,13 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rugbot.domain.fees import FeeConfig
-from rugbot.domain.quote_engine import (
-    PoolReserves,
-    executable_buy_quote,
-    executable_sell_quote,
-)
-from rugbot.domain.quotes import QuotePath
+from rugbot.domain.amounts import LAMPORTS_PER_SOL
+from rugbot.domain.pump_curve import curve_buy, curve_sell, price_multiple
 from rugbot.domain.scalper_strategy import (
     ScalperConfig,
     decide_scalper_exit,
@@ -24,63 +19,8 @@ from rugbot.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-LAMPORTS_PER_SOL = 1_000_000_000
-
-# Canonical fee matching on-chain Pump (95 + 30 =125 bps)
-DEFAULT_FEE_CONFIG = FeeConfig(
-    version="pump-global-v1",
-    protocol_fee_bps=95,
-    creator_fee_bps=30,
-    is_known=True,
-    program_config_version="pump-global-v1",
-    valid_from_slot=0,
-    valid_to_slot=None,
-    source_artifact_version="pump-global-v1",
-    lp_fee_bps=0,
-)
-
-# Synthetic reserves constants for quote_engine
-_SYNTH_VIRTUAL_BASE: int = 1_073_000_000_000_000  # ~1e15 base units (1B tokens *1e6)
-_SYNTH_REAL_BASE: int = 800_000_000_000_000
-_SYNTH_REAL_QUOTE: int = 30_000_000_000  # 30 SOL
-_SYNTH_DECODER_VERSION = "pump-bc-v1-synth"
-_SYNTH_IDL_HASH = "synthetic"
-_SYNTH_PROGRAM_CONFIG_VERSION = "pump-global-v1"
-
-
-def _synthetic_reserves(price_ppm: int, slot: int) -> PoolReserves:
-    """Build synthetic reserves that encode price_ppm for quote_engine.
-
-    price_ppm = quote/base *1e6. We set virtuals so price is reproduced.
-    """
-    # virtual_quote = virtual_base * price_ppm / 1e6  scaled for decimals 6/9 diff
-    # Simplify: derive virtual_quote directly.
-    # Use 6 decimals base, 9 decimals quote: price in lamports per base unit.
-    # For synthetic we just ensure ratio matches ppm.
-    if price_ppm <= 0:
-        price_ppm = 1
-    v_base = _SYNTH_VIRTUAL_BASE
-    # v_quote = v_base * price_ppm / 1_000_000  (adjusted for unit scale)
-    v_quote = max(1, (v_base * price_ppm) // 1_000_000)
-    # Scale down to lamport range to avoid overflow but keep ratio
-    # Divide both by 1000 if too large
-    if v_quote > 10_000_000_000_000:
-        scale = v_quote // 10_000_000_000_000 + 1
-        v_quote //= scale
-        v_base //= scale
-    return PoolReserves(
-        virtual_base_reserves=v_base,
-        virtual_quote_reserves=v_quote,
-        real_base_reserves=_SYNTH_REAL_BASE,
-        real_quote_reserves=_SYNTH_REAL_QUOTE,
-        is_complete=False,
-        as_of_slot=slot,
-        base_decimals=6,
-        quote_decimals=9,
-        decoder_version=_SYNTH_DECODER_VERSION,
-        idl_hash=_SYNTH_IDL_HASH,
-        program_config_version=_SYNTH_PROGRAM_CONFIG_VERSION,
-    )
+# Trade prices here are lamports per token base unit x PRICE_PPM.
+PRICE_PPM = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,24 +78,15 @@ def run_scalper_backtest(
     trades: list[dict[str, object]],
     launches: list[dict[str, object]] | None = None,
     config: ScalperConfig | None = None,
-    fee_config: FeeConfig | None = None,
 ) -> ScalperBacktestResult:
     """Replay finalized trades through scalper strategy.
 
     Groups trades by mint ordered by slot, enters at first eligible trade,
     then evaluates TP/SL/tranches on subsequent trades.
-    Uses quote_engine for fee-aware execution (synthetic reserves).
+    Fills use the standard-curve math at each trade's price.
     """
     if config is None:
         config = ScalperConfig()
-    if fee_config is None:
-        fee_config = DEFAULT_FEE_CONFIG
-
-    # Need synthetic fee that passes validation: program_config_version must match reserves
-    # Our synthetic reserves use pump-global-v1, so ensure fee matches.
-    if fee_config.program_config_version != _SYNTH_PROGRAM_CONFIG_VERSION:
-        fee_config = DEFAULT_FEE_CONFIG
-
     if not trades:
         return ScalperBacktestResult(
             sample_size=0,
@@ -233,27 +164,9 @@ def run_scalper_backtest(
             pass
 
         # Simulate buy execution with quote_engine to get fee
-        try:
-            reserves = _synthetic_reserves(entry_ppm, entry_slot)
-            buy_q = executable_buy_quote(
-                path=QuotePath.PUMP_BONDING_CURVE,
-                reserves=reserves,
-                quote_input_amount=position_size_lamports,
-                fee_config=fee_config,
-            )
-            from rugbot.domain.decisions import AbstainResult as AR
-
-            if isinstance(buy_q, AR):
-                # fallback fee estimate 1.25%
-                buy_fee = int(position_size_lamports * 0.0125)
-                buy_output = position_size_lamports  # placeholder
-            else:
-                buy_fee = int(buy_q.fee_amount_base_units)
-                buy_output = int(buy_q.output_amount_base_units)
-        except Exception:
-            buy_fee = int(position_size_lamports * 0.0125)
-            buy_output = position_size_lamports
-
+        buy_output, buy_fee = curve_buy(
+            price_multiple(entry_ppm / PRICE_PPM), position_size_lamports
+        )
         entry_quote = position_size_lamports
         total_fees_lamports += buy_fee
         # entry base amount (tokens) proportional to buy_output
@@ -297,26 +210,9 @@ def run_scalper_backtest(
                     exit_slot = cur_slot
                     exit_ppm = cur_ppm
                     break
-                try:
-                    reserves2 = _synthetic_reserves(cur_ppm, cur_slot)
-                    sell_q = executable_sell_quote(
-                        path=QuotePath.PUMP_BONDING_CURVE,
-                        reserves=reserves2,
-                        base_input_amount=remaining,
-                        fee_config=fee_config,
-                    )
-                    from rugbot.domain.decisions import AbstainResult as AR2
-
-                    if isinstance(sell_q, AR2):
-                        # fallback: price ratio
-                        proceeds = int(remaining * cur_ppm / max(1, entry_ppm) * 0.9875)
-                        fee2 = int(proceeds * 0.0125)
-                    else:
-                        proceeds = int(sell_q.output_amount_base_units)
-                        fee2 = int(sell_q.fee_amount_base_units)
-                except Exception:
-                    proceeds = int(remaining * cur_ppm / max(1, entry_ppm) * 0.9875)
-                    fee2 = int(proceeds * 0.0125)
+                proceeds, fee2 = curve_sell(
+                    price_multiple(cur_ppm / PRICE_PPM), remaining
+                )
                 realized_quote += proceeds
                 total_fees_lamports += fee2
                 tranche_count += 1
@@ -335,27 +231,9 @@ def run_scalper_backtest(
                 tranche_base = min(tranche_base, entry_base - sold_base)
                 if tranche_base <= 0:
                     continue
-                try:
-                    reserves2 = _synthetic_reserves(cur_ppm, cur_slot)
-                    sell_q = executable_sell_quote(
-                        path=QuotePath.PUMP_BONDING_CURVE,
-                        reserves=reserves2,
-                        base_input_amount=tranche_base,
-                        fee_config=fee_config,
-                    )
-                    from rugbot.domain.decisions import AbstainResult as AR3
-
-                    if isinstance(sell_q, AR3):
-                        proceeds = int(
-                            tranche_base * cur_ppm / max(1, entry_ppm) * 0.9875
-                        )
-                        fee2 = int(proceeds * 0.0125)
-                    else:
-                        proceeds = int(sell_q.output_amount_base_units)
-                        fee2 = int(sell_q.fee_amount_base_units)
-                except Exception:
-                    proceeds = int(tranche_base * cur_ppm / max(1, entry_ppm) * 0.9875)
-                    fee2 = int(proceeds * 0.0125)
+                proceeds, fee2 = curve_sell(
+                    price_multiple(cur_ppm / PRICE_PPM), tranche_base
+                )
                 realized_quote += proceeds
                 total_fees_lamports += fee2
                 sold_base += tranche_base
@@ -378,25 +256,7 @@ def run_scalper_backtest(
             cur_ppm = _price_ppm_from_trade(last)
             cur_slot = int(last.get("slot", 0))
             remaining = entry_base - sold_base
-            try:
-                reserves2 = _synthetic_reserves(cur_ppm, cur_slot)
-                sell_q = executable_sell_quote(
-                    path=QuotePath.PUMP_BONDING_CURVE,
-                    reserves=reserves2,
-                    base_input_amount=remaining,
-                    fee_config=fee_config,
-                )
-                from rugbot.domain.decisions import AbstainResult as AR4
-
-                if isinstance(sell_q, AR4):
-                    proceeds = int(remaining * cur_ppm / max(1, entry_ppm) * 0.9875)
-                    fee2 = int(proceeds * 0.0125)
-                else:
-                    proceeds = int(sell_q.output_amount_base_units)
-                    fee2 = int(sell_q.fee_amount_base_units)
-            except Exception:
-                proceeds = int(remaining * cur_ppm / max(1, entry_ppm) * 0.9875)
-                fee2 = int(proceeds * 0.0125)
+            proceeds, fee2 = curve_sell(price_multiple(cur_ppm / PRICE_PPM), remaining)
             realized_quote += proceeds
             total_fees_lamports += fee2
             tranche_count += 1
@@ -413,25 +273,7 @@ def run_scalper_backtest(
             cur_slot = int(last.get("slot", 0))
             # force sell all at last price (timeout)
             remaining = entry_base
-            try:
-                reserves2 = _synthetic_reserves(cur_ppm, cur_slot)
-                sell_q = executable_sell_quote(
-                    path=QuotePath.PUMP_BONDING_CURVE,
-                    reserves=reserves2,
-                    base_input_amount=remaining,
-                    fee_config=fee_config,
-                )
-                from rugbot.domain.decisions import AbstainResult as AR5
-
-                if isinstance(sell_q, AR5):
-                    proceeds = int(remaining * cur_ppm / max(1, entry_ppm) * 0.9875)
-                    fee2 = int(proceeds * 0.0125)
-                else:
-                    proceeds = int(sell_q.output_amount_base_units)
-                    fee2 = int(sell_q.fee_amount_base_units)
-            except Exception:
-                proceeds = int(remaining * cur_ppm / max(1, entry_ppm) * 0.9875)
-                fee2 = int(proceeds * 0.0125)
+            proceeds, fee2 = curve_sell(price_multiple(cur_ppm / PRICE_PPM), remaining)
             realized_quote = proceeds
             total_fees_lamports += fee2
             tranche_count = 1

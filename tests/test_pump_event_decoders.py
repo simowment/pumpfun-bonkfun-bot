@@ -14,13 +14,13 @@ from pathlib import Path
 
 import base58
 
-from rugbot.backtest.trajectory.finalized_trade_builder import _TradeEventReader
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.trades import TradeSide
 from rugbot.ingest.pump.swap_event_decoder import (
     EventReader,
     decode_pump_swap_trade_event,
 )
+from rugbot.ingest.pump.trade_event_decoder import _TradeEventReader
 
 FIXTURE = next(Path("fixtures/finalized_transactions/pump_swap_event").glob("*.json"))
 

@@ -18,6 +18,8 @@ from typing import Any, Final
 
 import base58
 
+from rugbot.domain.amounts import LAMPORTS_PER_SOL
+
 SOLSCAN_API_URL: Final[str] = "https://pro-api.solscan.io/v2.0"
 SOLSCAN_PLAYGROUND_URL: Final[str] = "https://pro-api.solscan.io/playground"
 SOLANA_ADDRESS_BYTES: Final[int] = 32
@@ -33,7 +35,6 @@ TRANSFER_PAGE_SIZES: Final[frozenset[int]] = frozenset({10, 20, 30, 40, 60, 100}
 DEFAULT_TRANSFER_PAGE_SIZE: Final[int] = 100
 MAX_TRANSFER_SCAN_PAGES: Final[int] = 5
 TRANSFER_SORT_ORDERS: Final[frozenset[str]] = frozenset({"asc", "desc"})
-LAMPORTS_PER_SOL: Final[int] = 1_000_000_000
 
 
 @dataclass(slots=True)

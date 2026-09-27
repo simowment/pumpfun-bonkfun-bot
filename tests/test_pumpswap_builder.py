@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import base64
 import struct
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from solders.pubkey import Pubkey
@@ -13,12 +11,10 @@ from solders.pubkey import Pubkey
 from rugbot.execution.auto_router import (
     BONDING_CURVE_COMPLETE_OFFSET,
     BONDING_CURVE_MIN_SIZE,
-    AutoRouter,
     RouteVenue,
     detect_venue_from_bonding_curve_data,
     detect_venue_from_pool_data,
 )
-from rugbot.execution.ports import ExecutionMode
 from rugbot.execution.pumpswap_builder import (
     PUMP_AMM_PROGRAM,
     PUMP_AMM_PROGRAM_ID,
@@ -45,11 +41,6 @@ from rugbot.execution.pumpswap_builder import (
     derive_amm_user_volume_accumulator,
     derive_pool_authority,
     parse_pumpswap_pool_data,
-)
-from rugbot.execution.trade_service import (
-    ActivePosition,
-    TradeSide,
-    TradingService,
 )
 
 SAMPLE_MINT = "279mMFSUjS2kg4S3yQwwv3zZBqCtZ1Quvmg8FUHYpump"
@@ -344,176 +335,3 @@ def test_detect_venue_from_pool_data() -> None:
     assert detect_venue_from_pool_data(b"\x00" * 10) == RouteVenue.BONDING_CURVE
     assert detect_venue_from_pool_data(b"\x00" * 250) == RouteVenue.BONDING_CURVE
     assert detect_venue_from_pool_data(None) == RouteVenue.BONDING_CURVE
-
-
-@pytest.mark.anyio
-async def test_autorouter_detect_venue_mock_rpc() -> None:
-    """Verify AutoRouter detects graduated token via mock RPC response."""
-    mock_client = MagicMock()
-
-    # 1. Test completed bonding curve
-    complete_bc_data = bytearray(BONDING_CURVE_MIN_SIZE)
-    complete_bc_data[BONDING_CURVE_COMPLETE_OFFSET] = 1
-    mock_client.get_account_info = AsyncMock(
-        return_value={
-            "value": {
-                "data": [base64.b64encode(bytes(complete_bc_data)).decode("ascii")]
-            }
-        }
-    )
-
-    router = AutoRouter(client=mock_client)
-    venue = await router.detect_venue(SAMPLE_MINT)
-    assert venue == RouteVenue.PUMPSWAP_AMM
-
-    # 2. Test active/incomplete bonding curve
-    incomplete_bc_data = bytearray(BONDING_CURVE_MIN_SIZE)
-    incomplete_bc_data[BONDING_CURVE_COMPLETE_OFFSET] = 0
-    mock_client.get_account_info = AsyncMock(
-        return_value={
-            "value": {
-                "data": [base64.b64encode(bytes(incomplete_bc_data)).decode("ascii")]
-            }
-        }
-    )
-
-    venue_incomplete = await router.detect_venue(SAMPLE_MINT)
-    assert venue_incomplete == RouteVenue.BONDING_CURVE
-
-
-@pytest.mark.anyio
-async def test_autorouter_get_pool_reserves() -> None:
-    """Verify AutoRouter get_pool_reserves parses token account balances from RPC."""
-    mock_client = MagicMock()
-    mock_client.post_rpc = AsyncMock(
-        side_effect=[
-            {"jsonrpc": "2.0", "id": 1, "result": {"value": {"amount": "1000000000"}}},
-            {"jsonrpc": "2.0", "id": 2, "result": {"value": {"amount": "50000000000"}}},
-        ]
-    )
-
-    router = AutoRouter(client=mock_client)
-    _, pool = _make_dummy_pool_bytes()
-    reserves = await router.get_pool_reserves(pool)
-    assert reserves == (1_000_000_000, 50_000_000_000)
-
-
-# --- 6. TradingService Auto-Routing Integration ---
-
-
-@pytest.mark.anyio
-async def test_tradingservice_pumpswap_buy_autorouting() -> None:
-    """Verify TradingService automatically routes buys to PumpSwap AMM when token graduated."""
-    mock_router = MagicMock()
-    mock_router.detect_venue = AsyncMock(return_value=RouteVenue.PUMPSWAP_AMM)
-    mock_router.get_pumpswap_pool_info = AsyncMock(return_value=None)
-    mock_router.get_pool_reserves = AsyncMock(return_value=None)
-    mock_router.close = AsyncMock()
-
-    service = TradingService(
-        default_mode=ExecutionMode.PAPER,
-        auto_router=mock_router,
-    )
-
-    result = await service.buy(
-        mint=SAMPLE_MINT,
-        amount_sol=0.1,
-    )
-
-    assert result.ok is True
-    assert result.side == TradeSide.BUY
-    assert result.mint == SAMPLE_MINT
-    assert result.sol_amount == 0.1
-    assert result.token_amount > 0
-    assert "PumpSwap AMM" in result.message
-
-    pos = service.get_position(SAMPLE_MINT)
-    assert pos is not None
-    assert pos.mint == SAMPLE_MINT
-
-    await service.close()
-
-
-@pytest.mark.anyio
-async def test_tradingservice_pumpswap_sell_autorouting() -> None:
-    """Verify TradingService automatically routes sells to PumpSwap AMM when token graduated."""
-    mock_router = MagicMock()
-    # Route directly to PumpSwap AMM
-    mock_router.detect_venue = AsyncMock(return_value=RouteVenue.PUMPSWAP_AMM)
-    mock_router.get_pumpswap_pool_info = AsyncMock(return_value=None)
-    mock_router.get_pool_reserves = AsyncMock(return_value=None)
-    mock_router.close = AsyncMock()
-
-    service = TradingService(
-        default_mode=ExecutionMode.PAPER,
-        auto_router=mock_router,
-    )
-
-    # 1. Create a simulated open position
-    pos = ActivePosition(
-        mint=SAMPLE_MINT,
-        entry_sol=0.1,
-        token_amount=1_000_000,
-        entry_price_sol=0.0000001,
-        entry_slot=100,
-        mode=ExecutionMode.PAPER,
-    )
-    service._positions[SAMPLE_MINT] = pos
-
-    # 2. Execute sell
-    result = await service.sell(
-        mint=SAMPLE_MINT,
-        percent=100.0,
-    )
-
-    assert result.ok is True
-    assert result.side == TradeSide.SELL
-    assert result.mint == SAMPLE_MINT
-    assert result.token_amount == 1_000_000
-    assert result.sol_amount > 0.0
-    assert "PumpSwap AMM" in result.message
-    assert result.realized_pnl_sol is not None
-
-    # Verify position is closed
-    assert service.get_position(SAMPLE_MINT) is None
-
-    # Clean up
-    await service.close()
-
-
-@pytest.mark.anyio
-async def test_tradingservice_tick_with_graduated_token() -> None:
-    """Verify TradingService tick() evaluates graduated positions via AMM and triggers TP."""
-    mock_router = MagicMock()
-    mock_router.detect_venue = AsyncMock(return_value=RouteVenue.PUMPSWAP_AMM)
-    mock_router.get_pumpswap_pool_info = AsyncMock(return_value=None)
-    mock_router.get_pool_reserves = AsyncMock(return_value=None)
-    mock_router.close = AsyncMock()
-
-    service = TradingService(
-        default_mode=ExecutionMode.PAPER,
-        auto_router=mock_router,
-    )
-
-    # Create position with entry cost so AMM value triggers take-profit
-    pos = ActivePosition(
-        mint=SAMPLE_MINT,
-        entry_sol=0.1,
-        token_amount=1_000_000_000_000,
-        entry_price_sol=0.0000001,
-        entry_slot=100,
-        mode=ExecutionMode.PAPER,
-        take_profit_pct=10.0,  # +10% target
-    )
-    service._positions[SAMPLE_MINT] = pos
-
-    # Run tick()
-    triggered = await service.tick()
-
-    # The CPMM value for 10M tokens will easily exceed 0.0001 SOL entry, triggering TP
-    assert len(triggered) == 1
-    assert triggered[0].ok is True
-    assert "PumpSwap AMM" in triggered[0].message
-    assert service.get_position(SAMPLE_MINT) is None
-
-    await service.close()

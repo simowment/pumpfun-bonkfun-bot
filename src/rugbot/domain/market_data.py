@@ -1,6 +1,6 @@
 """Data-based market history (on-chain first, honest unavailable flags)."""
 
-# ruff: noqa: PLC0415, C901, PLR0911, PLR0912, PLR0915, S110, S112, BLE001, N806, N814, TRY300, I001, B007, B905, PLW0108, RUF059, F841, PLR5501, PLR2004
+# ruff: noqa: PLC0415, C901, PLR0911, PLR0912, PLR0915, S110, BLE001, N806, N814, TRY300, I001, B007, B905, PLW0108, RUF059, F841, PLR5501, PLR2004
 from __future__ import annotations
 
 import base64
@@ -11,6 +11,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from rugbot.domain.decisions import AbstainResult
+from rugbot.ingest.pump.trade_event_decoder import (
+    decode_pump_trade_event,
+    pump_trade_payloads,
+)
 from rugbot.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -18,7 +23,6 @@ logger = get_logger(__name__)
 PUMP_PROGRAM_ID_STR: str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 _SOLSCAN_MAX_PAGES: int = 100
 _SOLSCAN_PAGE_LIMIT: int = 10
-_TRADE_EVENT_DISCRIMINATOR = bytes([189, 219, 127, 211, 78, 230, 97, 238])
 _EARLY_SIG_LIMIT = 1000
 _EARLY_SIG_PAGES = 5
 _EARLY_TX_FETCH_LIMIT = 120
@@ -530,26 +534,6 @@ def _rpc_json_call(rpc_url: str, method: str, params: list[object]) -> object | 
         return None
 
 
-def _decode_trade_event_price(payload: bytes) -> tuple[int, int, bool] | None:
-    """Decode sol_amount, token_amount, is_buy from a TradeEvent payload. Returns None if invalid."""
-    import struct
-
-    if not payload.startswith(_TRADE_EVENT_DISCRIMINATOR):
-        return None
-    # layout: 8 discriminator, 32 mint, 8 sol_amount, 8 token_amount, 1 is_buy
-    if len(payload) < 8 + 32 + 8 + 8 + 1:
-        return None
-    try:
-        sol_amount = struct.unpack_from("<Q", payload, 8 + 32)[0]
-        token_amount = struct.unpack_from("<Q", payload, 8 + 32 + 8)[0]
-        is_buy = bool(payload[8 + 32 + 8 + 8])
-    except Exception:
-        return None
-    if sol_amount <= 0 or token_amount <= 0:
-        return None
-    return sol_amount, token_amount, is_buy
-
-
 def _fetch_early_onchain_trades(
     mint: str,
     bonding_curve: str,
@@ -661,30 +645,13 @@ def _fetch_early_onchain_trades(
         if not isinstance(logs, list):
             time.sleep(0.2)
             continue
-        tx_index = ent.get("blockTime")  # not correct; use None
-        # decode each TradeEvent in logs
-        for msg in logs:
-            if not isinstance(msg, str) or not msg.startswith("Program data: "):
+        for _, payload in pump_trade_payloads(logs):
+            event = decode_pump_trade_event(payload, int(slot))
+            if isinstance(event, AbstainResult) or event.mint != mint:
                 continue
-            enc = msg.removeprefix("Program data: ")
-            try:
-                payload = base64.b64decode(enc, validate=True)
-            except Exception:
-                continue
-            decoded = _decode_trade_event_price(payload)
-            if decoded is None:
-                continue
-            sol_amount, token_amount, is_buy = decoded
-            # need to verify mint matches: peek mint pubkey at offset 8
-            try:
-                import base58 as _b58
-
-                mint_bytes = payload[8 : 8 + 32]
-                evt_mint = _b58.b58encode(mint_bytes).decode("ascii")
-            except Exception:
-                continue
-            if evt_mint != mint:
-                continue
+            sol_amount = event.sol_amount_base_units
+            token_amount = event.token_amount_base_units
+            is_buy = event.is_buy
             price_ppm = sol_amount * 1_000_000 // token_amount if token_amount else 0
             if price_ppm <= 0:
                 continue
@@ -693,7 +660,7 @@ def _fetch_early_onchain_trades(
                     "slot": int(slot),
                     "tx_index": None,
                     "signature": sig,
-                    "wallet": None,
+                    "wallet": event.user,
                     "side": "buy" if is_buy else "sell",
                     "quote_amount": int(sol_amount),
                     "base_amount": int(token_amount),

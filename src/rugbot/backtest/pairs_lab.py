@@ -20,18 +20,9 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
-from rugbot.backtest.scalper_backtest import (
-    DEFAULT_FEE_CONFIG,
-    LAMPORTS_PER_SOL,
-    _price_ppm_from_trade,
-    _synthetic_reserves,
-)
-from rugbot.domain.decisions import AbstainResult
-from rugbot.domain.quote_engine import (
-    executable_buy_quote,
-    executable_sell_quote,
-)
-from rugbot.domain.quotes import QuotePath
+from rugbot.backtest.scalper_backtest import PRICE_PPM, _price_ppm_from_trade
+from rugbot.domain.amounts import LAMPORTS_PER_SOL
+from rugbot.domain.pump_curve import curve_buy, curve_sell, price_multiple
 from rugbot.domain.scalper_strategy import (
     ScalperConfig,
     decide_scalper_exit,
@@ -41,10 +32,8 @@ from rugbot.domain.scalper_strategy import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from rugbot.domain.fees import FeeConfig
 
 Z_95 = 1.96
-FALLBACK_FEE_FRACTION = 0.0125
 PEAK_2X = 2.0
 PEAK_5X = 5.0
 PEAK_10X = 10.0
@@ -304,45 +293,9 @@ def extract_pre_entry_features(
     )
 
 
-def _execute_sell(
-    *,
-    price_ppm: int,
-    slot: int,
-    base_amount: int,
-    entry_ppm: int,
-    fee_config: FeeConfig,
-) -> tuple[int, int]:
-    """Sell-quote proceeds for one tranche, mirroring scalper fallbacks.
-
-    Returns (proceeds_lamports, fee_lamports). On abstain or quote error the
-    scalper approximation applies (price ratio vs entry, 125 bps fee) so label
-    semantics stay identical to ``rug_scalp`` output.
-    """
-
-    try:
-        quote = executable_sell_quote(
-            path=QuotePath.PUMP_BONDING_CURVE,
-            reserves=_synthetic_reserves(price_ppm, slot),
-            base_input_amount=base_amount,
-            fee_config=fee_config,
-        )
-        if isinstance(quote, AbstainResult):
-            proceeds = int(
-                base_amount
-                * price_ppm
-                / max(1, entry_ppm)
-                * (1.0 - FALLBACK_FEE_FRACTION)
-            )
-            fee = int(proceeds * FALLBACK_FEE_FRACTION)
-        else:
-            proceeds = int(quote.output_amount_base_units)
-            fee = int(quote.fee_amount_base_units)
-    except Exception:  # noqa: BLE001 - defensive fallback mirrors scalper
-        proceeds = int(
-            base_amount * price_ppm / max(1, entry_ppm) * (1.0 - FALLBACK_FEE_FRACTION)
-        )
-        fee = int(proceeds * FALLBACK_FEE_FRACTION)
-    return proceeds, fee
+def _execute_sell(*, price_ppm: int, base_amount: int) -> tuple[int, int]:
+    """``(proceeds, fee)`` in lamports for selling one tranche on the curve."""
+    return curve_sell(price_multiple(price_ppm / PRICE_PPM), base_amount)
 
 
 def replay_launch_label(
@@ -350,7 +303,6 @@ def replay_launch_label(
     config: PairsLabConfig,
     launch: dict[str, Any],
     trades: Sequence[dict[str, Any]],
-    fee_config: FeeConfig = DEFAULT_FEE_CONFIG,
 ) -> LaunchLabel | None:
     """Replay the exit ladder on one launch; None when no entry is possible.
 
@@ -384,19 +336,9 @@ def replay_launch_label(
 
     scalper = config.scalper_config()
     position_lamports = int(config.position_size_sol * LAMPORTS_PER_SOL)
-    try:
-        buy_quote = executable_buy_quote(
-            path=QuotePath.PUMP_BONDING_CURVE,
-            reserves=_synthetic_reserves(entry_ppm, entry_slot),
-            quote_input_amount=position_lamports,
-            fee_config=fee_config,
-        )
-        if isinstance(buy_quote, AbstainResult):
-            entry_base = position_lamports
-        else:
-            entry_base = int(buy_quote.output_amount_base_units)
-    except Exception:  # noqa: BLE001 - defensive fallback mirrors scalper
-        entry_base = position_lamports
+    entry_base, _fee = curve_buy(
+        price_multiple(entry_ppm / PRICE_PPM), position_lamports
+    )
 
     filled = tuple(False for _ in config.tp_levels_pct)
     sold_base = 0
@@ -436,10 +378,7 @@ def replay_launch_label(
             if remaining > 0:
                 proceeds, _fee = _execute_sell(
                     price_ppm=cur_ppm,
-                    slot=cur_slot,
                     base_amount=remaining,
-                    entry_ppm=entry_ppm,
-                    fee_config=fee_config,
                 )
                 realized_quote += proceeds
                 sold_base = entry_base
@@ -456,10 +395,7 @@ def replay_launch_label(
             continue
         proceeds, _fee = _execute_sell(
             price_ppm=cur_ppm,
-            slot=cur_slot,
             base_amount=tranche_base,
-            entry_ppm=entry_ppm,
-            fee_config=fee_config,
         )
         realized_quote += proceeds
         sold_base += tranche_base
@@ -477,10 +413,7 @@ def replay_launch_label(
         if remaining > 0:
             proceeds, _fee = _execute_sell(
                 price_ppm=last_valid_ppm,
-                slot=last_valid_slot,
                 base_amount=remaining,
-                entry_ppm=entry_ppm,
-                fee_config=fee_config,
             )
             realized_quote += proceeds
             sold_base += remaining

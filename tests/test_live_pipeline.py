@@ -19,6 +19,7 @@ from rugbot.backtest.launch_replay import (
     summarize_rules,
     trades_from_swap_api,
 )
+from rugbot.execution.auto_router import AutoRouter, RouteVenue
 from rugbot.ingest.pump.create_event_decoder import decode_pump_create_event_logs
 from rugbot.ingest.pump.pump_create_observation import (
     decode_pump_create_v2_observation,
@@ -132,3 +133,19 @@ def test_create_event_decodes_on_reference_launch() -> None:
     event = decode_pump_create_event_logs(logs, as_of_slot=observation.slot)
     assert event is not None and not hasattr(event, "reason")
     assert event.mint_pubkey == ZKASH_MINT
+
+
+GRADUATED_MINT = "279mMFSUjS2kg4S3yQwwv3zZBqCtZ1Quvmg8FUHYpump"
+
+
+def test_router_sends_graduated_coins_to_pumpswap() -> None:
+    async def check() -> None:
+        router = AutoRouter(endpoint=os.environ["SOLANA_RPC_HTTP"])
+        assert await router.detect_venue(GRADUATED_MINT) is RouteVenue.PUMPSWAP_AMM
+        pool = await router.get_pumpswap_pool_info(GRADUATED_MINT)
+        assert pool is not None
+        base, quote = await router.get_pool_reserves(pool[1])
+        assert base > 0
+        assert quote > 0
+
+    asyncio.run(check())

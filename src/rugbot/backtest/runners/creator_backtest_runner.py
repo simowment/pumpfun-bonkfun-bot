@@ -7,13 +7,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from rugbot.domain.fees import FeeConfig
-from rugbot.domain.quote_engine import (
-    PoolReserves,
-    executable_buy_quote,
-    executable_sell_quote,
-)
-from rugbot.domain.quotes import QuotePath
+from rugbot.domain.amounts import LAMPORTS_PER_SOL
+from rugbot.domain.pump_curve import MIN_PRICE_MULTIPLE, curve_buy, curve_sell
 from rugbot.utils.logger import get_logger
 
 _FIXED_STOP_SCENARIO_WARNING = (
@@ -23,48 +18,6 @@ _FIXED_STOP_SCENARIO_WARNING = (
 )
 
 logger = get_logger(__name__)
-
-LAMPORTS_PER_SOL = 1_000_000_000
-
-DEFAULT_FEE_CONFIG = FeeConfig(
-    version="pump-global-v1",
-    protocol_fee_bps=95,
-    creator_fee_bps=30,
-    is_known=True,
-    program_config_version="pump-global-v1",
-    valid_from_slot=0,
-    valid_to_slot=None,
-    source_artifact_version="pump-global-v1",
-    lp_fee_bps=0,
-)
-
-_SYNTH_VIRTUAL_BASE: int = 1_073_000_000_000_000
-_SYNTH_REAL_BASE: int = 800_000_000_000_000
-_SYNTH_REAL_QUOTE: int = 30_000_000_000
-
-
-def _synthetic_reserves(price_ppm: int, slot: int) -> PoolReserves:
-    if price_ppm <= 0:
-        price_ppm = 1
-    v_base = _SYNTH_VIRTUAL_BASE
-    v_quote = max(1, (v_base * price_ppm) // 1_000_000)
-    if v_quote > 10_000_000_000_000:
-        scale = v_quote // 10_000_000_000_000 + 1
-        v_quote //= scale
-        v_base //= scale
-    return PoolReserves(
-        virtual_base_reserves=v_base,
-        virtual_quote_reserves=v_quote,
-        real_base_reserves=_SYNTH_REAL_BASE,
-        real_quote_reserves=_SYNTH_REAL_QUOTE,
-        is_complete=False,
-        as_of_slot=slot,
-        base_decimals=6,
-        quote_decimals=9,
-        decoder_version="pump-bc-v1-synth",
-        idl_hash="synthetic",
-        program_config_version="pump-global-v1",
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,61 +84,14 @@ class CreatorBacktestReport:
 def _net_pnl_for_multiplier(
     multiplier: float, config: CreatorBacktestConfig
 ) -> tuple[float, float]:
-    """Net PnL and fees for exiting at given multiplier using quote_engine.
-
-    Falls back to simple fee model if quote_engine abstains.
-    """
+    """Net PnL and fees: buy at launch price, sell at ``multiplier`` x it."""
     lamports = int(config.quote_size_sol * LAMPORTS_PER_SOL)
-    entry_ppm = 1_000_000
-    exit_ppm = max(1, int(entry_ppm * multiplier))
-    # fees via quote engine synthetic
-    try:
-        from rugbot.domain.decisions import AbstainResult as AR
-
-        buy_q = executable_buy_quote(
-            path=QuotePath.PUMP_BONDING_CURVE,
-            reserves=_synthetic_reserves(entry_ppm, 0),
-            quote_input_amount=lamports,
-            fee_config=DEFAULT_FEE_CONFIG,
-        )
-        if isinstance(buy_q, AR):
-            buy_fee = int(lamports * 0.0125)
-            buy_out = lamports
-        else:
-            buy_fee = int(buy_q.fee_amount_base_units)
-            buy_out = int(buy_q.output_amount_base_units)
-        sell_q = executable_sell_quote(
-            path=QuotePath.PUMP_BONDING_CURVE,
-            reserves=_synthetic_reserves(exit_ppm, 0),
-            base_input_amount=max(1, buy_out),
-            fee_config=DEFAULT_FEE_CONFIG,
-        )
-        if isinstance(sell_q, AR):
-            proceeds = int(lamports * multiplier * 0.9875)
-            sell_fee = int(proceeds * 0.0125)
-        else:
-            proceeds = int(sell_q.output_amount_base_units)
-            sell_fee = int(sell_q.fee_amount_base_units)
-        gas = int(config.gas_fee_sol * LAMPORTS_PER_SOL)
-        total_fees = buy_fee + sell_fee + gas
-        net = proceeds - lamports - gas
-        # include slippage penalty
-        slip = config.slippage_pct / 100.0
-        if multiplier > 1:
-            net -= lamports * multiplier * slip
-            total_fees += int(lamports * multiplier * slip)
-        else:
-            net -= lamports * slip
-            total_fees += int(lamports * slip)
-        return net / LAMPORTS_PER_SOL, total_fees / LAMPORTS_PER_SOL
-    except Exception:
-        gross = lamports * (multiplier - 1) / LAMPORTS_PER_SOL
-        fees = (
-            lamports * 0.025 / LAMPORTS_PER_SOL
-            + config.gas_fee_sol
-            + lamports * config.slippage_pct / 100 / LAMPORTS_PER_SOL
-        )
-        return gross - fees, fees
+    tokens, buy_fee = curve_buy(1.0, lamports)
+    proceeds, sell_fee = curve_sell(max(multiplier, MIN_PRICE_MULTIPLE), tokens)
+    gas = int(config.gas_fee_sol * LAMPORTS_PER_SOL)
+    slip = int(lamports * max(multiplier, 1.0) * config.slippage_pct / 100.0)
+    net = proceeds - lamports - gas - slip
+    return net / LAMPORTS_PER_SOL, (buy_fee + sell_fee + gas + slip) / LAMPORTS_PER_SOL
 
 
 def _simulate_observed_exit(

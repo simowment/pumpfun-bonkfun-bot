@@ -10,13 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from rugbot.backtest.trajectory.finalized_trade_builder import (
-    decode_pump_trade_event,
-    pump_trade_payloads,
-)
 from rugbot.domain.decisions import AbstainResult
 from rugbot.domain.pump_curve import market_cap_lamports
 from rugbot.domain.trades import PumpTradeEventProof
+from rugbot.ingest.pump.trade_event_decoder import (
+    decode_pump_trade_event,
+    pump_trade_payloads,
+)
 from rugbot.interfaces.cli.tracker import main as tracker_cli
 from rugbot.runtime.workers.paper_desk import PaperDesk, tx_cost_lamports
 from rugbot.storage.config_store import ConfigStore

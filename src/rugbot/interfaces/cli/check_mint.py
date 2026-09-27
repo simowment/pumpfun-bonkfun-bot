@@ -14,6 +14,7 @@ from typing import Any
 
 from sol_trade_sdk.solana.provider_pool import SyncRpcProviderPool
 
+from rugbot.domain.amounts import LAMPORTS_PER_SOL
 from rugbot.integrations.pumpfun_creator_index import fetch_pumpfun_created_tokens
 from rugbot.intelligence.token_resolver import (
     fetch_token_metadata,
@@ -53,8 +54,7 @@ def _short_sig(sig: str) -> str:
     return f"{sig[:6]}…{sig[-4:]}" if len(sig) >= 12 else sig
 
 
-_LAMPORTS_PER_SOL = 1_000_000_000
-_MOTHER_THRESHOLD_LAMPORTS = 200 * _LAMPORTS_PER_SOL
+_MOTHER_THRESHOLD_LAMPORTS = 200 * LAMPORTS_PER_SOL
 _MAX_SIGS = 100
 
 
@@ -396,16 +396,16 @@ def _finalize_funding_chain(
     if not all_rows:
         return [], None
     all_rows.sort(key=lambda x: (int(x["slot"]), x["lamports"]))
-    small = [r["lamports"] for r in all_rows if r["lamports"] < 10 * _LAMPORTS_PER_SOL]
+    small = [r["lamports"] for r in all_rows if r["lamports"] < 10 * LAMPORTS_PER_SOL]
     common = Counter(small).most_common(1)
     summary = None
     if common:
         amt, cnt = common[0]
         if cnt >= 2 or (amt in [r["lamports"] for r in funder_map.values()]):
             summary = (
-                f"{amt / _LAMPORTS_PER_SOL:.3f} SOL recurrent ×{cnt}"
+                f"{amt / LAMPORTS_PER_SOL:.3f} SOL recurrent ×{cnt}"
                 if cnt >= 2
-                else f"{amt / _LAMPORTS_PER_SOL:.3f} SOL"
+                else f"{amt / LAMPORTS_PER_SOL:.3f} SOL"
             )
     return all_rows, summary
 
@@ -1199,7 +1199,7 @@ def main(argv: list[str] | None = None) -> int:
             for idx, r in enumerate(
                 sorted(funding_rows, key=lambda x: int(x["slot"])), start=1
             ):
-                amt_sol = r["lamports"] / _LAMPORTS_PER_SOL
+                amt_sol = r["lamports"] / LAMPORTS_PER_SOL
                 amt_str = f"{amt_sol:.3f} SOL"
                 if amt_counts[r["lamports"]] >= 2:
                     amt_str += "*"
@@ -1226,7 +1226,7 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         if is_sub or (
                             r["from"] in relay_addrs
-                            and r["lamports"] < 20 * _LAMPORTS_PER_SOL
+                            and r["lamports"] < 20 * LAMPORTS_PER_SOL
                         ):
                             # heuristic: small recurrent funding from intermediate
                             has_mother_upstream = any(
@@ -1238,7 +1238,7 @@ def main(argv: list[str] | None = None) -> int:
                                 "Sous-Mere"
                                 if has_mother_upstream
                                 else "Sous-Mere"
-                                if r["lamports"] < 20 * _LAMPORTS_PER_SOL
+                                if r["lamports"] < 20 * LAMPORTS_PER_SOL
                                 and amt_counts[r["lamports"]] >= 2
                                 else "CEX"
                             )
@@ -1249,7 +1249,7 @@ def main(argv: list[str] | None = None) -> int:
                             role = (
                                 "CEX"
                                 if amt_counts[r["lamports"]] >= 1
-                                and r["lamports"] < 10 * _LAMPORTS_PER_SOL
+                                and r["lamports"] < 10 * LAMPORTS_PER_SOL
                                 else "Funder"
                             )
                     # burner target marker
@@ -1263,11 +1263,11 @@ def main(argv: list[str] | None = None) -> int:
                 elif r["to"] in relay_addrs:
                     role = (
                         "Master->Sous-Mere"
-                        if r["lamports"] >= 50 * _LAMPORTS_PER_SOL
+                        if r["lamports"] >= 50 * LAMPORTS_PER_SOL
                         else "Sous-Mere"
                     )
                 else:
-                    role = "CEX" if r["lamports"] < 10 * _LAMPORTS_PER_SOL else "Funder"
+                    role = "CEX" if r["lamports"] < 10 * LAMPORTS_PER_SOL else "Funder"
                 # override: if lamports large => Master
                 if r["lamports"] >= _MOTHER_THRESHOLD_LAMPORTS:
                     role = "Master"
@@ -1283,7 +1283,7 @@ def main(argv: list[str] | None = None) -> int:
                 chain = [r for r in funding_rows if r["to"] == target]
                 if chain:
                     c = sorted(chain, key=lambda x: int(x["slot"]))[0]
-                    amt = c["lamports"] / _LAMPORTS_PER_SOL
+                    amt = c["lamports"] / LAMPORTS_PER_SOL
                     src_short = _short(c["from"])
                     tgt_short = _short(c["to"])
                     print(
