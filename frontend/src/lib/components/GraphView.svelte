@@ -47,12 +47,12 @@
     return item?.symbol || item?.name || shortId(mint, 4, 4);
   }
 
-  function latestTimestamp(reportData, source, target) {
-    const timestamps = (reportData?.transfers || [])
-      .filter((transfer) => transfer?.source === source && transfer?.target === target)
-      .map((transfer) => Number(transfer.timestamp))
-      .filter((timestamp) => Number.isFinite(timestamp) && timestamp > 0);
-    return timestamps.length ? Math.max(...timestamps) : null;
+  function curveSymbols(reportData) {
+    const curves = new Map();
+    for (const item of [...(reportData?.launches || []), ...(reportData?.entity_mints || [])]) {
+      if (item?.bonding_curve) curves.set(item.bonding_curve, item.symbol || shortId(item.mint, 4, 4));
+    }
+    return curves;
   }
 
   function assetKind(edge) {
@@ -61,6 +61,7 @@
 
   function edgeRows(reportData, wallet, direction) {
     const edges = reportData?.graph?.edges || reportData?.graph?.links || [];
+    const curves = curveSymbols(reportData);
     const grouped = new Map();
 
     for (const edge of edges) {
@@ -80,10 +81,11 @@
         kind,
         assetId,
         symbol: kind === 'native' ? 'SOL' : symbolFor(reportData, assetId),
+        curveOf: curves.get(peer) || null,
+        decimals: edge?.token_decimals ?? null,
         volumeLamports: 0,
         volumeBaseUnits: 0,
         transfers: 0,
-        lastSlot: 0,
         lastTimestamp: null,
         source,
         target,
@@ -92,9 +94,8 @@
       current.volumeLamports += Number(edge?.amount_lamports || 0);
       current.volumeBaseUnits += Number(edge?.amount_base_units || 0);
       current.transfers += Number(edge?.transfer_count || 0);
-      current.lastSlot = Math.max(current.lastSlot, Number(edge?.last_slot || 0));
-      const timestamp = latestTimestamp(reportData, source, target);
-      current.lastTimestamp = Math.max(current.lastTimestamp || 0, timestamp || 0) || null;
+      const timestamp = Number(edge?.last_block_time || 0);
+      current.lastTimestamp = Math.max(current.lastTimestamp || 0, timestamp) || null;
       grouped.set(key, current);
     }
 
@@ -115,13 +116,12 @@
     return edgeRows(card.report, card.wallet, direction).filter(inWindow);
   }
 
-  function formatTokenUnits(row) {
-    if (!row.volumeBaseUnits) return '0';
-    return `${new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 }).format(row.volumeBaseUnits)} raw`;
-  }
+  const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 });
 
   function formatVolume(row) {
-    return row.kind === 'native' ? formatSol(row.volumeLamports) : formatTokenUnits(row);
+    if (row.kind === 'native') return `${formatSol(row.volumeLamports)} SOL`;
+    if (row.decimals === null) return `${compact.format(row.volumeBaseUnits)} raw ${row.symbol}`;
+    return `${compact.format(row.volumeBaseUnits / 10 ** row.decimals)} ${row.symbol}`;
   }
 
   function formatLast(row) {
@@ -132,7 +132,7 @@
       if (elapsed < 86400) return `${Math.floor(elapsed / 3600)}h`;
       return `${Math.floor(elapsed / 86400)}d`;
     }
-    return row.lastSlot ? `slot ${row.lastSlot}` : '—';
+    return '—';
   }
 
   function cardRows(card) {
@@ -264,7 +264,7 @@
             <div class="card-title"><span class="direction to">To</span> {shortId(traceRoot.wallet, 6, 6)} <span class="count-badge">{incomingRows.length}</span></div>
             <span class="window-chip">{WINDOWS.find((item) => item.value === selectedWindow)?.label}</span>
           </header>
-          <div class="table-head"><span>Wallet</span><span>Volume ↓</span><span>Transfers</span><span>Last</span><span aria-hidden="true"></span></div>
+          <div class="table-head"><span>Wallet</span><span>Volume ↓</span><span>Txs</span><span>Last</span><span aria-hidden="true"></span></div>
           {#if incomingRows.length === 0}
             <div class="card-empty">No incoming transfers observed.</div>
           {:else}
@@ -272,10 +272,10 @@
               <div class="transfer-row">
                 <button class="wallet-label" onclick={() => selectWallet(row)} title={row.peer}>
                   <span class="asset-dot wallet-dot">W</span>
-                  <span class="wallet-text">{shortId(row.peer, 5, 5)}</span>
+                  <span class="wallet-text">{row.curveOf ? `${row.curveOf} curve` : shortId(row.peer, 5, 5)}</span>
                   <span class="external">↗</span>
                 </button>
-                <span class="volume">{formatVolume(row)}{row.kind === 'token' ? ` · ${row.symbol}` : ' SOL'}</span>
+                <span class="volume" title={formatVolume(row)}>{formatVolume(row)}</span>
                 <span class="metric">{row.transfers || 1}</span>
                 <span class="last">{formatLast(row)}</span>
                 <button class="trace-arrow" class:busy={loadingAddress === row.peer} onclick={() => traceRow({ ...traceRoot, mode: 'to', id: 'root-in' }, row)} title="Continue tracing this wallet" aria-label={`Trace ${shortId(row.peer)}`}>{loadingAddress === row.peer ? '…' : '→'}</button>
@@ -303,7 +303,7 @@
             <div class="card-title"><span class="direction from">From</span> {shortId(traceRoot.wallet, 6, 6)} <span class="count-badge">{outgoingRows.length}</span></div>
             <span class="window-chip">{WINDOWS.find((item) => item.value === selectedWindow)?.label}</span>
           </header>
-          <div class="table-head"><span>Wallet / token</span><span>Volume ↓</span><span>Transfers</span><span>Last</span><span aria-hidden="true"></span></div>
+          <div class="table-head"><span>Wallet / token</span><span>Volume ↓</span><span>Txs</span><span>Last</span><span aria-hidden="true"></span></div>
           {#if outgoingRows.length === 0}
             <div class="card-empty">No outgoing transfers observed.</div>
           {:else}
@@ -311,10 +311,10 @@
               <div class="transfer-row">
                 <button class="wallet-label" onclick={() => selectWallet(row)} title={row.peer}>
                   <span class="asset-dot {row.kind === 'token' ? 'token-dot' : 'wallet-dot'}">{row.kind === 'token' ? '◆' : 'W'}</span>
-                  <span class="wallet-text">{shortId(row.peer, 5, 5)}</span>
+                  <span class="wallet-text">{row.curveOf ? `${row.curveOf} curve` : shortId(row.peer, 5, 5)}</span>
                   <span class="external">↗</span>
                 </button>
-                <span class="volume">{formatVolume(row)}{row.kind === 'token' ? ` · ${row.symbol}` : ' SOL'}</span>
+                <span class="volume" title={formatVolume(row)}>{formatVolume(row)}</span>
                 <span class="metric">{row.transfers || 1}</span>
                 <span class="last">{formatLast(row)}</span>
                 <button class="trace-arrow" class:busy={loadingAddress === row.peer} onclick={() => traceRow({ ...traceRoot, mode: 'from', id: 'root-out' }, row)} title="Continue tracing this wallet" aria-label={`Trace ${shortId(row.peer)}`}>{loadingAddress === row.peer ? '…' : '→'}</button>
@@ -342,7 +342,7 @@
                 <a class="icon-button" href={accountLinks(card.wallet).solscan} target="_blank" rel="noreferrer" title="Open in Solscan">↗</a>
               </div>
             </header>
-            <div class="table-head"><span>Wallet / token</span><span>Volume ↓</span><span>Transfers</span><span>Last</span><span aria-hidden="true"></span></div>
+            <div class="table-head"><span>Wallet / token</span><span>Volume ↓</span><span>Txs</span><span>Last</span><span aria-hidden="true"></span></div>
             {#if loadingAddress === card.wallet}
               <div class="card-empty loading">Tracing finalized transfers…</div>
             {:else if cardRows(card).length === 0}
@@ -352,10 +352,10 @@
                 <div class="transfer-row">
                   <button class="wallet-label" onclick={() => selectWallet(row)} title={row.peer}>
                     <span class="asset-dot {row.kind === 'token' ? 'token-dot' : 'wallet-dot'}">{row.kind === 'token' ? '◆' : 'W'}</span>
-                    <span class="wallet-text">{shortId(row.peer, 5, 5)}</span>
+                    <span class="wallet-text">{row.curveOf ? `${row.curveOf} curve` : shortId(row.peer, 5, 5)}</span>
                     <span class="external">↗</span>
                   </button>
-                  <span class="volume">{formatVolume(row)}{row.kind === 'token' ? ` · ${row.symbol}` : ' SOL'}</span>
+                  <span class="volume" title={formatVolume(row)}>{formatVolume(row)}</span>
                   <span class="metric">{row.transfers || 1}</span>
                   <span class="last">{formatLast(row)}</span>
                   <button class="trace-arrow" class:busy={loadingAddress === row.peer} onclick={() => traceRow(card, row)} title="Continue tracing this wallet" aria-label={`Trace ${shortId(row.peer)}`}>{loadingAddress === row.peer ? '…' : '→'}</button>
@@ -437,13 +437,13 @@
   .trace-lane { display: flex; align-items: center; min-width: max-content; min-height: 360px; }
 
   .transfer-card {
-    width: 330px;
+    width: 380px;
     background: #151b2c;
     border: 1px solid #293451;
     border-radius: 7px;
     box-shadow: 0 10px 25px rgba(0, 0, 0, .18);
     overflow: hidden;
-    flex: 0 0 330px;
+    flex: 0 0 380px;
   }
   .card-header { min-height: 42px; padding: 8px 10px; justify-content: space-between; gap: 8px; border-bottom: 1px solid #293451; }
   .card-title { gap: 5px; font: 650 12px var(--font-mono); white-space: nowrap; }
@@ -456,7 +456,7 @@
   .icon-button { display: inline-flex; align-items: center; justify-content: center; padding: 3px 5px; color: #8d99bd; background: transparent; text-decoration: none; }
   .icon-button:hover { color: #eeeaff; background: #252a42; }
 
-  .table-head, .transfer-row { display: grid; grid-template-columns: minmax(94px, 1fr) 60px 43px 40px 24px; align-items: center; column-gap: 3px; }
+  .table-head, .transfer-row { display: grid; grid-template-columns: minmax(110px, 1fr) 104px 34px 38px 24px; align-items: center; column-gap: 6px; }
   .transfer-row { position: relative; }
   .table-head { padding: 7px 8px; color: #687492; font-size: 9px; text-transform: uppercase; letter-spacing: .04em; }
   .transfer-row { min-height: 43px; padding: 5px 8px; border-top: 1px solid #202a42; font-size: 10px; }

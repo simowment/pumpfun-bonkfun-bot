@@ -56,9 +56,9 @@
       t.actor_role || 'Master Deployer',
       t.mint,
       t.launch_time,
-      t.initial_sol || t.initial_dev_sol || 0.05,
-      t.ath_mc || t.peak_mc || `$${((t.ath_mc_usd || 15000) / 1000).toFixed(1)}K`,
-      t.current_mc || `$${((t.current_mc_usd || 2620) / 1000).toFixed(2)}K`,
+      t.initial_sol ?? '',
+      t.ath_mc_usd ?? '',
+      t.current_mc_usd ?? '',
       t.peak_mult,
       t.time_to_peak_s,
       t.status,
@@ -165,7 +165,7 @@
             <th>TIMESTAMP</th>
             <th>PEAK ATH MC (USD)</th>
             <th>CURRENT MC (USD)</th>
-            <th>BUY SIZE</th>
+            <th>BUNDLE WALLETS</th>
             <th>TIME TO PEAK</th>
             <th>STATUS</th>
           </tr>
@@ -203,7 +203,7 @@
               <td class="current-mc-cell text-muted">
                 {t.current_mc || (t.current_mc_usd != null ? `$${(t.current_mc_usd / 1000).toFixed(2)}K` : '—')}
               </td>
-              <td class="mono-addr">{t.initial_sol != null ? `${t.initial_sol.toFixed(4)} SOL` : (t.initial_dev_sol != null ? `${t.initial_dev_sol.toFixed(4)} SOL` : '—')}</td>
+              <td class="mono-addr">{t.bundle_wallets ?? '—'}</td>
               <td>{t.time_to_peak_s != null ? `${t.time_to_peak_s.toFixed(0)}s` : '—'}</td>
               <td>
                 {#if t.status === 'ACTIVE_CURVE'}

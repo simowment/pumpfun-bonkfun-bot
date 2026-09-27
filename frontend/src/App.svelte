@@ -51,62 +51,45 @@
   function roleCount(role) {
     return graphNodes.filter((n) => (n.roles || []).includes(role)).length;
   }
+  // created_at is seconds on own launches and milliseconds on linked mints.
+  function launchTime(createdAt) {
+    if (!createdAt) return null;
+    const ms = createdAt > 1e12 ? createdAt : createdAt * 1000;
+    return new Date(ms).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+  }
+
+  function tokenRow(item, own) {
+    const bundleWallets = (item.bundle_buys || []).length;
+    return {
+      mint: item.mint,
+      symbol: item.symbol || shortAddr(item.mint),
+      name: item.name || '',
+      action: own ? 'LAUNCHED' : 'LINKED LAUNCH',
+      action_type: 'launch',
+      actor_wallet: item.creator,
+      actor_role: own ? 'Scanned creator' : 'Linked creator',
+      creator: item.creator,
+      launch_time: launchTime(item.created_at),
+      bundle_wallets: own ? null : bundleWallets,
+      early_position: item.position_is_zero_or_one,
+      links: {
+        pumpfun: `https://pump.fun/coin/${item.mint}`,
+        solscan: `https://solscan.io/token/${item.mint}`,
+      },
+    };
+  }
+
+  // The scanned wallet's own launches plus launches by linked creator wallets.
   const dynamicTokens = $derived.by(() => {
-    if (analysis?.entity_mints && analysis.entity_mints.length > 0) {
-      return analysis.entity_mints.map((t) => ({
-        mint: t.mint,
-        symbol: t.symbol || t.mint.slice(0, 4).toUpperCase(),
-        name: t.name || `Token ${t.mint.slice(0, 4).toUpperCase()}`,
-        action: t.action || (t.is_creator ? 'LAUNCHED' : 'BOUGHT'),
-        action_type: t.action_type || (t.is_creator ? 'launch' : 'buy'),
-        actor_wallet: t.actor_wallet || t.creator_wallet || analysis?.tracking_address || searchQuery,
-        actor_role: t.actor_role || (t.is_creator ? 'Master Deployer' : 'Bundler / Satellite'),
-        creator: t.creator_wallet || analysis?.tracking_address || searchQuery,
-        launch_time: t.timestamp ? new Date(t.timestamp * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC' : null,
-        initial_sol: t.initial_sol ?? null,
-        ath_mc_usd: t.ath_mc_usd ?? null,
-        ath_mc: t.ath_mc || null,
-        current_mc_usd: t.current_mc_usd ?? null,
-        current_mc: t.current_mc || null,
-        peak_mult: t.peak_mult ?? (t.ath_multiplier != null ? Number(t.ath_multiplier) : null),
-        time_to_peak_s: t.seconds_to_ath ?? null,
-        status: t.status || null,
-        links: {
-          pumpfun: `https://pump.fun/coin/${t.mint}`,
-          photon: `https://photon-sol.tinyastro.io/en/lp/${t.mint}`,
-          dexscreener: `https://dexscreener.com/solana/${t.mint}`,
-          solscan: `https://solscan.io/token/${t.mint}`,
-        },
-      }));
+    const rows = new Map();
+    for (const launch of analysis?.launches ?? []) rows.set(launch.mint, tokenRow(launch, true));
+    for (const mint of analysis?.entity_mints ?? []) {
+      if (!rows.has(mint.mint)) rows.set(mint.mint, tokenRow(mint, false));
     }
-    if (state?.launches && state.launches.length > 0) {
-      return state.launches.map((l) => ({
-        mint: l.mint,
-        symbol: l.symbol || l.mint.slice(0, 4).toUpperCase(),
-        name: l.name || `Token ${l.mint.slice(0, 4).toUpperCase()}`,
-        action: 'LAUNCHED',
-        action_type: 'launch',
-        actor_wallet: l.creator || searchQuery,
-        actor_role: 'Master Deployer',
-        creator: l.creator || searchQuery,
-        launch_time: l.created_at ? new Date(l.created_at * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC' : null,
-        initial_sol: null,
-        ath_mc_usd: null,
-        ath_mc: null,
-        current_mc_usd: null,
-        current_mc: null,
-        peak_mult: null,
-        time_to_peak_s: null,
-        status: null,
-        links: {
-          pumpfun: `https://pump.fun/coin/${l.mint}`,
-          photon: `https://photon-sol.tinyastro.io/en/lp/${l.mint}`,
-          dexscreener: `https://dexscreener.com/solana/${l.mint}`,
-          solscan: `https://solscan.io/token/${l.mint}`,
-        },
-      }));
+    if (rows.size === 0) {
+      for (const launch of state?.launches ?? []) rows.set(launch.mint, tokenRow(launch, true));
     }
-    return [];
+    return [...rows.values()].sort((a, b) => (b.launch_time || '').localeCompare(a.launch_time || ''));
   });
 
   async function loadEntityScanHistory(address) {
@@ -177,6 +160,24 @@
     }
   }
 
+  const BACKFILL_POLL_MS = 3000;
+  const BACKFILL_POLL_LIMIT = 60;
+
+  // A scan returns before its history backfill finishes; re-read the cached
+  // report until the backfill reports complete so linked launches appear.
+  async function followBackfill(query, polls = 0) {
+    if (analysis?.backfill?.status === 'complete' || polls >= BACKFILL_POLL_LIMIT) return;
+    await new Promise((resolve) => setTimeout(resolve, BACKFILL_POLL_MS));
+    if (searchQuery.trim() !== query) return;
+    try {
+      const cached = await fetchCachedEntity(query);
+      if (cached?.data) analysis = cached.data;
+    } catch {
+      // The report is not cached until the first backfill page is written.
+    }
+    await followBackfill(query, polls + 1);
+  }
+
   async function handleScan(targetAddr = null) {
     const query = (targetAddr || searchQuery).trim();
     if (!query) return;
@@ -189,6 +190,7 @@
         analysis = res.data;
         updateSelectedFromAnalysis(res.data);
         await loadEntityScanHistory(res.data.tracking_address || query);
+        followBackfill(query);
         activeBottomTab = 'scans';
         statusMessage = `Discovered on-chain entity: ${shortAddr(res.data.tracking_address || query)}`;
       } else {
