@@ -35,28 +35,30 @@ chemin d'intégration réaliste a été exécuté et observé.
   trompeuses (bundles d'auto-achat, faux locks Streamflow, wash trading).
 
 ### Dette technique connue
-- [ ] `execution/trade_service.py` calcule les quotes comme si la courbe était
-  à l'état initial (30 SOL / 1,073 B) — faux pour tout coin ayant bougé. Chemin
-  d'exécution : à corriger avant tout live.
-- [ ] Constantes de courbe dupliquées dans 7 fichiers → une seule source.
-- [ ] 3 décodeurs `TradeEvent` parallèles → un seul.
+Réglé par l'audit du 2026-09-27 : faux fills de `trade_service` (courbe de
+lancement / pool PumpSwap inventés), routage PumpSwap jamais fonctionnel
+(`AutoRouter`), décodeur FeeConfig (champ `exotic_flat_fees`), constantes de
+courbe dupliquées, 3 décodeurs `TradeEvent`, backtests à réserves
+« synthétiques » (fallback 1,25 % permanent), faux liens du graphe d'entité,
+7 tests en échec (fuite d'env).
 - [ ] `sol-trade-sdk` : pool RPC en failover seulement (Helius → Alchemy) ;
   ajouter un round-robin ; `client.py` demande encore `maxSupportedTransactionVersion: 0` ;
   décodeurs pump probablement antérieurs à l'upgrade creator-fee ; package
   top-level nommé `src`.
 - [ ] `rug_intel check` : montants SOL affichés = plafond de slippage, pas le coût réel ;
   section market sans trades on-chain (utiliser `fetch_all_trades`).
-- [ ] Supprimer les 26 fichiers de tests mockés (liste dans l'historique de session).
-- [ ] 185 erreurs ruff préexistantes (push du 2026-09-25).
-- [ ] `rug_intel graph` : les achats tiers du coin d'un dev (via routeur, ex. `FLASHX…`)
-  sont comptés comme transferts vers/depuis le dev → faux liens (courbe de bonding
-  prise pour un wallet, créateurs sans rapport à depth 2). Exclure les tx Pump
-  buy/sell du traçage de transferts.
+- [ ] Deux moteurs de sorties papier en plus de `playbook_rules` :
+  `core/decision/take_profit|trailing_stop` (cabal executor, launch exit
+  controller) → les porter sur `playbook_rules` / le desk, puis supprimer `core/`.
+- [ ] `trade_service` (web `/api/trade`) garde son propre moteur TP/SL et ses
+  positions ; à terme le brancher sur le desk papier (`rug_run`).
+- [ ] Tests fortement mockés restants (market_data, wallet_trade_source,
+  discord, pumpfun_rest_cache…) : remplacer par des tests live/fixtures quand
+  ils touchent un contrat RPC.
+- [ ] ~180 erreurs ruff préexistantes (surtout `except Exception` silencieux).
 - [ ] Scans RPC lents sur plan gratuit (~10 req/s, pacing 0,12 s) : un hub de
   1000+ tx + relais = plusieurs minutes. Évaluer Helius payant / historique
   enrichi avant d'investir dans le traçage Type 2.
-- [ ] 7 tests échouent déjà sur HEAD (env/état local : `SOLANA_RPC_HTTP` absent,
-  fastapi/tui/discord/screener/cabal_verification).
 
 ## Parité F Project (paper) — reste à faire
 Fait : `rug_tracker` (trackers, groupes, presets, règles complètes), `rug_run`
