@@ -227,6 +227,9 @@ demonstrate a fully executable, net-profitable exit in paper/backtest mode?
 4. Defer dashboards, UI, deployment automation, multi-provider abstractions,
    optional low-latency transports, generalized plugin systems, broad refactors,
    and operational polish unless required to validate a core decision path.
+   Exception (user decision, 2026-09-27): the existing interfaces — CLI, web,
+   TUI, Discord and Telegram — are kept and MUST NOT be deleted in cleanups.
+   Overlapping analysis tools are merged, never dropped.
 5. State the concrete core behavior enabled, keep changes within a disjoint
    scope, add focused tests, and stop when the acceptance behavior is proven. Do
    not expand a task because a more general architecture would be interesting.
@@ -312,7 +315,7 @@ Restart any running bots after dependency changes. Keep compatibility with Pytho
 | `uv run ruff check` | Run linting checks |
 | `uv run ruff check --fix` | Auto-fix linting issues where possible |
 | `uv run pytest` | Run the test suite |
-| `uv run rug_watch --once` | Run one finalized read-only pass (DB config in `state.sqlite3`) |
+| `uv run rug_run --seconds 60` | Paper-trade every enabled tracker for one minute |
 | `uv run python -m rugbot.backtest.cli --input fixtures/backtest/demo.json --pretty` | Run the canonical leakage-safe demo backtest |
 
 ## 14. Safety

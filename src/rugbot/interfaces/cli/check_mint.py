@@ -685,7 +685,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "One-liner token check: creation slot/tx, creator, bundle B0/B1, "
             "rugged/ATH verdict, RECOMMENDED copytrade wallet. "
-            "Live feed: rug_watch --stream or rug_live or rug_web"
+            "Live: rug_run (paper desk) or rug_web"
         ),
     )
     p.add_argument("mint", help="Pump mint address to inspect")
@@ -748,8 +748,6 @@ def main(argv: list[str] | None = None) -> int:
     rpc = args.rpc or providers.rpc_http
     fallback = providers.rpc_http_fallbacks
 
-    # Live alias hint: document that rug_live == rug_watch --stream --mode observe
-    # (wired via pyproject.toml scripts rug_live).
     try:
         resolved = resolve_token_or_wallet(
             mint, rpc_url=rpc, fallback_endpoints=fallback
@@ -1100,7 +1098,7 @@ def main(argv: list[str] | None = None) -> int:
         "recommended_wallet": pick.wallet if pick else None,
         "why": why,
         "no_copy_aborted": no_copy,
-        "live_hint": "rug_watch --stream  |  rug_live  |  rug_web",
+        "live_hint": "rug_run  |  rug_web",
         "funding_chain": funding_rows,
         "funding_summary": funding_summary,
         "funding_error": funding_error,
@@ -1361,7 +1359,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"  snippet (filtres: max_entry_market_cap={_INSTALL_MAX_ENTRY_MCAP}, max_entry_transaction_index={_INSTALL_MAX_ENTRY_TXIDX}, history_sample_count={_INSTALL_HISTORY_SAMPLES}; sorties: take_profit +100, stop dev-sell):\n{_snippet}"
                 )
                 print("  next:")
-                print("    uv run rug_watch          # DB sniper config")
+                print("    uv run rug_run            # paper desk over your trackers")
                 print(
                     f'    curl -X POST http://localhost:8000/api/entity/track -H "Content-Type: application/json" -d \'{{"address": "{_addr}"}}\''
                 )
@@ -1445,5 +1443,5 @@ def main(argv: list[str] | None = None) -> int:
                         )
                     except Exception as exc:  # noqa: BLE001
                         print(f"  --apply failed (fail-closed): {exc}", file=sys.stderr)
-    print("  live: rug_watch --stream  |  rug_live  |  rug_web")
+    print("  live: rug_run  |  rug_web")
     return 0

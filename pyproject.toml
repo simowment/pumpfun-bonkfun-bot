@@ -44,8 +44,6 @@ dev = [
 ]
 
 [project.scripts]
-rug_watch = "rugbot.interfaces.cli.watch:main"
-rug_live = "rugbot.interfaces.cli.watch:main"
 rug_check = "rugbot.interfaces.cli.check_mint:main"
 rug_wallet = "rugbot.interfaces.cli.wallet:main"
 rug_target = "rugbot.interfaces.cli.wallet:main"
@@ -64,7 +62,6 @@ rug_cluster = "rugbot.interfaces.cli.cluster:main"
 rug_backtest = "rugbot.interfaces.cli.backtest:main"
 rug_entity_watch = "rugbot.interfaces.cli.entity_watch:main"
 rug_pairs_lab = "rugbot.interfaces.cli.pairs_lab:main"
-rug_trade = "rugbot.interfaces.cli.trade:main"
 rug_chain = "rugbot.interfaces.cli.chain:main"
 rug_graph = "rugbot.interfaces.cli.graph:main"
 rug_entity_history = "rugbot.interfaces.cli.entity_history:main"

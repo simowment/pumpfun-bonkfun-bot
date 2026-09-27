@@ -58,6 +58,17 @@ chemin d'intégration réaliste a été exécuté et observé.
 - [ ] 7 tests échouent déjà sur HEAD (env/état local : `SOLANA_RPC_HTTP` absent,
   fastapi/tui/discord/screener/cabal_verification).
 
+## Parité F Project (paper) — reste à faire
+Fait : `rug_tracker` (trackers, groupes, presets, règles complètes), `rug_run`
+(desk papier sur un flux Pump : snipe créations, copy buy, buy on dev sell,
+copy sells all/percent + délai), rapport `--report`.
+- [ ] Limits (acheter/vendre à un market cap cible, 10 max), sell after entry
+  (N blocs), sell initials (récupérer la mise), auto fees (priorité suivant le
+  réseau / surenchère « hardcore »).
+- [ ] Rugger protection auto-follow (last transfer / transfer ranges / hybrid),
+  papier seulement — autorisé par l'utilisateur le 2026-09-27.
+- [ ] Page web + API pour piloter les trackers et voir le desk.
+
 ## Phase 1 — Known-Wallet Sniper P0 (EN COURS)
 
 **Objectif** : un wallet développeur explicitement approuvé déclenche une

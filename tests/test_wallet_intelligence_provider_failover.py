@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import replace
 from pathlib import Path
 
 import base58
@@ -17,14 +16,6 @@ from rugbot.domain.decisions import AbstainResult
 from rugbot.ingest.rpc_observer import observe_address
 from rugbot.intelligence.token_resolver import resolve_token_or_wallet
 from rugbot.intelligence.wallet_intelligence import scan_wallet_intelligence
-from rugbot.interfaces.cli.watch import WatchCycleResult, run_watch_cycle
-from rugbot.runtime.config import (
-    ExecutionMode,
-    ListenerKind,
-    SniperTarget,
-    TargetKind,
-)
-from rugbot.storage.config_store import load_sniper_config_db
 from rugbot.storage.jsonl_observation_store import JsonlObservationStore
 
 WALLET = "2r2HuRi1vLzVxXnWAffWfsAMDkQpfG1c23KPDgR4wp5p"
@@ -274,60 +265,6 @@ async def test_token_resolution_reaches_fallback_after_primary_rate_limit() -> N
     assert resolved.is_token is False
     assert primary_methods == ["getAccountInfo"]
     assert fallback_methods == ["getAccountInfo"]
-
-
-@pytest.mark.anyio
-async def test_watch_cycle_reaches_standard_rpc_fallback(
-    tmp_path: Path,
-) -> None:
-    """Exercise canonical watch polling through one persistent provider pool."""
-
-    primary_methods: list[str] = []
-    fallback_methods: list[str] = []
-
-    async def rate_limited(request: web.Request) -> web.Response:
-        payload = await request.json()
-        primary_methods.append(payload["method"])
-        return web.json_response({"error": "rate limited"}, status=429)
-
-    async def healthy(request: web.Request) -> web.Response:
-        payload = await request.json()
-        method = payload["method"]
-        fallback_methods.append(method)
-        result: int | list[object] = 500 if method == "getSlot" else []
-        return web.json_response(
-            {"jsonrpc": "2.0", "id": payload["id"], "result": result}
-        )
-
-    primary_app = web.Application()
-    primary_app.router.add_post("/", rate_limited)
-    fallback_app = web.Application()
-    fallback_app.router.add_post("/", healthy)
-    config = load_sniper_config_db(tmp_path)
-    config = replace(
-        config,
-        target=SniperTarget(kind=TargetKind.WALLET, id=WALLET),
-        execution=replace(config.execution, mode=ExecutionMode.OBSERVE),
-        listener=ListenerKind.RPC,
-    )
-    async with (
-        TestServer(primary_app) as primary_server,
-        TestServer(fallback_app) as fallback_server,
-    ):
-        primary = str(primary_server.make_url("/"))
-        fallback = str(fallback_server.make_url("/"))
-        result = await run_watch_cycle(
-            config,
-            endpoint=primary,
-            state_dir=tmp_path,
-            max_transactions=1,
-            transport=RpcProviderPool((primary, fallback)),
-        )
-
-    assert isinstance(result, WatchCycleResult)
-    assert result.report.abstention is None
-    assert primary_methods == ["getSlot"]
-    assert fallback_methods == ["getSlot", "getSignaturesForAddress"]
 
 
 @pytest.mark.anyio
