@@ -261,6 +261,7 @@ def test_fastapi_exposes_persisted_state_without_seed_data(tmp_path: Path) -> No
             "disconnected",
             "pumpportal_live",
             "wss_live",
+            "unconfigured",
         }
         payload["observation"]["status"] = "configured"
         assert payload == {
@@ -530,6 +531,7 @@ def test_fastapi_websocket_starts_with_real_empty_state(tmp_path: Path) -> None:
         "disconnected",
         "pumpportal_live",
         "wss_live",
+        "unconfigured",
     }
 
 

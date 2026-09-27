@@ -1,5 +1,6 @@
 """Integration tests for the real-time screener service."""
 
+import os
 from pathlib import Path
 
 import base58
@@ -15,6 +16,13 @@ def core_instance(tmp_path: Path):
     return build_ui_runtime(state_dir=tmp_path)
 
 
+LIVE = pytest.mark.skipif(
+    os.environ.get("RUGBOT_LIVE_TESTS") != "1" or not os.environ.get("SOLANA_RPC_HTTP"),
+    reason="resolves a real token over RPC: RUGBOT_LIVE_TESTS=1 + SOLANA_RPC_HTTP",
+)
+
+
+@LIVE
 def test_screener_service_direct(core_instance) -> None:
     """Pending provider evidence must never enroll a tracker target."""
 

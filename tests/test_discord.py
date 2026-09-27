@@ -3,6 +3,7 @@
 """Comprehensive integration tests for the Discord Bot Interface and F-Project features."""
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -145,6 +146,13 @@ async def test_event_embed_builders(discord_adapter):
     assert embed_funded is not None
 
 
+LIVE = pytest.mark.skipif(
+    os.environ.get("RUGBOT_LIVE_TESTS") != "1" or not os.environ.get("SOLANA_RPC_HTTP"),
+    reason="resolves a real token over RPC: RUGBOT_LIVE_TESTS=1 + SOLANA_RPC_HTTP",
+)
+
+
+@LIVE
 @pytest.mark.anyio
 async def test_scan_embed_generation(discord_adapter, core_instance):
     """Verify /scan on-chain evaluation embed with TP optimization and Memecoin Bible verdict."""

@@ -19,6 +19,7 @@ def test_enroll_rejects_target_without_repeat_finalized_evidence(
     creator = "7SV5ocBq8EkKWsHH2ubB7yVAoTTdytt6FUVTeWw2GEbd"
     database_path = tmp_path / "tracker.db"
     monkeypatch.setenv("RUGBOT_DB_PATH", str(database_path))
+    monkeypatch.setenv("SOLANA_RPC_HTTP", "https://rpc.test")
     monkeypatch.setattr(
         wallet_cli,
         "resolve_token_or_wallet",
@@ -56,6 +57,7 @@ def test_enroll_force_allows_enrollment(monkeypatch, tmp_path, capsys) -> None:
     creator = "7SV5ocBq8EkKWsHH2ubB7yVAoTTdytt6FUVTeWw2GEbd"
     database_path = tmp_path / "tracker.db"
     monkeypatch.setenv("RUGBOT_DB_PATH", str(database_path))
+    monkeypatch.setenv("SOLANA_RPC_HTTP", "https://rpc.test")
     monkeypatch.setattr(
         wallet_cli,
         "resolve_token_or_wallet",

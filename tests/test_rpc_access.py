@@ -11,7 +11,6 @@ verification policy.
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -83,7 +82,7 @@ def stub_dotenv(monkeypatch: MonkeyPatch, file_values: dict[str, str]) -> None:
 
     def apply_file(**_kwargs: Any) -> None:
         for key, value in file_values.items():
-            os.environ[key] = value
+            monkeypatch.setenv(key, value)
 
     monkeypatch.setattr(config_module, "resolve_dotenv", apply_file)
 
