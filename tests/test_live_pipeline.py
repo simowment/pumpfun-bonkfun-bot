@@ -15,8 +15,8 @@ import pytest
 from rugbot.backtest.launch_replay import (
     LaunchReplay,
     ReplayCosts,
-    default_exit_rules,
     summarize_rules,
+    take_profit_rules,
     trades_from_swap_api,
 )
 from rugbot.discover.screen import ScreenFilters, screen_launches
@@ -79,8 +79,16 @@ def test_replay_ranks_exit_rules_on_real_trades() -> None:
         costs=ReplayCosts(entry_delay_slots=2),
     )
     assert replay.profile.entry_mc_sol > LAUNCH_MC_FLOOR_SOL
-    summaries = summarize_rules([replay], default_exit_rules())
+    assert trades[0].price_usd is not None
+    rules = take_profit_rules([replay.profile.ath_multiple])
+    summaries = summarize_rules([replay], rules)
     assert summaries[0].net_ev_sol >= summaries[-1].net_ev_sol
+    # The ATH-derived take-profit is in the grid, so the best TP can sit there.
+    assert any(
+        rule.take_profit_pct == int((replay.profile.ath_multiple - 1) * 100)
+        for rule in rules
+    )
+    assert not any(rule.exit_on_dev_sell for rule in rules)
 
 
 def test_live_creates_decode() -> None:

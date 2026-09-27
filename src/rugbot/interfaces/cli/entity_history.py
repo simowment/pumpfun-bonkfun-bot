@@ -22,13 +22,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rugbot.backtest.launch_replay import (
+    SIGNAL_SELL_RULE,
     LaunchReplay,
     LaunchReplayError,
     ReplayCosts,
     RuleSummary,
-    default_exit_rules,
     describe_exit_rule,
     summarize_rules,
+    take_profit_rules,
     trades_from_swap_api,
 )
 from rugbot.backtest.reporting.visualizer import (
@@ -349,7 +350,7 @@ def _render_backtest(
                 f"   WARNING: {len(profiles)} launches < {BIBLE_MIN_SAMPLES} "
                 "(Bible minimum); results are not evidence of an edge"
             )
-        dev_rule = next(s for s in summaries if s.rule.exit_on_dev_sell)
+        dev_rule = summarize_rules(replays, [SIGNAL_SELL_RULE])[0]
         print(
             f"   (comparison) {describe_exit_rule(dev_rule.rule)}: "
             f"win {dev_rule.winrate:.0%}  EV {dev_rule.net_ev_sol:+.4f} SOL"
@@ -452,7 +453,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             quote_size_sol=args.size, entry_delay_slots=args.entry_delay
         )
         replays, skipped = _replays(history, costs)
-        summaries = summarize_rules(replays, default_exit_rules())
+        summaries = summarize_rules(
+            replays, take_profit_rules(r.profile.ath_multiple for r in replays)
+        )
         _render_backtest(replays, summaries, skipped)
         if args.plot and summaries:
             print(

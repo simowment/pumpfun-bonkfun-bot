@@ -526,15 +526,19 @@ def _run_fleet(args: argparse.Namespace) -> int:
     from datetime import UTC, datetime
 
     from rugbot.backtest.launch_replay import (
+        EXIT_TAKE_PROFIT,
+        SIGNAL_SELL_RULE,
+        TAKE_PROFIT_GRID_PCT,
         LaunchReplay,
         LaunchReplayError,
         ReplayCosts,
-        default_exit_rules,
         describe_exit_rule,
         summarize_rules,
+        take_profit_rules,
         trades_from_swap_api,
     )
     from rugbot.discover.fleet import bundle_wallets, create_facts, recent_pump_buys
+    from rugbot.domain.pump_curve import TOKEN_SUPPLY_UI
     from rugbot.integrations.pumpfun_api import get_client
     from rugbot.tracker.funding_chain import wallet_birth
 
@@ -626,11 +630,25 @@ def _run_fleet(args: argparse.Namespace) -> int:
         created = datetime.fromtimestamp(profile.created_at_s, tz=UTC)
         print(
             f"  {created:%m-%d %H:%M}  {replay.mint}  entry MC "
-            f"{profile.entry_mc_sol:6.1f} SOL  ATH {profile.ath_multiple:5.2f}x"
+            f"{profile.entry_mc_sol:6.1f} SOL (${replay.entry.price_usd * TOKEN_SUPPLY_UI:,.0f})"
+            f"  ATH {profile.ath_multiple:5.2f}x"
         )
     if not replays:
         return 0
-    best = summarize_rules(replays, default_exit_rules())[0]
+    summaries = summarize_rules(
+        replays, take_profit_rules(r.profile.ath_multiple for r in replays)
+    )
+    best = summaries[0]
+    print("\nTP sweep (best stop/hold per level; hit = TP filled):")
+    for level in TAKE_PROFIT_GRID_PCT:
+        top = next(x for x in summaries if x.rule.take_profit_pct == level)
+        hits = sum(r.exit_reason == EXIT_TAKE_PROFIT for r in top.results)
+        print(
+            f"  TP +{level:4.0f}%  hit {hits / top.samples:4.0%}  win "
+            f"{top.winrate:4.0%}  EV {top.net_ev_sol:+.4f}  cons.EV "
+            f"{top.conservative_ev_sol:+.4f}  [{describe_exit_rule(top.rule)}]"
+        )
+    dev_sell = summarize_rules(replays, [SIGNAL_SELL_RULE])[0]
     if args.plot:
         from rugbot.backtest.reporting.fleet_plot import write_fleet_plot
 
@@ -644,6 +662,10 @@ def _run_fleet(args: argparse.Namespace) -> int:
         f"{best.conservative_ev_sol:+.4f}  EV {best.net_ev_sol:+.4f}  EV-best "
         f"{best.ev_without_best_sol:+.4f} SOL/trade (entry block +{args.entry_delay})"
     )
+    print(
+        f"(comparison) {describe_exit_rule(SIGNAL_SELL_RULE)}: win "
+        f"{dev_sell.winrate:.0%}  EV {dev_sell.net_ev_sol:+.4f} SOL/trade"
+    )
     return 0
 
 
@@ -653,9 +675,9 @@ def _run_patterns(args: argparse.Namespace) -> int:
         LaunchReplay,
         LaunchReplayError,
         ReplayCosts,
-        default_exit_rules,
         describe_exit_rule,
         summarize_results,
+        take_profit_rules,
     )
     from rugbot.discover.patterns import find_patterns
 
@@ -666,7 +688,7 @@ def _run_patterns(args: argparse.Namespace) -> int:
         recorded_only=True,
     )
     costs = ReplayCosts(quote_size_sol=args.size, entry_delay_slots=args.entry_delay)
-    rules = default_exit_rules()
+    rules = take_profit_rules()
     results_by_mint = {}
     for mint, (creator, trades) in launches.items():
         try:
@@ -731,11 +753,13 @@ def _run_patterns(args: argparse.Namespace) -> int:
 def _run_wallets(args: argparse.Namespace) -> int:
     """Score wallets across collected launches and copy-backtest the best."""
     from rugbot.backtest.launch_replay import (
+        SIGNAL_SELL_RULE,
         LaunchReplay,
         LaunchReplayError,
         ReplayCosts,
-        default_exit_rules,
+        describe_exit_rule,
         summarize_rules,
+        take_profit_rules,
     )
     from rugbot.discover.smart_wallets import score_wallets, wallet_launches
 
@@ -781,16 +805,9 @@ def _run_wallets(args: argparse.Namespace) -> int:
         if not replays:
             print("  copy backtest: no replayable launches")
             continue
-        summaries = summarize_rules(replays, default_exit_rules())
-        best = summaries[0]
-        mirror = next(s for s in summaries if s.rule.exit_on_dev_sell)
-        rule = best.rule
-        label = (
-            "mirror leader sell"
-            if rule.exit_on_dev_sell
-            else f"TP {rule.take_profit_pct}% SL {rule.stop_loss_pct}% "
-            f"hold {rule.max_hold_s}s"
-        )
+        best = summarize_rules(replays, take_profit_rules())[0]
+        mirror = summarize_rules(replays, [SIGNAL_SELL_RULE])[0]
+        label = describe_exit_rule(best.rule)
         print(
             f"  copy +{args.copy_delay} slots, N={best.samples}: best [{label}] "
             f"win {best.winrate:.0%} cons.EV {best.conservative_ev_sol:+.4f} "

@@ -63,6 +63,8 @@ class LaunchTrade:
     price_sol: float
     amount_sol: float
     on_curve: bool
+    # USD per whole token at fill time; only the swap-api history carries it.
+    price_usd: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +123,7 @@ class LaunchResult:
     mint: str
     exit_reason: str
     exit_mc_sol: float
+    exit_trade: LaunchTrade
     held_s: float
     net_pnl_sol: float
     fees_sol: float
@@ -155,6 +158,7 @@ def trades_from_swap_api(
             raise LaunchReplayError(f"malformed swap-api trade: {raw!r}")  # noqa: TRY003
         try:
             price = float(Decimal(str(raw.get("priceSol"))))
+            price_usd = float(Decimal(str(raw.get("priceUsd"))))
             amount = float(Decimal(str(raw.get("amountSol"))))
         except (InvalidOperation, ValueError) as error:
             raise LaunchReplayError(f"non-numeric price in trade {raw!r}") from error  # noqa: TRY003
@@ -167,6 +171,7 @@ def trades_from_swap_api(
                 price_sol=price,
                 amount_sol=amount,
                 on_curve=raw.get("program") == PUMP_PROGRAM_LABEL,
+                price_usd=price_usd,
             )
         )
     trades.sort(key=lambda trade: trade.slot)
@@ -346,6 +351,7 @@ class LaunchReplay:
             mint=self.mint,
             exit_reason=reason,
             exit_mc_sol=market_cap_sol(exit_trade.price_sol),
+            exit_trade=exit_trade,
             held_s=exit_trade.timestamp_s - self._entry.timestamp_s,
             net_pnl_sol=net / LAMPORTS_PER_SOL,
             fees_sol=(self._buy_fee + sell_fee + tx_costs) / LAMPORTS_PER_SOL,
@@ -353,11 +359,13 @@ class LaunchReplay:
 
 
 # Take-profit levels (percent) and stops evaluated when optimizing an entity's
-# exit. The dev-sell exit is kept only as a comparison: serial ruggers flip
-# within seconds while the coin keeps running, so it is not a default stop.
+# exit. Selling on the dev/bundle's first sell is usually the WORST snipe exit:
+# operators flip within seconds while the coin keeps running. It is reported
+# only as a comparison (SIGNAL_SELL_RULE) and never optimized.
 TAKE_PROFIT_GRID_PCT = (25.0, 50.0, 75.0, 100.0, 150.0, 200.0, 300.0, 500.0)
 STOP_LOSS_GRID_PCT = (None, 30.0, 50.0)
 MAX_HOLD_GRID_S = (None, 300.0, 1800.0)
+SIGNAL_SELL_RULE = ExitRule(None, None, exit_on_dev_sell=True, max_hold_s=None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,21 +386,29 @@ class RuleSummary:
     results: tuple[LaunchResult, ...]
 
 
-def default_exit_rules() -> list[ExitRule]:
-    """Return the TP x stop x hold grid plus the dev-sell comparison rule."""
-    rules = [
+def take_profit_rules(ath_multiples: Iterable[float] = ()) -> list[ExitRule]:
+    """Return the fixed take-profit x stop x hold grid.
+
+    Each observed ATH multiple adds a take-profit just under it: EV over TP is
+    piecewise constant between consecutive ATHs, so the best TP sits at one of
+    them (see ``cluster_optimizer``), not necessarily on the coarse grid.
+    """
+    ath_levels = {
+        math.floor((multiple - 1) * 100) for multiple in ath_multiples if multiple > 1
+    }
+    levels = sorted(set(TAKE_PROFIT_GRID_PCT) | {float(pct) for pct in ath_levels})
+    return [
         ExitRule(
             take_profit_pct=tp,
             stop_loss_pct=sl,
             exit_on_dev_sell=False,
             max_hold_s=hold,
         )
-        for tp in TAKE_PROFIT_GRID_PCT
+        for tp in levels
+        if tp > 0
         for sl in STOP_LOSS_GRID_PCT
         for hold in MAX_HOLD_GRID_S
     ]
-    rules.append(ExitRule(None, None, exit_on_dev_sell=True, max_hold_s=None))
-    return rules
 
 
 def _conservative_ev(pnls: Sequence[float]) -> float:

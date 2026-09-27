@@ -25,6 +25,7 @@ DEV = "dev"
 BUNDLER = "bundler"
 CREATE_SLOT = 1000
 LAUNCH_PRICE = 30 / 1_073_000_000  # 30 SOL virtual / 1.073B tokens
+SOL_USD = 120
 
 
 def _raw(slot: int, second: int, wallet: str, side: str, mc_sol: float) -> dict:
@@ -34,6 +35,7 @@ def _raw(slot: int, second: int, wallet: str, side: str, mc_sol: float) -> dict:
         "userAddress": wallet,
         "type": side,
         "priceSol": str(mc_sol / 1_000_000_000),
+        "priceUsd": str(mc_sol * SOL_USD / 1_000_000_000),
         "amountSol": "1",
         "program": "pump",
     }

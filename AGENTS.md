@@ -276,6 +276,9 @@ Every target analysis MUST report:
    and dev holding time before dumping.
 4. **Net EV qualification** — winrate (≥ 70% at `N ≥ 10`), analytical optimal
    take-profit, and net-positive EV after Solana network and Jito tip fees.
+   The exit is optimized as a fixed take-profit (plus stop/hold). Selling on
+   the dev/bundle's first sell is usually the worst snipe exit and is reported
+   only as a comparison, never chosen.
 5. **Next arming action** — Type 1: re-arm on the known dev wallet. Type 2:
    identify the staged burner or arm observe-only on the upstream funder.
 
