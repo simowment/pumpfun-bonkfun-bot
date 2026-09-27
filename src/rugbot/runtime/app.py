@@ -1078,7 +1078,7 @@ class RugbotApp:
         entity resolution (funding chain) and the lifetime spam cap to
         :func:`rugbot.discover.ruggers.rank_ruggers`, which loads provider
         settings (SOLANA_RPC_HTTP + fallbacks) itself. Winrate/EV are not
-        auto-computed; each row carries the manual ``rug_check`` command.
+        auto-computed; each row carries the manual ``rug_intel check`` command.
         Read-only (§7): the result recommends arming a listener but never
         auto-arms or trades.
         """

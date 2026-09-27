@@ -69,7 +69,7 @@ BIBLE_MIN_SAMPLES = 10
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the entity-history command."""
     parser = argparse.ArgumentParser(
-        prog="rug_entity_history",
+        prog="rug_intel history",
         description=(
             "Reconstruct the token-creation timeline of the wallets a funder "
             "disbursed staging capital to."

@@ -138,7 +138,7 @@ def create_fastapi_app(  # noqa: C901, PLR0915
 
         Read-only (§7): the ranking recommends arming a listener on the funding
         source or dev wallet but never auto-arms or trades. Winrate/EV are not
-        auto-computed — each row carries the manual ``rug_check`` command;
+        auto-computed — each row carries the manual ``rug_intel check`` command;
         ``no_rpc`` falls back to honest in-window counts only.
         """
         if not 1 <= min_launches <= RUGGERS_MIN_LAUNCHES_MAX:

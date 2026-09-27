@@ -77,7 +77,7 @@ To prevent confusing treasury sweepers with deployers, all cluster nodes are str
 Run this single command from any token mint address or wallet:
 
 ```bash
-uv run rug_wallet <TOKEN_MINT_OR_WALLET> --backtest --enroll
+uv run rug_intel wallet <TOKEN_MINT_OR_WALLET> --backtest --enroll
 ```
 
 **Standard Dossier Output**:
@@ -110,7 +110,7 @@ uv run rug_wallet <TOKEN_MINT_OR_WALLET> --backtest --enroll
 
 ### B. Machine-Readable JSON Pipeline (for Autonomous Agents)
 ```bash
-uv run rug_wallet <TOKEN_MINT_OR_WALLET> --json
+uv run rug_intel wallet <TOKEN_MINT_OR_WALLET> --json
 ```
 
 ---

@@ -326,7 +326,7 @@ def _burner_creations(wallet: str) -> tuple[int | None, list[dict[str, Any]]]:
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the entity command."""
     parser = argparse.ArgumentParser(
-        prog="rug_entity",
+        prog="rug_intel profile",
         description="Cross-wallet entity profile for one funder.",
     )
     parser.add_argument("target", help="Funder wallet or mint address.")
@@ -364,7 +364,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         funder, chain = _resolve_target(str(args.target), endpoint)
     except ValueError as exc:
-        print(f"[rug_entity] resolve failed: {exc}", file=sys.stderr)
+        print(f"[rug_intel profile] resolve failed: {exc}", file=sys.stderr)
         return 1
 
     try:

@@ -707,13 +707,13 @@ def test_api_discover_ruggers_ranks_serial_deployers(
     assert top["ath_exit_profile"]["dev_dump_count"] == 3
     assert top["ath_exit_profile"]["peak_ath_multiplier_ppm"] == 5_000_000
     # Stats are manual by design: no fabricated winrate/EV, the row carries
-    # the manual rug_check command instead.
+    # the manual rug_intel check command instead.
     assert top["qualification"]["status"] == "stats_manual"
     assert top["qualification"]["winrate_pct"] is None
     assert top["qualification"]["net_ev_pct"] is None
     assert top["qualification"]["optimal_tp_pct"] is None
     assert (
-        f"rug_check {_RUGGER_SERIAL_DEV} --score --entity"
+        f"rug_intel check {_RUGGER_SERIAL_DEV} --score --entity"
         in top["qualification"]["message"]
     )
     # Read-only recommendation, never an auto-arm (§7).

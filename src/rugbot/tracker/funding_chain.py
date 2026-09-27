@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from rugbot.ingest.pump.create_decoder import PUMP_PROGRAM_ID
+from rugbot.ingest.pump.swap_trade_decoder import PUMP_AMM_PROGRAM_ID
 from rugbot.integrations.rpc_access import (
     RpcAccessError,
     RpcEndpoints,
@@ -35,6 +36,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
 logger = get_logger(__name__)
+
+SWAP_PROGRAM_INVOKES = tuple(
+    f"Program {program} invoke" for program in (PUMP_PROGRAM_ID, PUMP_AMM_PROGRAM_ID)
+)
 
 SIGNATURE_PAGE_LIMIT = 1000
 DEFAULT_MAX_HOPS = 10
@@ -434,9 +439,17 @@ def _counterparty_transfers(
         ``(counterparty, amount_sol)`` pairs for the requested direction.
     """
     parsed = _parsed_balances(result)
-    if parsed is None:
+    if parsed is None or _is_swap(result):
         return []
     keys, pre, post = parsed
+    if wallet not in keys:
+        return []
+    own = keys.index(wallet)
+    # The wallet itself must have received (or paid) SOL in this transaction;
+    # otherwise it was only referenced (e.g. as a coin's creator) by others.
+    moved = post[own] - pre[own] if receiving else pre[own] - post[own]
+    if moved <= 0:
+        return []
     pairs: list[tuple[str, float]] = []
     for index in range(min(len(keys), len(pre), len(post))):
         if keys[index] == wallet:
@@ -448,11 +461,20 @@ def _counterparty_transfers(
         amount_lamports = -delta if receiving else delta
         if amount_lamports <= 0:
             continue
-        amount_sol = amount_lamports / LAMPORTS_PER_SOL
+        amount_sol = min(amount_lamports, moved) / LAMPORTS_PER_SOL
         if amount_sol < min_sol:
             continue
         pairs.append((keys[index], amount_sol))
     return pairs
+
+
+def _is_swap(result: dict) -> bool:
+    """A Pump or PumpSwap trade moves SOL through a pool, not between wallets."""
+    meta = result.get("meta")
+    logs = meta.get("logMessages") if isinstance(meta, dict) else None
+    return isinstance(logs, list) and any(
+        line.startswith(SWAP_PROGRAM_INVOKES) for line in logs
+    )
 
 
 def is_cex_shaped_source(

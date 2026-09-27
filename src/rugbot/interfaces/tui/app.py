@@ -804,7 +804,7 @@ class RugbotTuiApp(App[None]):
                             id="ruggers-refresh-btn",
                         )
                         yield Static(
-                            "Bible §1 entity ranking: spam cap excludes mass spammers · winrate/EV manual via rug_check --score --entity · Enter loads the entity into Cluster Graph · observe-only (no auto-arm).",
+                            "Bible §1 entity ranking: spam cap excludes mass spammers · winrate/EV manual via rug_intel check --score --entity · Enter loads the entity into Cluster Graph · observe-only (no auto-arm).",
                             id="ruggers-status",
                         )
                     with Container(classes="table-container"):
@@ -1732,7 +1732,7 @@ class RugbotTuiApp(App[None]):
             f"Target {short_address(target.address)}: BACKTEST ABSTAINED · "
             f"{len(cluster_launches)} recorded launches, no persisted launch-outcome "
             "dataset (ATH / market cap / rug timing), so winrate and net EV "
-            "are unmeasured. Run `rug_wallet <target> --backtest` for a grid "
+            "are unmeasured. Run `rug_intel wallet <target> --backtest` for a grid "
             "evaluated against fetched token metadata.",
         )
 
@@ -2314,7 +2314,7 @@ class RugbotTuiApp(App[None]):
         recommends arming; it never auto-arms or trades. Live RPC enrichment
         (funding chain + archetype) runs in a thread worker so the UI stays
         responsive; mass spammers are capped out, never ranked first.
-        Winrate/EV are manual via ``rug_check --score --entity``.
+        Winrate/EV are manual via ``rug_intel check --score --entity``.
         """
         with contextlib.suppress(Exception):
             table = self.query_one("#ruggers-table", DataTable)

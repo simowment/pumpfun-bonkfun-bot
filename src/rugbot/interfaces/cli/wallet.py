@@ -84,7 +84,8 @@ MIN_REPEAT_COORDINATED_LAUNCHES: Final[int] = 2
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build the unified target intelligence and backtest command parser."""
     parser = argparse.ArgumentParser(
-        description="Rugbot CLI: Resolve tokens/wallets, detect next staged deployers, run backtests, and enroll targets."
+        prog="rug_intel wallet",
+        description="Rugbot CLI: Resolve tokens/wallets, detect next staged deployers, run backtests, and enroll targets.",
     )
     parser.add_argument(
         "target_pos",
@@ -453,7 +454,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Error: Target address (token mint or wallet) is required.", file=sys.stderr
         )
         print(
-            "Usage: rug_wallet <TOKEN_MINT_OR_WALLET> [--backtest] [--enroll]",
+            "Usage: rug_intel wallet <TOKEN_MINT_OR_WALLET> [--backtest] [--enroll]",
             file=sys.stderr,
         )
         return 1

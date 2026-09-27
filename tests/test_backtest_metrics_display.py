@@ -156,7 +156,7 @@ def test_matrix_empty_state_states_the_missing_dataset():
     rendered = _rendered_text(BacktestMatrixWidget()._render_empty())
 
     assert "No persisted launch-outcome dataset" in rendered
-    assert "rug_wallet" in rendered
+    assert "rug_intel wallet" in rendered
     assert "Press" not in rendered
 
 

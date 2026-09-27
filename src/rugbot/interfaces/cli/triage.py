@@ -313,7 +313,7 @@ def _bundler_profile(entity_mints: Sequence[str]) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the triage command."""
     parser = argparse.ArgumentParser(
-        prog="rug_triage",
+        prog="rug_intel triage",
         description="Measurement data sheet for one candidate mint (no verdicts).",
     )
     parser.add_argument("mint", help="Candidate mint address.")
@@ -347,7 +347,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if bool(args.json):
             print(json.dumps({"mint": mint, "error": str(exc)}))
         else:
-            print(f"[rug_triage] resolve failed: {exc}", file=sys.stderr)
+            print(f"[rug_intel triage] resolve failed: {exc}", file=sys.stderr)
         return 1
 
     try:

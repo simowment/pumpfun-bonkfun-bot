@@ -55,7 +55,7 @@ CLASS_HEADINGS = {
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the entity-graph command."""
     parser = argparse.ArgumentParser(
-        prog="rug_graph",
+        prog="rug_intel graph",
         description=(
             "Graph an operator entity: bidirectional funding expansion with "
             "cluster-role classification and funding-batch detection."

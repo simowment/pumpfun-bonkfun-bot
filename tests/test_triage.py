@@ -1,4 +1,4 @@
-"""Unit tests for the rug_triage measurement sheet (no network)."""
+"""Unit tests for the rug_intel triage measurement sheet (no network)."""
 
 from rugbot.interfaces.cli.triage import (
     CEX_FLEET_UNRESOLVED,

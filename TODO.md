@@ -44,11 +44,11 @@ chemin d'intégration réaliste a été exécuté et observé.
   ajouter un round-robin ; `client.py` demande encore `maxSupportedTransactionVersion: 0` ;
   décodeurs pump probablement antérieurs à l'upgrade creator-fee ; package
   top-level nommé `src`.
-- [ ] `rug_check` : montants SOL affichés = plafond de slippage, pas le coût réel ;
+- [ ] `rug_intel check` : montants SOL affichés = plafond de slippage, pas le coût réel ;
   section market sans trades on-chain (utiliser `fetch_all_trades`).
 - [ ] Supprimer les 26 fichiers de tests mockés (liste dans l'historique de session).
 - [ ] 185 erreurs ruff préexistantes (push du 2026-09-25).
-- [ ] `rug_graph` : les achats tiers du coin d'un dev (via routeur, ex. `FLASHX…`)
+- [ ] `rug_intel graph` : les achats tiers du coin d'un dev (via routeur, ex. `FLASHX…`)
   sont comptés comme transferts vers/depuis le dev → faux liens (courbe de bonding
   prise pour un wallet, créateurs sans rapport à depth 2). Exclure les tx Pump
   buy/sell du traçage de transferts.
@@ -207,7 +207,7 @@ PositionExitWorker (TP / SL / sortie manuelle)
 2. **Scorer un rugger sur ses anciens launches** — entrée, ATH, floor, winrate, et sortir le TP optimal chiffré.
 3. **Configurer et poser ses trackers** — copytrade ou Method 1, avec les filtres et les sorties, après ta validation.
 
-Statut au 2026-08-26: (1) partiel via `funder_discovery`/`cluster_graph` mais pas de chaîne atomique bout-en-bout exposée en 1-liner; (2) partiel via `rug_check`+backtest (B0/B1, rugged, mcap) mais winrate/TP optimal pas chiffré en 1 sortie; (3) `watch.yaml` + `LIVE` existent mais pose tracker manuelle, pas de wizard `copytrade vs Method1` après validation.
+Statut au 2026-08-26: (1) partiel via `funder_discovery`/`cluster_graph` mais pas de chaîne atomique bout-en-bout exposée en 1-liner; (2) partiel via `rug_intel check`+backtest (B0/B1, rugged, mcap) mais winrate/TP optimal pas chiffré en 1 sortie; (3) `watch.yaml` + `LIVE` existent mais pose tracker manuelle, pas de wizard `copytrade vs Method1` après validation.
 
 ## Phase 2 — Target Analytics & Backtester (POST-P0)
 
@@ -261,7 +261,7 @@ Statut au 2026-08-26: (1) partiel via `funder_discovery`/`cluster_graph` mais pa
 
 - [ ] **Collecteur headless `uv run rug_discover collect`** : écoute toutes les créations PumpPortal, s'abonne aux trades des nouveaux tokens, écrit événements réels dans SQLite/JSONL. Pas de synthèse inventée.
 - [ ] **Suivi complet par lancement** : création/créateur, achats bundle + ordre tx, signataires/fee payer, market cap à 1s, volume, ATH, ventes dev/bundlers, dump/sweep/durée d'inactivité. Source : PumpPortal + RPC finalized. GMGN optionnel.
-- [ ] **Enrichisseur historique batch** : `uv run rug_discover enrich <wallet|mint>` — anciens mints via Solscan/Pump.fun, bundles par lancement, autres tokens achetés, paniers croisés, cycles financement→achat→vente→sweep. Réutilise `rug_check --trace-funding --score --entity` dedup path.
+- [ ] **Enrichisseur historique batch** : `uv run rug_discover enrich <wallet|mint>` — anciens mints via Solscan/Pump.fun, bundles par lancement, autres tokens achetés, paniers croisés, cycles financement→achat→vente→sweep. Réutilise `rug_intel check --trace-funding --score --entity` dedup path.
 - [ ] **File dossiers interrogeable** : `uv run rug_discover candidates --since 24h --json` + `uv run rug_discover dossier <wallet> --json`. L'opérateur lance la collecte, parcourt, compare et restitue les ruggers.
 - [ ] **Processus persistant** : `rug_discover collect` tourne en arrière-plan hors Web (PID file + `rugged` health). `candidates`/`dossier` lisent la même base.
 

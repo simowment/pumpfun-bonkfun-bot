@@ -725,7 +725,7 @@ def _run_wallet_json(
     argv: list[str],
     capsys: Any,
 ) -> dict[str, Any]:
-    """Run rug_wallet --json with heavy dependencies stubbed (no network)."""
+    """Run rug_intel wallet --json with heavy dependencies stubbed (no network)."""
     wallet = "HX2Sr1gKJC53NKEBPEy9KRoW2M1C6NoJT241sVM4AEnA"
     providers = SimpleNamespace(
         rpc_http="http://localhost:8899",

@@ -17,7 +17,7 @@ Bible alignment (MEMECOIN_BIBLE_SCRAPED.md §1-§3, AGENTS.md §14):
     2000+-creation spam wallets as top targets.
   * Winrate/EV stats are NOT auto-computed: batch metadata scoring proved
     unreliable (rate-limited fetches fabricated 0% winrates). Qualification
-    stats are MANUAL - run ``rug_check <wallet> --score --entity`` per target.
+    stats are MANUAL - run ``rug_intel check <wallet> --score --entity`` per target.
     Only the funding-chain resolver (``_build_funding_chain`` /
     ``_resolve_entity_wallets``) is reused here.
 
@@ -71,7 +71,7 @@ TYPE2_NOTE = (
     "Single-wallet same-wallet deployers are Type 1; recurrent-funder / "
     "multi-wallet clusters are Type 2. Mass spammers (lifetime creations > "
     "max-creations) are excluded, not ranked. Winrate/EV stats are manual: "
-    "run rug_check <wallet> --score --entity per target."
+    "run rug_intel check <wallet> --score --entity per target."
 )
 
 MIN_LAUNCHES_FLOOR = 1
@@ -461,7 +461,7 @@ def _manual_stats_qualification(
         reason="stats_manual (winrate/EV not auto-computed)",
         message=(
             "Score this entity manually (bible 1 step 5): "
-            f"uv run rug_check {creator} --score --entity"
+            f"uv run rug_intel check {creator} --score --entity"
         ),
         sample_count=SAMPLE_COUNT_DEFAULT,
         launches_scored=0,
@@ -725,7 +725,7 @@ def rank_ruggers(
     trades, seeds recently-active creators, then - with live RPC - excludes mass
     spammers by lifetime creation cap and resolves each survivor's funding
     entity/archetype. Winrate/EV are NOT auto-computed; each row carries the
-    manual ``rug_check --score --entity`` command instead. Ranked by status,
+    manual ``rug_intel check --score --entity`` command instead. Ranked by status,
     then in-window activity.
 
     ``use_rpc=False`` degrades to an honestly-labelled in-window-only view (no

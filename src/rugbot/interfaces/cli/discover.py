@@ -151,7 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ruggers = sub.add_parser(
         "ruggers",
-        help="rank rugger entities (bible 1 spam cap, funding-cluster archetype); stats manual via rug_check",
+        help="rank rugger entities (bible 1 spam cap, funding-cluster archetype); stats manual via rug_intel check",
     )
     ruggers.add_argument(
         "--since",
@@ -857,7 +857,7 @@ def _print_ruggers_table(evidence: list[RuggerEvidence]) -> None:
         )
     print(
         "\nstats: winrate/EV are manual - run "
-        "`uv run rug_check <wallet> --score --entity` per target"
+        "`uv run rug_intel check <wallet> --score --entity` per target"
     )
 
 

@@ -264,9 +264,17 @@ The repository also includes point-in-time operator profiling and finalized repl
 uv run python -m rugbot.backtest.cli --input fixtures/backtest/demo.json --pretty
 ```
 
-### Inspect Single Wallet Intelligence
-```powershell
-uv run rug_watch --intelligence --wallet CREATOR_WALLET --pretty
+### Operator / cabal / rugger analysis (`rug_intel`)
+Every analysis tool sits behind one command; `rug_intel` alone lists them.
+```bash
+uv run rug_intel check <MINT>                          # creator, B0/B1 bundle, rugged
+uv run rug_intel history <DEV> --creator --backtest    # launches + realistic backtest
+uv run rug_intel history <FUNDER> --backtest           # burner launches from a funder
+uv run rug_intel chain <BURNER>                        # funding chain up to the hub
+uv run rug_intel graph <SEED>                          # classify the operator's wallets
+uv run rug_intel profile <FUNDER_OR_MINT>              # burner set + launch outcomes
+uv run rug_intel wallet <MINT_OR_WALLET> --backtest    # resolve + intelligence + optimizer
+uv run rug_discover fleet <MINT>                       # bundle wallets -> operator history
 ```
 
 ### Terminal UI (TUI)

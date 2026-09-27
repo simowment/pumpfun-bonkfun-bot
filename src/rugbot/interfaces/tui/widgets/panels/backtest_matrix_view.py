@@ -62,7 +62,7 @@ class BacktestMatrixWidget(Static):
         table.add_row(
             "[dim]No persisted launch-outcome dataset: [bold]tracker_launches[/bold] stores no ATH, "
             "market cap, or rug timing, so no grid can be evaluated from tracker state. "
-            "Run [bold cyan]`rug_wallet <target> --backtest`[/bold cyan] for a grid scored "
+            "Run [bold cyan]`rug_intel wallet <target> --backtest`[/bold cyan] for a grid scored "
             "against fetched token metadata.[/dim]"
         )
         return table

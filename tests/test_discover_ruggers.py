@@ -9,7 +9,7 @@ Asserted per the manual-stats contract (batch scoring proved flaky — rate-
 limited metadata fetches fabricated 0% winrates, so the ranker never scores):
   (a) a wallet-switching entity (burners x1 token + recurrent funder) is
       resolved as ``type2_funding_cluster`` with status ``stats_manual`` and
-      the manual ``rug_check --score --entity`` command in its message;
+      the manual ``rug_intel check --score --entity`` command in its message;
   (b) a 2201-creation wallet is excluded as ``mass_spammer``;
   (c) the batch scorer (``_score_entity_sync``) is NEVER invoked by the ranker;
   (d) no path fabricates winrate/EV — all stat fields stay None;
@@ -149,7 +149,7 @@ def test_wallet_switching_entity_is_type2_stats_manual(tmp_path, monkeypatch) ->
     """3 burners + recurrent CEX funder -> type2 entity, manual-stats status.
 
     The entity (funding cluster) is fully resolved for discovery, but no
-    winrate/EV is auto-computed — the row carries the manual ``rug_check``
+    winrate/EV is auto-computed — the row carries the manual ``rug_intel check``
     command instead.
     """
 
@@ -188,7 +188,7 @@ def test_wallet_switching_entity_is_type2_stats_manual(tmp_path, monkeypatch) ->
     assert top.qualification.winrate_pct is None
     assert top.qualification.net_ev_pct is None
     assert top.qualification.optimal_tp_pct is None
-    assert f"rug_check {SWITCHER_DEV} --score --entity" in top.qualification.message
+    assert f"rug_intel check {SWITCHER_DEV} --score --entity" in top.qualification.message
     # Read-only (§7): recommends arming the funding source, never auto-arms.
     assert CEX_FUNDER in top.next_action
     assert "observe-only" in top.next_action

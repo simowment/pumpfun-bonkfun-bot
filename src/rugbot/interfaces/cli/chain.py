@@ -33,7 +33,7 @@ logger = get_logger(__name__)
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the funding-chain tracer."""
     parser = argparse.ArgumentParser(
-        prog="rug_chain",
+        prog="rug_intel chain",
         description=(
             "Walk a wallet's funding chain upward to the hub and enumerate "
             "the wallets that hub funded (Type-2 operator tracing)."

@@ -1,4 +1,4 @@
-"""Unit tests for the rug_entity pure helpers (no network)."""
+"""Unit tests for the rug_intel profile pure helpers (no network)."""
 
 from rugbot.interfaces.cli.entity_profile import (
     assemble_payload,

@@ -26,9 +26,9 @@ flowchart LR
         A["Market Screener<br/>(Axiom / Photon)"] -->|"Filters Tokens<br/>Vol, Mcap, Age, Spammers"| B["Candidate Mints"]
     end
     subgraph Layer2["LAYER 2 · TRACKING (Bot / RPC Engine)"]
-        B -->|"Hands mint to Bot"| C["Upstream Funding Trace<br/>(rug_chain / rug_graph)"]
-        C -->|"Reconciles Entity"| D["Satellite & Bundle Audit<br/>(rug_check / rug_wallet)"]
-        D -->|"Simulates PnL & EV"| E["No-Fixed-Stop Backtest<br/>(rug_wallet -b)"]
+        B -->|"Hands mint to Bot"| C["Upstream Funding Trace<br/>(rug_intel chain / rug_intel graph)"]
+        C -->|"Reconciles Entity"| D["Satellite & Bundle Audit<br/>(rug_intel check / rug_intel wallet)"]
+        D -->|"Simulates PnL & EV"| E["No-Fixed-Stop Backtest<br/>(rug_intel wallet -b)"]
         E -->|"Arms Surveillance"| F["Funder Watch / Paper Sniper<br/>(rug_funder_watch)"]
     end
 ```
@@ -104,10 +104,10 @@ When mapping cluster nodes, classify them deterministically:
 
 The repo provides specialized, durable CLI utilities for every stage of the pipeline:
 
-### Step 1 · Instant Mint & Bundle Inspection (`rug_check`)
+### Step 1 · Instant Mint & Bundle Inspection (`rug_intel check`)
 Quickly examine creation slot, B0/B1 bundle composition, entry liquidity, and graduation status:
 ```bash
-uv run rug_check <TOKEN_MINT>
+uv run rug_intel check <TOKEN_MINT>
 ```
 *Example Output*:
 ```text
@@ -120,10 +120,10 @@ uv run rug_check <TOKEN_MINT>
 
 ---
 
-### Step 2 · Trace Upstream Funding Chain (`rug_chain`)
+### Step 2 · Trace Upstream Funding Chain (`rug_intel chain`)
 Walk backwards through multi-hop funding relays to the central funding authority or CEX in $\sim 2\text{ seconds}$:
 ```bash
-uv run rug_chain <WALLET_OR_MINT>
+uv run rug_intel chain <WALLET_OR_MINT>
 ```
 *Example Output*:
 ```text
@@ -141,19 +141,19 @@ uv run rug_chain <WALLET_OR_MINT>
 
 ---
 
-### Step 3 · Graph & Reconcile Operator Fleet (`rug_graph`)
+### Step 3 · Graph & Reconcile Operator Fleet (`rug_intel graph`)
 Perform bidirectional breadth expansion from any seed wallet to uncover all connected satellite bundlers, staging relays, and treasury nodes, persisting them to the SQLite tracker:
 ```bash
-uv run rug_graph <SEED_OR_DEPLOYER_WALLET>
+uv run rug_intel graph <SEED_OR_DEPLOYER_WALLET>
 ```
 *Discovers same-slot fan-out batches, classifies wallet roles, and prevents double-counting across the cluster.*
 
 ---
 
-### Step 4 · Analytical Backtest & Enrollment (`rug_wallet`)
+### Step 4 · Analytical Backtest & Enrollment (`rug_intel wallet`)
 Run Take-Profit grid optimization, ATH profiling, and cluster enrollment:
 ```bash
-uv run rug_wallet <TOKEN_MINT_OR_WALLET> --backtest --trace-funding
+uv run rug_intel wallet <TOKEN_MINT_OR_WALLET> --backtest --trace-funding
 ```
 *Flags*:
 * `--backtest` / `-b`: Run analytical TP grid search over historical cluster launches.
@@ -251,4 +251,4 @@ A strategy is viable **if and only if Net EV > 0**. High winrate with negative E
 * **Position Sizing**: **2% to 5%** of bankroll per snipe. Never scale trade size; scale by distributing across multiple fresh buyer wallets.
 * **Daily Circuit Breaker**: **5 consecutive losses** $\to$ Abort bot execution for the day.
 * **Weekly Drawdown Breaker**: **$-35\%$ weekly drawdown** $\to$ Pause all bots and re-audit the operator fleet.
-* **Operator Expiration**: Most serial operators rotate their funding topology and bundlers every **1 to 2 weeks**. Continuously re-run `rug_chain` and `rug_graph` to detect wallet churn.
+* **Operator Expiration**: Most serial operators rotate their funding topology and bundlers every **1 to 2 weeks**. Continuously re-run `rug_intel chain` and `rug_intel graph` to detect wallet churn.

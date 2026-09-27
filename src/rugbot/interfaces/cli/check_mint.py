@@ -681,7 +681,7 @@ def _build_tracker_snippet(address: str, mode: str | None) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="rug_check",
+        prog="rug_intel check",
         description=(
             "One-liner token check: creation slot/tx, creator, bundle B0/B1, "
             "rugged/ATH verdict, RECOMMENDED copytrade wallet. "
@@ -756,7 +756,7 @@ def main(argv: list[str] | None = None) -> int:
         if as_json:
             print(json.dumps({"status": "error", "mint": mint, "message": str(exc)}))
         else:
-            print(f"[rug_check] {mint} — resolve failed: {exc}", file=sys.stderr)
+            print(f"[rug_intel check] {mint} — resolve failed: {exc}", file=sys.stderr)
         return 1
 
     # Market history (data-based on-chain first)

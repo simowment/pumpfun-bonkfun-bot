@@ -53,10 +53,10 @@ disbursed staging capital to.
 
 | capability | command | status |
 |---|---|---|
-| Wallet dossier + lite TP profile | `rug_wallet <wallet> --trace-funding --lite-profile` | pre-existing |
-| Upstream funding spine + hub payouts | `rug_chain <wallet>` | built & live-verified |
-| Classified entity graph + funding batches | `rug_graph <seed>` | built & live-verified |
-| Entity token-creation timeline | `rug_entity_history <funder>` | built & live-verified |
+| Wallet dossier + lite TP profile | `rug_intel wallet <wallet> --trace-funding --lite-profile` | pre-existing |
+| Upstream funding spine + hub payouts | `rug_intel chain <wallet>` | built & live-verified |
+| Classified entity graph + funding batches | `rug_intel graph <seed>` | built & live-verified |
+| Entity token-creation timeline | `rug_intel history <funder>` | built & live-verified |
 | Entity launch alerts (Discord) | `rug_entity_watch` | pre-existing |
 | Replay / TP×SL optimisation | `rug_backtest <wallet\|mint> --optimize` | pre-existing |
 

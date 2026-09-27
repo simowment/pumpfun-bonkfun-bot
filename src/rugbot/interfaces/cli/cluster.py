@@ -214,9 +214,9 @@ async def _discover_cluster_tokens_and_wallets(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    """Build parser for rug_cluster command."""
+    """Build parser for rug_intel cluster command."""
     parser = argparse.ArgumentParser(
-        prog="rug_cluster",
+        prog="rug_intel cluster",
         description="Systematically trace cluster funding trees, discover all sibling tokens, analyze operator patterns, and run Memecoin Bible backtests.",
     )
     parser.add_argument(
