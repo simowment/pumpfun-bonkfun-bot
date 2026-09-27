@@ -147,6 +147,8 @@ class WalletLink:
     asset_kind: WalletAssetKind = WalletAssetKind.NATIVE
     asset_id: str = "SOL"
     amount_base_units: int | None = None
+    last_block_time: int | None = None
+    token_decimals: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -633,8 +635,10 @@ def report_to_json(report: WalletIntelligenceReport) -> dict[str, object]:
                     "transfer_count": edge.transfer_count,
                     "amount_lamports": edge.amount_lamports,
                     "amount_base_units": edge.amount_base_units,
+                    "token_decimals": edge.token_decimals,
                     "first_slot": edge.first_slot,
                     "last_slot": edge.last_slot,
+                    "last_block_time": edge.last_block_time,
                     "evidence_ids": list(edge.evidence_ids),
                 }
                 for edge in report.edges
@@ -868,13 +872,15 @@ def _build_report(
 def _transfer_rows(
     transfers: tuple[CanonicalTransferEvidence, ...],
 ) -> tuple[TransferEvidenceRow, ...]:
-    """Derive authoritative per-transfer rows from canonical transfer evidence.
+    """Derive native SOL per-transfer rows from canonical transfer evidence.
 
     Evidence without a usable event index is skipped and logged rather than
     assigned a fabricated index.
     """
     rows: list[TransferEvidenceRow] = []
     for transfer in transfers:
+        if transfer.asset_kind is not WalletAssetKind.NATIVE:
+            continue
         if type(transfer.event_index) is not int or transfer.event_index < 0:
             logger.warning(
                 "skipping transfer evidence without a usable event index: %s",
@@ -889,6 +895,7 @@ def _transfer_rows(
                 slot=int(transfer.slot),
                 signature=base58.b58encode(transfer.signature).decode("ascii"),
                 event_index=transfer.event_index,
+                timestamp=transfer.block_time,
             )
         )
     return tuple(rows)
@@ -1057,6 +1064,11 @@ def _links_from_transfers(
                 asset_kind=asset_kind,
                 asset_id=asset_id,
                 amount_base_units=amount,
+                last_block_time=max(
+                    (item.block_time for item in items if item.block_time is not None),
+                    default=None,
+                ),
+                token_decimals=items[0].token_decimals,
             )
         )
     return tuple(links)
@@ -1332,6 +1344,7 @@ def _parse_transfer_evidence(
                     asset_kind=WalletAssetKind.NATIVE,
                     asset_id="SOL",
                     amount=native[2],
+                    token_decimals=None,
                     evidence_suffix="native-transfer",
                 )
             )
@@ -1345,7 +1358,7 @@ def _parse_transfer_evidence(
         if isinstance(spl, AbstainResult):
             return spl
         if spl is not None:
-            source, target, mint, amount = spl
+            source, target, mint, amount, decimals = spl
             parsed.append(
                 _canonical_transfer(
                     observation=observation,
@@ -1355,6 +1368,7 @@ def _parse_transfer_evidence(
                     asset_kind=WalletAssetKind.TOKEN,
                     asset_id=mint,
                     amount=amount,
+                    token_decimals=decimals,
                     evidence_suffix="spl-transfer",
                 )
             )
@@ -1370,6 +1384,7 @@ def _canonical_transfer(
     asset_kind: WalletAssetKind,
     asset_id: str,
     amount: int,
+    token_decimals: int | None,
     evidence_suffix: str,
 ) -> CanonicalTransferEvidence:
     signature = observation.signature
@@ -1388,13 +1403,15 @@ def _canonical_transfer(
         asset_kind=asset_kind,
         asset_id=asset_id,
         amount_base_units=amount,
+        block_time=_block_time_from_observation(observation),
+        token_decimals=token_decimals,
     )
 
 
 def _token_balance_candidates(
     meta: Mapping[str, object],
     account_keys: tuple[str, ...],
-) -> dict[tuple[int, str, str], tuple[str, int, int]] | AbstainResult:
+) -> dict[tuple[int, str, str], tuple[str, int, int, int]] | AbstainResult:
     pre = meta.get("preTokenBalances", ())
     post = meta.get("postTokenBalances", ())
     if pre is None:
@@ -1424,15 +1441,18 @@ def _token_balance_candidates(
                 or not isinstance(amount_object, Mapping)
                 or not isinstance(amount_object.get("amount"), str)
                 or not amount_object["amount"].isdigit()
+                or type(amount_object.get("decimals")) is not int
             ):
                 return _abstain("token balance proof fields are incomplete", -1)
             key = (account_index, mint, program_id)
-            values = parsed.setdefault(key, [owner, None, None])
+            values = parsed.setdefault(
+                key, [owner, None, None, amount_object["decimals"]]
+            )
             if values[0] != owner or values[side + 1] is not None:
                 return _abstain("token balance evidence conflicts", -1)
             values[side + 1] = int(amount_object["amount"])
     return {
-        key: (values[0], values[1] or 0, values[2] or 0)
+        key: (values[0], values[1] or 0, values[2] or 0, values[3])
         for key, values in parsed.items()
     }
 
@@ -1441,9 +1461,9 @@ def _spl_transfer(
     *,
     instruction: Mapping[str, object],
     account_keys: tuple[str, ...],
-    candidates: dict[tuple[int, str, str], tuple[str, int, int]] | AbstainResult,
+    candidates: dict[tuple[int, str, str], tuple[str, int, int, int]] | AbstainResult,
     amount_as_of_slot: int,
-) -> tuple[str, str, str, int] | AbstainResult | None:
+) -> tuple[str, str, str, int, int] | AbstainResult | None:
     program_index = instruction.get("programIdIndex")
     accounts = instruction.get("accounts")
     encoded_data = instruction.get("data")
@@ -1491,8 +1511,13 @@ def _spl_transfer(
     mint_hint = (
         account_keys[accounts[1]] if data[0] == SPL_TRANSFER_CHECKED_TAG else None
     )
-    matches: list[tuple[str, str, str, int]] = []
-    for (index, mint, _program_id), (source_owner, pre, post) in candidates.items():
+    matches: list[tuple[str, str, str, int, int]] = []
+    for (index, mint, _program_id), (
+        source_owner,
+        pre,
+        post,
+        decimals,
+    ) in candidates.items():
         if index != source_index:
             continue
         if mint_hint is not None and mint != mint_hint:
@@ -1503,6 +1528,7 @@ def _spl_transfer(
                 owner,
                 other_pre,
                 other_post,
+                _decimals,
             ) in candidates.items()
             if other_index == target_index
             and other_mint == mint
@@ -1517,7 +1543,7 @@ def _spl_transfer(
             continue
         if source_owner == target_owner:
             continue
-        matches.append((source_owner, target_owner, other_mint, amount))
+        matches.append((source_owner, target_owner, other_mint, amount, decimals))
     if len(matches) > 1:
         return _abstain("token transfer proof is ambiguous", amount_as_of_slot)
     return matches[0] if matches else None

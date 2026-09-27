@@ -25,7 +25,12 @@ from rugbot.ingest.pump.pump_create_observation import (
 )
 from rugbot.ingest.pump.pump_stream import PumpPortalLaunchStream
 from rugbot.ingest.rpc_observer import observe_address, observe_finalized_transaction
-from rugbot.integrations.rpc_access import resolve_websocket_endpoint, shared_async_pool
+from rugbot.integrations.rpc_access import (
+    RpcAccessError,
+    resolve_websocket_endpoint,
+    shared_async_pool,
+    sync_rpc_result,
+)
 from rugbot.integrations.solscan import (
     SolscanClient,
     SolscanProviderError,
@@ -1119,28 +1124,34 @@ class RugbotApp:
 
     async def wallet_balance(self, requested_address: str) -> CommandResult:
         """Query finalized SOL balance for the requested address."""
-        from rugbot.integrations.solana_rpc import query_finalized_balance_with_slot
-        from rugbot.runtime.config import load_provider_settings
 
-        endpoint = self._endpoint or load_provider_settings().endpoint
         try:
-            balance_lamports, slot = await query_finalized_balance_with_slot(
-                endpoint, requested_address
+            result = await asyncio.to_thread(
+                sync_rpc_result,
+                "getBalance",
+                [requested_address, {"commitment": "finalized"}],
+                endpoints=[self._endpoint] if self._endpoint else None,
             )
+        except RpcAccessError as exc:
             return CommandResult(
-                ok=True,
-                message="finalized SOL balance loaded",
-                data={
-                    "address": requested_address,
-                    "balance_lamports": balance_lamports,
-                    "slot": slot,
-                },
+                ok=False, message=f"failed to load finalized balance: {exc}"
             )
-        except Exception as exc:
+        context = result.get("context") if isinstance(result, dict) else None
+        lamports = result.get("value") if isinstance(result, dict) else None
+        slot = context.get("slot") if isinstance(context, dict) else None
+        if not isinstance(lamports, int) or not isinstance(slot, int):
             return CommandResult(
-                ok=False,
-                message=f"failed to load finalized balance: {exc}",
+                ok=False, message=f"malformed getBalance result: {result!r}"
             )
+        return CommandResult(
+            ok=True,
+            message="finalized SOL balance loaded",
+            data={
+                "address": requested_address,
+                "balance_lamports": lamports,
+                "slot": slot,
+            },
+        )
 
     def cached_entity_report(self, query: str) -> CommandResult:
         """Return the latest durable entity report without provider access."""

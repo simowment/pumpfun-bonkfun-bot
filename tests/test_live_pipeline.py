@@ -19,6 +19,7 @@ from rugbot.backtest.launch_replay import (
     take_profit_rules,
     trades_from_swap_api,
 )
+from rugbot.discover.fleet import create_facts
 from rugbot.discover.screen import ScreenFilters, screen_launches
 from rugbot.execution.auto_router import AutoRouter, RouteVenue
 from rugbot.ingest.pump.create_event_decoder import decode_pump_create_event_logs
@@ -37,6 +38,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 ZKASH_MINT = "3FCahiaD51BY8rNDK1BarxmYrWdE8KqKGeWjMQNwpump"
+# The mint address saw a failed pump transaction before its create landed.
+FAILED_FIRST_TX_MINT = "894gDxuQ4w9jbJL9uUJeWjkya31gca6i5rRd2a8Upump"
+FAILED_FIRST_TX_CREATOR = "CoaX7BJWN8sdxQdHtbrdbRpnUhn4MxFadzWdo8CpS5jR"
 ZKASH_CREATOR = "3AXdfyrkKuYAPU3uPabuBWBgKA5dppbDihXezwt6t7VA"
 ZKASH_CREATE_SLOT = 450274836
 ZKASH_HUB_RECIPIENT = "FTYT7yWGGjnEAXT6w2y1CcbLNYgcQzdMQ9CZ5konpMkc"
@@ -176,3 +180,8 @@ def test_screen_lists_sol_curve_launches_in_the_age_window() -> None:
     assert result.coins
     assert all(5 <= coin.age_min <= 16 for coin in result.coins)
     assert all(coin.creation_mc_usd <= 15_000 for coin in result.coins)
+
+
+def test_create_facts_skip_failed_transactions_before_the_create() -> None:
+    creator, _ = create_facts(FAILED_FIRST_TX_MINT)
+    assert creator == FAILED_FIRST_TX_CREATOR

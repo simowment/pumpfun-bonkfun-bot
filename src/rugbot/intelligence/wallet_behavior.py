@@ -38,6 +38,10 @@ class CanonicalTransferEvidence:
     asset_kind: WalletAssetKind
     asset_id: str
     amount_base_units: int
+    # Finalized block time; None when the RPC envelope carries none.
+    block_time: int | None
+    # Mint decimals for token transfers; None for native SOL.
+    token_decimals: int | None
 
 
 @dataclass(frozen=True, slots=True)

@@ -325,9 +325,11 @@ def wallet_birth(
     endpoints: RpcEndpoints | Sequence[str] | None = None,
     transport: Callable[[str, str, list[object]], object] | None = None,
 ) -> WalletBirth:
-    """Return an account's first transaction and its funder (largest SOL payer).
+    """Return an account's first successful transaction and its funder.
 
-    For a mint account the first transaction is its creation.
+    Failed transactions are skipped: they create and fund nothing (snipers
+    often touch a mint address before its create lands). For a mint account
+    the first successful transaction is its creation.
 
     Raises:
         FundingChainError: When ``wallet`` is empty.
@@ -339,9 +341,10 @@ def wallet_birth(
         if first_page
         else None
     )
-    if not page:
+    succeeded = [entry for entry in page or () if entry.get("err") is None]
+    if not succeeded:
         return WalletBirth(owner, None, None, None)
-    oldest = page[-1]
+    oldest = succeeded[-1]
     slot = oldest.get("slot")
     block_time = oldest.get("blockTime")
     signature = oldest.get("signature")
@@ -349,7 +352,7 @@ def wallet_birth(
         wallet=owner,
         first_slot=slot if isinstance(slot, int) else None,
         first_block_time=block_time if isinstance(block_time, int) else None,
-        funder=_parent_of(owner, page, endpoints=endpoints, transport=transport),
+        funder=_parent_of(owner, succeeded, endpoints=endpoints, transport=transport),
         first_signature=signature if isinstance(signature, str) else None,
     )
 
