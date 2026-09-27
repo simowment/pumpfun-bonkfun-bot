@@ -19,6 +19,7 @@ from rugbot.backtest.launch_replay import (
     summarize_rules,
     trades_from_swap_api,
 )
+from rugbot.discover.screen import ScreenFilters, screen_launches
 from rugbot.execution.auto_router import AutoRouter, RouteVenue
 from rugbot.ingest.pump.create_event_decoder import decode_pump_create_event_logs
 from rugbot.ingest.pump.pump_create_observation import (
@@ -149,3 +150,21 @@ def test_router_sends_graduated_coins_to_pumpswap() -> None:
         assert quote > 0
 
     asyncio.run(check())
+
+
+def test_screen_lists_sol_curve_launches_in_the_age_window() -> None:
+    result = screen_launches(
+        ScreenFilters(
+            min_age_min=5,
+            max_age_min=15,
+            min_volume_usd=None,
+            max_volume_usd=None,
+            max_mc_usd=None,
+            max_dev_launches=None,
+            max_creation_mc_usd=15_000,
+        )
+    )
+    assert result.listed_in_window > 0
+    assert result.coins
+    assert all(5 <= coin.age_min <= 16 for coin in result.coins)
+    assert all(coin.creation_mc_usd <= 15_000 for coin in result.coins)

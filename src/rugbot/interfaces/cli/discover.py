@@ -351,6 +351,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="state directory (default: .state/discover)",
     )
 
+    screen = sub.add_parser(
+        "screen",
+        help="bible layer-1 screen of recent pump.fun launches (Axiom Pulse view)",
+    )
+    screen.add_argument("--min-age", type=float, default=30.0, help="minutes")
+    screen.add_argument("--max-age", type=float, default=70.0, help="minutes")
+    screen.add_argument(
+        "--min-vol", type=float, default=20_000, help="USD volume floor (0=off)"
+    )
+    screen.add_argument(
+        "--max-vol", type=float, default=30_000, help="USD volume cap (0=off)"
+    )
+    screen.add_argument(
+        "--max-mc", type=float, default=0, help="current USD market cap cap (0=off)"
+    )
+    screen.add_argument(
+        "--max-creation-mc",
+        type=float,
+        default=15_000,
+        help="bible: USD market cap of the 1s creation candle, max (0=off)",
+    )
+    screen.add_argument(
+        "--max-dev-launches",
+        type=int,
+        default=10,
+        help="creator lifetime launches cap (0=off)",
+    )
+
+    screen.add_argument(
+        "--include-graduated",
+        action="store_true",
+        help="also keep coins that graduated to PumpSwap (Axiom 'Migrated')",
+    )
+
     status = sub.add_parser(
         "status", help="PID alive, health last_heartbeat, launches count"
     )
@@ -861,9 +895,51 @@ def _print_ruggers_table(evidence: list[RuggerEvidence]) -> None:
     )
 
 
+def _run_screen(args: argparse.Namespace) -> int:
+    from rugbot.discover.screen import ScreenFilters, screen_launches
+    from rugbot.integrations.pumpfun_api import PumpFunApiError
+
+    try:
+        result = screen_launches(
+            ScreenFilters(
+                min_age_min=args.min_age,
+                max_age_min=args.max_age,
+                min_volume_usd=args.min_vol or None,
+                max_volume_usd=args.max_vol or None,
+                max_mc_usd=args.max_mc or None,
+                max_dev_launches=args.max_dev_launches or None,
+                include_graduated=args.include_graduated,
+                max_creation_mc_usd=args.max_creation_mc or None,
+            )
+        )
+    except PumpFunApiError as error:
+        print(f"screen failed: {error}", file=sys.stderr)
+        return 1
+    print(
+        f"{result.listed_in_window} pump.fun launches aged {args.min_age:g}-"
+        f"{args.max_age:g} min; {len(result.coins)} pass"
+    )
+    for coin in result.coins:
+        dev = "?" if coin.dev_launches is None else coin.dev_launches
+        creation = (
+            "   ?" if coin.creation_mc_usd is None else f"{coin.creation_mc_usd:>6,.0f}"
+        )
+        print(
+            f"  {coin.age_min:4.0f}m  {coin.symbol[:12]:12} {coin.name[:20]:20} "
+            f"vol ${coin.volume_usd:>8,.0f}  mc ${coin.mc_usd:>7,.0f}  "
+            f"ath ${coin.ath_mc_usd:>8,.0f}  1s ${creation}  dev {dev!s:>3}  "
+            f"{coin.mint}"
+        )
+    for reason, count in sorted(result.dropped.items(), key=lambda item: -item[1]):
+        print(f"  dropped {count}: {reason}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "screen":
+        return _run_screen(args)
     if args.command == "collect":
         state_dir: Path = args.state_dir
         if not isinstance(state_dir, Path):

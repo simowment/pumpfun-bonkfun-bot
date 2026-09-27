@@ -75,8 +75,11 @@ VALID_INTERVALS = {
 
 
 HTTP_TOO_MANY_REQUESTS = 429
-HTTP_RATE_LIMIT_ATTEMPTS = 4
+# pump.fun answers ~half of paced requests with 429 + Retry-After: 1 (burst
+# limit), so retries are cheap and need headroom.
+HTTP_RATE_LIMIT_ATTEMPTS = 10
 HTTP_RATE_LIMIT_MAX_WAIT_SECONDS = 30.0
+HTTP_RATE_LIMIT_BASE_WAIT_SECONDS = 2.0
 # swap-api rejects trade pages larger than 100 (verified live).
 TRADES_PAGE_LIMIT = 100
 TRADES_PAGE_PACING_SECONDS = 0.5
@@ -112,7 +115,11 @@ def _http_json(
             ):
                 raise
             retry_after = exc.headers.get("Retry-After") if exc.headers else None
-            wait = float(retry_after) if retry_after and retry_after.isdigit() else 2.0
+            wait = (
+                float(retry_after)
+                if retry_after and retry_after.isdigit()
+                else HTTP_RATE_LIMIT_BASE_WAIT_SECONDS * 2**attempt
+            )
             logger.info("pump.fun rate limited; retrying in %.0fs", wait)
             time.sleep(min(wait, HTTP_RATE_LIMIT_MAX_WAIT_SECONDS))
     raise AssertionError("unreachable")
@@ -418,7 +425,9 @@ class PumpFunApiClient:
             List of coin dicts with ``mint``, ``creator`` and
             ``created_timestamp`` keys (plus ``market_cap`` /
             ``usd_market_cap`` / ``ath_market_cap`` when present).
-            Empty list on failure.
+
+        Raises:
+            PumpFunApiError: The listing could not be fetched or narrowed.
         """
         url = (
             f"{PUMPFUN_FRONTEND_API_BASE}/coins?sort={sort}"
@@ -436,17 +445,9 @@ class PumpFunApiClient:
             if isinstance(resp, dict):
                 coins = resp.get("coins", [])
                 return [c for c in coins if isinstance(c, dict)]
-            return []
-        except urllib.error.HTTPError as exc:
-            logger.warning(
-                "Pump.fun API recent launches fetch failed (%s): %s",
-                exc.code,
-                exc,
-            )
-            return []
-        except Exception as exc:
-            logger.warning("Pump.fun API request failed: %s", exc)
-            return []
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise PumpFunApiError(f"launch listing unavailable: {exc}") from exc
+        raise PumpFunApiError("launch listing returned an unexpected shape")
 
     def fetch_sol_price(self) -> dict:
         """Return current SOL price.
