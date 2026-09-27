@@ -43,7 +43,8 @@
   });
 
   function symbolFor(reportData, mint) {
-    const item = (reportData?.entity_mints || []).find((entry) => entry?.mint === mint);
+    const item = [...(reportData?.launches || []), ...(reportData?.entity_mints || [])]
+      .find((entry) => entry?.mint === mint);
     return item?.symbol || item?.name || shortId(mint, 4, 4);
   }
 
@@ -437,13 +438,13 @@
   .trace-lane { display: flex; align-items: center; min-width: max-content; min-height: 360px; }
 
   .transfer-card {
-    width: 380px;
+    width: 345px;
     background: #151b2c;
     border: 1px solid #293451;
     border-radius: 7px;
     box-shadow: 0 10px 25px rgba(0, 0, 0, .18);
     overflow: hidden;
-    flex: 0 0 380px;
+    flex: 0 0 345px;
   }
   .card-header { min-height: 42px; padding: 8px 10px; justify-content: space-between; gap: 8px; border-bottom: 1px solid #293451; }
   .card-title { gap: 5px; font: 650 12px var(--font-mono); white-space: nowrap; }
@@ -456,7 +457,7 @@
   .icon-button { display: inline-flex; align-items: center; justify-content: center; padding: 3px 5px; color: #8d99bd; background: transparent; text-decoration: none; }
   .icon-button:hover { color: #eeeaff; background: #252a42; }
 
-  .table-head, .transfer-row { display: grid; grid-template-columns: minmax(110px, 1fr) 104px 34px 38px 24px; align-items: center; column-gap: 6px; }
+  .table-head, .transfer-row { display: grid; grid-template-columns: minmax(96px, 1fr) 100px 28px 34px 24px; align-items: center; column-gap: 5px; }
   .transfer-row { position: relative; }
   .table-head { padding: 7px 8px; color: #687492; font-size: 9px; text-transform: uppercase; letter-spacing: .04em; }
   .transfer-row { min-height: 43px; padding: 5px 8px; border-top: 1px solid #202a42; font-size: 10px; }
@@ -484,8 +485,8 @@
   .connector { width: 110px; flex: 0 0 110px; display: flex; align-items: center; justify-content: center; gap: 0; }
   .connector-line { width: 32px; border-top: 2px dotted #62558d; }
   .connector::before, .connector::after { content: ''; width: 7px; height: 7px; border: 2px solid #7667a8; background: #0d101c; border-radius: 50%; flex: 0 0 auto; }
-  .root-connector { width: 170px; flex-basis: 170px; }
-  .root-connector .connector-line { width: 23px; }
+  .root-connector { width: 150px; flex-basis: 150px; }
+  .root-connector .connector-line { width: 14px; }
   .pivot-card { gap: 6px; padding: 8px 7px 8px 10px; cursor: pointer; white-space: nowrap; }
   .pivot-expand, .connector-button { width: 22px; height: 22px; border-radius: 50%; padding: 0; color: #d2caff; background: #35295d; font-size: 15px; line-height: 1; }
   .connector-button { flex: 0 0 22px; }

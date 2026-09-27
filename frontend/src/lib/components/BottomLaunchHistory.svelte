@@ -36,14 +36,14 @@
   let filteredTokens = $derived(
     tokens.filter((t) => {
       if (tokenFilter === 'all') return true;
-      if (tokenFilter === 'launch') return t.action_type === 'launch' || t.action === 'LAUNCHED';
-      if (tokenFilter === 'buy') return t.action_type === 'buy' || t.action !== 'LAUNCHED';
+      if (tokenFilter === 'launch') return t.action_type === 'launch';
+      if (tokenFilter === 'buy') return t.action_type === 'buy';
       return true;
     })
   );
 
-  let launchCount = $derived(tokens.filter((t) => t.action_type === 'launch' || t.action === 'LAUNCHED').length);
-  let buyCount = $derived(tokens.filter((t) => t.action_type === 'buy' || t.action !== 'LAUNCHED').length);
+  let launchCount = $derived(tokens.filter((t) => t.action_type === 'launch').length);
+  let buyCount = $derived(tokens.filter((t) => t.action_type === 'buy').length);
 
   function exportCsv() {
     if (!tokens || tokens.length === 0) return;
