@@ -280,6 +280,16 @@ class LaunchReplay:
             graduated=any(not trade.on_curve for trade in after),
         )
 
+    def path_after_entry(self) -> list[tuple[float, float]]:
+        """``(seconds since entry, price / entry price)`` for every later fill."""
+        return [
+            (
+                trade.timestamp_s - self._entry.timestamp_s,
+                trade.price_sol / self._entry.price_sol,
+            )
+            for trade in self._trades[self._entry_index :]
+        ]
+
     def _fill_after(self, trigger: LaunchTrade) -> LaunchTrade:
         """Curve state when our exit lands, ``reaction_slots`` after a trigger."""
         index = bisect.bisect_right(
