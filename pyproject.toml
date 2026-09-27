@@ -27,7 +27,6 @@ dependencies = [
     "fastapi>=0.115.0",
     "plotly>=7.0.0",
     "lightweight-charts>=2.1",
-    "mplfinance>=0.12.10b0",
     "matplotlib>=3.11.1",
     "eth-account>=0.14.0",
     "web3>=8.0.0",

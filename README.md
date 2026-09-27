@@ -276,6 +276,11 @@ uv run rug_intel profile <FUNDER_OR_MINT>              # burner set + launch out
 uv run rug_intel wallet <MINT_OR_WALLET> --backtest    # resolve + intelligence + optimizer
 uv run rug_discover fleet <MINT>                       # bundle wallets -> operator history
 ```
+Backtests optimize a fixed take-profit (grid plus a level under each launch's
+ATH) and print a TP sweep: hit rate, average win and loss after fees. Add
+`--plot` to `history --backtest` or `fleet` for candle charts of every launch
+(USD market cap, our buy and sell under the best rule, TP/SL lines) under
+`.state/plots/`.
 
 ### Terminal UI (TUI)
 ```powershell

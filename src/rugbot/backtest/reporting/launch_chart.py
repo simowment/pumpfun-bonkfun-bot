@@ -1,9 +1,10 @@
-"""MetaTrader-style candle charts of an operator's launches with our trades."""
+"""MetaTrader-style candle charts of replayed launches with our buy and sell."""
 
 from __future__ import annotations
 
 import math
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import plotly.graph_objects as go
@@ -14,10 +15,9 @@ from rugbot.domain.ohlc import TradeTick, build_ohlc_candles
 from rugbot.domain.pump_curve import TOKEN_SUPPLY_UI
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from rugbot.backtest.launch_replay import ExitRule, LaunchReplay, LaunchTrade
 
+PLOTS_DIR = Path(".state/plots")
 # Candle sizes in seconds; the smallest one keeping a launch under
 # MAX_CANDLES candles is used.
 TIMEFRAMES_S = (1, 5, 15, 30, 60, 300, 900)
@@ -145,16 +145,23 @@ def _launch_traces(replay: LaunchReplay, rule: ExitRule) -> tuple[list, str]:
     return traces, title
 
 
-def write_fleet_plot(
-    replays: list[LaunchReplay], rule: ExitRule, out: Path, *, shown_mint: str
-) -> None:
+def write_launch_charts(
+    replays: list[LaunchReplay],
+    rule: ExitRule,
+    out: Path,
+    *,
+    shown_mint: str | None = None,
+) -> Path:
     """Write one candle chart per launch, picked from a dropdown, to HTML.
 
     Args:
-        replays: Operator launches, each with its entry already fixed.
+        replays: Replayed launches, each with its entry already fixed.
         rule: Exit rule whose sell is marked on every chart.
         out: HTML file to write.
-        shown_mint: Launch displayed when the page opens.
+        shown_mint: Launch displayed when the page opens; the first otherwise.
+
+    Returns:
+        The written file.
     """
     ordered = sorted(replays, key=lambda replay: replay.profile.create_slot)
     shown = next(
@@ -199,7 +206,7 @@ def write_fleet_plot(
                 "buttons": buttons,
                 "x": 1.0,
                 "xanchor": "right",
-                "y": 1.09,
+                "y": 1.045,
                 "yanchor": "top",
                 "bgcolor": "#1f1f1f",
                 "font": {"color": TEXT},
@@ -231,3 +238,4 @@ def write_fleet_plot(
     fig.update_yaxes(title_text="vol ($)", row=2, col=1)
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(str(out), include_plotlyjs=True)
+    return out

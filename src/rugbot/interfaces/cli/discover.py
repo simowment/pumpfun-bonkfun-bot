@@ -13,6 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rugbot.backtest.reporting.launch_chart import PLOTS_DIR
 from rugbot.discover.collector import run_collect
 
 if TYPE_CHECKING:
@@ -330,10 +331,9 @@ def build_parser() -> argparse.ArgumentParser:
     fleet.add_argument("--size", type=float, default=0.1)
     fleet.add_argument(
         "--plot",
-        type=Path,
-        metavar="HTML",
-        help="write candle charts of the operator launches, with entry and exit "
-        "under the best rule, to this HTML file",
+        action="store_true",
+        help=f"write candle charts of the operator launches, with entry and exit "
+        f"under the best rule, under {PLOTS_DIR}/",
     )
 
     patterns = sub.add_parser(
@@ -526,13 +526,12 @@ def _run_fleet(args: argparse.Namespace) -> int:
     from datetime import UTC, datetime
 
     from rugbot.backtest.launch_replay import (
-        EXIT_TAKE_PROFIT,
         SIGNAL_SELL_RULE,
-        TAKE_PROFIT_GRID_PCT,
         LaunchReplay,
         LaunchReplayError,
         ReplayCosts,
         describe_exit_rule,
+        describe_take_profit_sweep,
         summarize_rules,
         take_profit_rules,
         trades_from_swap_api,
@@ -639,21 +638,20 @@ def _run_fleet(args: argparse.Namespace) -> int:
         replays, take_profit_rules(r.profile.ath_multiple for r in replays)
     )
     best = summaries[0]
-    print("\nTP sweep (best stop/hold per level; hit = TP filled):")
-    for level in TAKE_PROFIT_GRID_PCT:
-        top = next(x for x in summaries if x.rule.take_profit_pct == level)
-        hits = sum(r.exit_reason == EXIT_TAKE_PROFIT for r in top.results)
-        print(
-            f"  TP +{level:4.0f}%  hit {hits / top.samples:4.0%}  win "
-            f"{top.winrate:4.0%}  EV {top.net_ev_sol:+.4f}  cons.EV "
-            f"{top.conservative_ev_sol:+.4f}  [{describe_exit_rule(top.rule)}]"
-        )
+    print("\nTP sweep (best stop/hold per level, % of stake after fees):")
+    for line in describe_take_profit_sweep(summaries, args.size):
+        print(f"  {line}")
     dev_sell = summarize_rules(replays, [SIGNAL_SELL_RULE])[0]
     if args.plot:
-        from rugbot.backtest.reporting.fleet_plot import write_fleet_plot
+        from rugbot.backtest.reporting.launch_chart import write_launch_charts
 
-        write_fleet_plot(replays, best.rule, args.plot, shown_mint=args.mint)
-        print(f"plot written to {args.plot}")
+        chart = write_launch_charts(
+            replays,
+            best.rule,
+            PLOTS_DIR / f"fleet_{args.mint[:8]}.html",
+            shown_mint=args.mint,
+        )
+        print(f"charts: {chart}")
     verdict = "EDGE" if best.conservative_ev_sol > 0 else "no edge"
     small = " (small sample < 10)" if best.samples < BIBLE_MIN_SAMPLES else ""
     print(

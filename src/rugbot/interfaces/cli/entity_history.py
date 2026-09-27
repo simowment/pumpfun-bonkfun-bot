@@ -18,7 +18,6 @@ import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rugbot.backtest.launch_replay import (
@@ -28,10 +27,12 @@ from rugbot.backtest.launch_replay import (
     ReplayCosts,
     RuleSummary,
     describe_exit_rule,
+    describe_take_profit_sweep,
     summarize_rules,
     take_profit_rules,
     trades_from_swap_api,
 )
+from rugbot.backtest.reporting.launch_chart import PLOTS_DIR, write_launch_charts
 from rugbot.backtest.reporting.visualizer import (
     TradePerformanceRecord,
     export_vectorbt_html_report,
@@ -60,6 +61,7 @@ from rugbot.utils.logger import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
 logger = get_logger(__name__)
 
@@ -149,7 +151,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--plot",
         action="store_true",
-        help="Write an HTML equity report for the best rule under .state/.",
+        help=f"Write the best rule's equity report and per-launch candle charts "
+        f"under {PLOTS_DIR}/.",
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON only.")
     return parser
@@ -350,6 +353,9 @@ def _render_backtest(
                 f"   WARNING: {len(profiles)} launches < {BIBLE_MIN_SAMPLES} "
                 "(Bible minimum); results are not evidence of an edge"
             )
+        print("   TP sweep (best stop/hold per level, % of stake after fees):")
+        for line in describe_take_profit_sweep(summaries, costs.quote_size_sol):
+            print(f"     {line}")
         dev_rule = summarize_rules(replays, [SIGNAL_SELL_RULE])[0]
         print(
             f"   (comparison) {describe_exit_rule(dev_rule.rule)}: "
@@ -390,7 +396,7 @@ def _export_plot(funder: str, summary: RuleSummary, stake_sol: float) -> Path:
         records=records,
         total_fees_sol=summary.fees_sol,
         market_impact_drag_sol=0.0,
-        output_path=Path(".state") / f"entity_backtest_{funder[:8]}.html",
+        output_path=PLOTS_DIR / f"history_equity_{funder[:8]}.html",
     )
 
 
@@ -458,7 +464,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         _render_backtest(replays, summaries, skipped)
         if args.plot and summaries:
-            print(
-                f"\n report: {_export_plot(args.funders[0], summaries[0], args.size)}"
+            funder = args.funders[0]
+            print(f"\n equity: {_export_plot(funder, summaries[0], args.size)}")
+            charts = write_launch_charts(
+                replays, summaries[0].rule, PLOTS_DIR / f"history_{funder[:8]}.html"
             )
+            print(f" charts: {charts}")
     return 0

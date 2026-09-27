@@ -411,6 +411,34 @@ def take_profit_rules(ath_multiples: Iterable[float] = ()) -> list[ExitRule]:
     ]
 
 
+def describe_take_profit_sweep(
+    summaries: Sequence[RuleSummary], quote_size_sol: float
+) -> list[str]:
+    """One line per grid take-profit: its best stop/hold, hit rate, win/loss size.
+
+    Average win and loss are percent of the stake after all fees, which shows
+    whether a level loses on how often it fills or on how hard losers dump.
+    """
+    lines = []
+    for level in TAKE_PROFIT_GRID_PCT:
+        top = next(s for s in summaries if s.rule.take_profit_pct == level)
+        pnls = [result.net_pnl_sol for result in top.results]
+        wins = [pnl for pnl in pnls if pnl > 0]
+        losses = [pnl for pnl in pnls if pnl <= 0]
+        hits = sum(result.exit_reason == EXIT_TAKE_PROFIT for result in top.results)
+        avg_win = f"{sum(wins) / len(wins) / quote_size_sol:+5.0%}" if wins else "  n/a"
+        avg_loss = (
+            f"{sum(losses) / len(losses) / quote_size_sol:+5.0%}" if losses else "  n/a"
+        )
+        lines.append(
+            f"TP +{level:4.0f}%  hit {hits:>3}/{top.samples:<3} avg win "
+            f"{avg_win}  avg loss {avg_loss}  EV "
+            f"{top.net_ev_sol / quote_size_sol:+6.1%}/trade  "
+            f"[{describe_exit_rule(top.rule)}]"
+        )
+    return lines
+
+
 def _conservative_ev(pnls: Sequence[float]) -> float:
     """Bible EV with the winrate at its 95% Wilson lower bound.
 
