@@ -332,7 +332,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--plot",
         type=Path,
         metavar="HTML",
-        help="write price paths and peaks of the operator launches to this file",
+        help="write candle charts of the operator launches, with entry and exit "
+        "under the best rule, to this HTML file",
     )
 
     patterns = sub.add_parser(
@@ -629,12 +630,12 @@ def _run_fleet(args: argparse.Namespace) -> int:
         )
     if not replays:
         return 0
+    best = summarize_rules(replays, default_exit_rules())[0]
     if args.plot:
         from rugbot.backtest.reporting.fleet_plot import write_fleet_plot
 
-        write_fleet_plot(replays, args.plot, entry_delay_slots=args.entry_delay)
+        write_fleet_plot(replays, best.rule, args.plot, shown_mint=args.mint)
         print(f"plot written to {args.plot}")
-    best = summarize_rules(replays, default_exit_rules())[0]
     verdict = "EDGE" if best.conservative_ev_sol > 0 else "no edge"
     small = " (small sample < 10)" if best.samples < BIBLE_MIN_SAMPLES else ""
     print(

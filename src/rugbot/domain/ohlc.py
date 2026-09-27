@@ -41,7 +41,7 @@ def build_ohlc_candles(
         return []
 
     sorted_ticks = sorted(ticks, key=lambda t: t.timestamp)
-    start_ts = sorted_ticks[0].timestamp
+    start_ts = sorted_ticks[0].timestamp // timeframe_seconds * timeframe_seconds
     end_ts = sorted_ticks[-1].timestamp
 
     # Group ticks into timeframe buckets
@@ -55,7 +55,7 @@ def build_ohlc_candles(
     if fill_empty and (end_ts - start_ts) // timeframe_seconds <= max_candles * 3:
         # Continuous time series with forward-filled prices
         curr_price = sorted_ticks[0].price
-        for ts in range(start_ts, end_ts + timeframe_seconds, timeframe_seconds):
+        for ts in range(start_ts, end_ts + 1, timeframe_seconds):
             if ts in buckets:
                 b_ticks = buckets[ts]
                 prices = [t.price for t in b_ticks]

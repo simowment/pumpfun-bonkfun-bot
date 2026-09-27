@@ -1,130 +1,214 @@
-"""Interactive chart of an operator's launches, as seen from our entry."""
+"""MetaTrader-style candle charts of an operator's launches with our trades."""
 
 from __future__ import annotations
 
-import statistics
+import math
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from rugbot.backtest.launch_replay import describe_exit_rule, market_cap_sol
+from rugbot.domain.ohlc import TradeTick, build_ohlc_candles
+
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from rugbot.backtest.launch_replay import LaunchReplay
+    from rugbot.backtest.launch_replay import ExitRule, LaunchReplay
 
-PATH_WINDOW_S = 600
-MEDIAN_STEP_S = 5
-LAUNCH_LINE_COLOR = "rgba(82, 81, 78, 0.35)"
-MEDIAN_COLOR = "#2a78d6"
-REFERENCE_COLOR = "#8a8984"
-SURFACE_COLOR = "#fcfcfb"
-TEXT_COLOR = "#0b0b0b"
-GRID_COLOR = "#ebebe8"
+# Candle sizes in seconds; the smallest one keeping a launch under
+# MAX_CANDLES candles is used.
+TIMEFRAMES_S = (1, 5, 15, 30, 60, 300, 900)
+MAX_CANDLES = 300
+# Chart window: creation until this long after our exit or the peak, if later.
+AFTER_LAST_EVENT_S = 120
+TRACES_PER_LAUNCH = 5
+BACKGROUND = "#0b0b0b"
+GRID = "#262626"
+TEXT = "#d4d4d4"
+UP = "#26a69a"
+DOWN = "#ef5350"
+BUY = "#3987e5"
+SELL = "#ef5350"
 
 
-def _multiple_at(path: list[tuple[float, float]], seconds: float) -> float:
-    """Last observed multiple at or before ``seconds`` (path is time-ordered)."""
-    value = path[0][1]
-    for at, multiple in path:
-        if at > seconds:
-            break
-        value = multiple
-    return value
+def _timeframe(span_s: float) -> int:
+    return next(
+        (tf for tf in TIMEFRAMES_S if span_s / tf <= MAX_CANDLES), TIMEFRAMES_S[-1]
+    )
+
+
+def _launch_traces(replay: LaunchReplay, rule: ExitRule) -> tuple[list, str]:
+    """Candles, volume, entry, exit and trade-line traces plus a chart title."""
+    result = replay.run(rule)
+    entry = replay.entry
+    exit_at = entry.timestamp_s + result.held_s
+    start = replay.trades[0].timestamp_s
+    peak_at = entry.timestamp_s + replay.profile.seconds_to_ath
+    end = min(max(exit_at, peak_at) + AFTER_LAST_EVENT_S, replay.trades[-1].timestamp_s)
+    ticks = [
+        TradeTick(
+            timestamp=int(trade.timestamp_s),
+            price=market_cap_sol(trade.price_sol),
+            volume=trade.amount_sol,
+            is_buy=trade.is_buy,
+            signature="",
+        )
+        for trade in replay.trades
+        if trade.timestamp_s <= end
+    ]
+    timeframe = _timeframe(end - start)
+    candles = build_ohlc_candles(
+        ticks, timeframe_seconds=timeframe, max_candles=math.ceil(MAX_CANDLES * 1.5)
+    )
+    times = [datetime.fromtimestamp(c.timestamp, tz=UTC) for c in candles]
+    entry_time = datetime.fromtimestamp(entry.timestamp_s, tz=UTC)
+    exit_time = datetime.fromtimestamp(exit_at, tz=UTC)
+    entry_mc = replay.profile.entry_mc_sol
+    won = result.net_pnl_sol > 0
+    traces = [
+        go.Candlestick(
+            x=times,
+            open=[c.open for c in candles],
+            high=[c.high for c in candles],
+            low=[c.low for c in candles],
+            close=[c.close for c in candles],
+            increasing={"line": {"color": UP}, "fillcolor": UP},
+            decreasing={"line": {"color": DOWN}, "fillcolor": DOWN},
+            name="MC (SOL)",
+        ),
+        go.Bar(
+            x=times,
+            y=[c.volume for c in candles],
+            marker={
+                "color": [UP if c.close >= c.open else DOWN for c in candles],
+            },
+            name="volume (SOL)",
+        ),
+        go.Scatter(
+            x=[entry_time],
+            y=[entry_mc],
+            mode="markers",
+            marker={"symbol": "triangle-up", "size": 16, "color": BUY},
+            hovertemplate=f"buy {replay.costs.quote_size_sol:g} SOL (block +%{{customdata}})"
+            "<br>MC %{y:.1f} SOL"
+            "<extra></extra>",
+            customdata=[replay.profile.entry_slot - replay.profile.create_slot],
+            name="buy",
+        ),
+        go.Scatter(
+            x=[exit_time],
+            y=[result.exit_mc_sol],
+            mode="markers",
+            marker={"symbol": "triangle-down", "size": 16, "color": SELL},
+            hovertemplate=f"sell ({result.exit_reason}) after {result.held_s:.0f}s"
+            f"<br>MC %{{y:.1f}} SOL<br>net {result.net_pnl_sol:+.4f} SOL"
+            "<extra></extra>",
+            name="sell",
+        ),
+        go.Scatter(
+            x=[entry_time, exit_time],
+            y=[entry_mc, result.exit_mc_sol],
+            mode="lines",
+            line={"color": UP if won else DOWN, "dash": "dash", "width": 1},
+            hoverinfo="skip",
+            name="trade",
+        ),
+    ]
+    created = datetime.fromtimestamp(start, tz=UTC)
+    title = (
+        f"{replay.mint}  {created:%m-%d %H:%M} UTC  {timeframe}s  "
+        f"buy @ {entry_mc:.1f} → sell @ {result.exit_mc_sol:.1f} SOL MC "
+        f"({result.exit_reason}, {result.held_s:.0f}s)  net "
+        f"{result.net_pnl_sol:+.4f} SOL  peak {replay.profile.ath_multiple:.2f}x"
+    )
+    return traces, title
 
 
 def write_fleet_plot(
-    replays: list[LaunchReplay], out: Path, *, entry_delay_slots: int
+    replays: list[LaunchReplay], rule: ExitRule, out: Path, *, shown_mint: str
 ) -> None:
-    """Write price-vs-entry paths and per-launch peaks to an HTML file.
+    """Write one candle chart per launch, picked from a dropdown, to HTML.
 
     Args:
         replays: Operator launches, each with its entry already fixed.
+        rule: Exit rule whose sell is marked on every chart.
         out: HTML file to write.
-        entry_delay_slots: Entry slot offset, shown in the titles.
+        shown_mint: Launch displayed when the page opens.
     """
-    paths = {
-        replay.mint: [p for p in replay.path_after_entry() if p[0] <= PATH_WINDOW_S]
-        for replay in replays
-    }
+    ordered = sorted(replays, key=lambda replay: replay.profile.create_slot)
+    shown = next(
+        (i for i, replay in enumerate(ordered) if replay.mint == shown_mint), 0
+    )
     fig = make_subplots(
         rows=2,
         cols=1,
-        vertical_spacing=0.14,
-        subplot_titles=(
-            f"Price vs our fill (block +{entry_delay_slots}), first "
-            f"{PATH_WINDOW_S // 60} min — grey: each launch, blue: median",
-            "Peak multiple reached after our fill, per launch",
-        ),
+        shared_xaxes=True,
+        row_heights=(0.78, 0.22),
+        vertical_spacing=0.03,
     )
-    for replay in replays:
-        path = paths[replay.mint]
-        fig.add_trace(
-            go.Scatter(
-                x=[at for at, _ in path],
-                y=[multiple for _, multiple in path],
-                mode="lines",
-                line={"color": LAUNCH_LINE_COLOR, "width": 1},
-                name=replay.mint[:8],
-                hovertemplate=f"{replay.mint[:8]}  %{{x:.0f}}s  %{{y:.2f}}x"
-                "<extra></extra>",
-                showlegend=False,
-            ),
-            row=1,
-            col=1,
-        )
-    grid = list(range(0, PATH_WINDOW_S + 1, MEDIAN_STEP_S))
-    median = [
-        statistics.median(_multiple_at(path, at) for path in paths.values() if path)
-        for at in grid
-    ]
-    fig.add_trace(
-        go.Scatter(
-            x=grid,
-            y=median,
-            mode="lines",
-            line={"color": MEDIAN_COLOR, "width": 2},
-            hovertemplate="median  %{x:.0f}s  %{y:.2f}x<extra></extra>",
-            showlegend=False,
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_hline(y=1, line={"color": REFERENCE_COLOR, "dash": "dot"}, row=1, col=1)
-
-    ranked = sorted(replays, key=lambda replay: replay.profile.ath_multiple)
-    fig.add_trace(
-        go.Bar(
-            x=[replay.mint[:8] for replay in ranked],
-            y=[replay.profile.ath_multiple for replay in ranked],
-            marker={"color": MEDIAN_COLOR},
-            customdata=[
-                (replay.profile.entry_mc_sol, replay.profile.seconds_to_ath)
-                for replay in ranked
+    titles = []
+    for index, replay in enumerate(ordered):
+        traces, title = _launch_traces(replay, rule)
+        titles.append(title)
+        for trace_index, trace in enumerate(traces):
+            trace.visible = index == shown
+            trace.showlegend = False
+            fig.add_trace(trace, row=2 if trace_index == 1 else 1, col=1)
+    buttons = [
+        {
+            "label": f"{datetime.fromtimestamp(replay.profile.created_at_s, tz=UTC):%m-%d %H:%M}"
+            f"  {replay.mint[:8]}  {replay.profile.ath_multiple:.2f}x",
+            "method": "update",
+            "args": [
+                {
+                    "visible": [
+                        slot // TRACES_PER_LAUNCH == index
+                        for slot in range(TRACES_PER_LAUNCH * len(ordered))
+                    ]
+                },
+                {"title.text": titles[index]},
             ],
-            hovertemplate="%{x}  peak %{y:.2f}x<br>entry MC %{customdata[0]:.1f} SOL"
-            "  peak after %{customdata[1]:.0f}s<extra></extra>",
-            showlegend=False,
-        ),
-        row=2,
-        col=1,
-    )
-    for level in (1, 2):
-        fig.add_hline(
-            y=level, line={"color": REFERENCE_COLOR, "dash": "dot"}, row=2, col=1
-        )
-    fig.update_xaxes(title_text="seconds after our fill", row=1, col=1)
-    fig.update_yaxes(title_text="price / our fill price", type="log", row=1, col=1)
-    fig.update_yaxes(title_text="peak multiple", row=2, col=1)
-    fig.update_xaxes(tickangle=-45, row=2, col=1)
-    fig.update_xaxes(gridcolor=GRID_COLOR)
-    fig.update_yaxes(gridcolor=GRID_COLOR)
+        }
+        for index, replay in enumerate(ordered)
+    ]
     fig.update_layout(
-        height=950,
-        paper_bgcolor=SURFACE_COLOR,
-        plot_bgcolor=SURFACE_COLOR,
-        font={"color": TEXT_COLOR, "size": 12},
-        margin={"l": 60, "r": 20, "t": 60, "b": 100},
+        title={"text": titles[shown], "x": 0.01, "font": {"size": 13}},
+        updatemenus=[
+            {
+                "buttons": buttons,
+                "x": 1.0,
+                "xanchor": "right",
+                "y": 1.09,
+                "yanchor": "top",
+                "bgcolor": "#1f1f1f",
+                "font": {"color": TEXT},
+                "active": shown,
+            }
+        ],
+        annotations=[
+            {
+                "text": f"exit rule: {describe_exit_rule(rule)}",
+                "xref": "paper",
+                "yref": "paper",
+                "x": 0.01,
+                "y": 1.02,
+                "showarrow": False,
+                "font": {"color": TEXT, "size": 11},
+            }
+        ],
+        height=680,
+        paper_bgcolor=BACKGROUND,
+        plot_bgcolor=BACKGROUND,
+        font={"color": TEXT, "size": 12},
+        margin={"l": 60, "r": 20, "t": 90, "b": 40},
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
     )
+    fig.update_xaxes(gridcolor=GRID, showspikes=True, spikecolor="#6b6b6b")
+    fig.update_yaxes(gridcolor=GRID, side="right")
+    fig.update_yaxes(title_text="market cap (SOL)", row=1, col=1)
+    fig.update_yaxes(title_text="vol", row=2, col=1)
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(str(out), include_plotlyjs=True)
