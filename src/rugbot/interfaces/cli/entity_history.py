@@ -28,7 +28,6 @@ from rugbot.backtest.launch_replay import (
     RuleSummary,
     default_exit_rules,
     describe_exit_rule,
-    nonstandard_curve_reason,
     summarize_rules,
     trades_from_swap_api,
 )
@@ -36,6 +35,7 @@ from rugbot.backtest.reporting.visualizer import (
     TradePerformanceRecord,
     export_vectorbt_html_report,
 )
+from rugbot.domain.pump_curve import nonstandard_curve_reason
 from rugbot.integrations.pumpfun_api import PumpFunApiError, get_client
 from rugbot.tracker.entity_history import (
     EntityLaunchHistory,

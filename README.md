@@ -108,6 +108,22 @@ uv run rug_tracker disable|enable|show|rm <WALLET>
 TP/SL sell percentages are cumulative, and an active trailing stop overrides
 TP (the list marks it). Invalid rules are rejected before they are saved.
 
+### Paper desk (`rug_run`)
+Paper-trades every enabled `paper` tracker from one `logsSubscribe` on the Pump
+program (confirmed commitment, uses `SOLANA_RPC_HTTP`/`SOLANA_RPC_WEBSOCKET`).
+Supports `new_token_creations` and `track_buys`. A decision in slot `s` fills
+at the curve state at the end of slot `s + --landing-slots` (default 2), with
+the fee rates the coin's trades actually paid plus each tracker's priority fee
+and Jito tip. USDC/other-quote and Mayhem coins are skipped. Coins that
+graduate exit at the final curve price (PumpSwap is not streamed). Never signs
+or submits anything; positions survive restarts.
+
+```bash
+uv run rug_run                  # runs until Ctrl+C; trackers reload every 10 s
+uv run rug_run --seconds 300    # short session
+uv run rug_run --report         # per tracker: closed trades, win %, net PnL, fees, open
+```
+
 ### Step 1: Ingest & Refresh Cabal Clusters
 Reverse-engineers recent Pump.fun winners, extracts earliest unique buyers, clusters them by funder origin, and persists to `.state/cabal/cabal_clusters.sqlite3`:
 ```powershell

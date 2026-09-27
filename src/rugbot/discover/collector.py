@@ -5,8 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
 import datetime as dt
 import json
 import os
@@ -20,9 +18,9 @@ from sol_trade_sdk.solana.provider_pool import RpcHttpTransport, RpcProviderPool
 from solders.pubkey import Pubkey
 
 from rugbot.backtest.trajectory.finalized_trade_builder import (
-    TRADE_EVENT_DISCRIMINATOR,
     decode_pump_trade_event,
     decode_pump_trade_event_proofs,
+    pump_trade_payloads,
 )
 from rugbot.discover.store import (
     append_observation,
@@ -388,7 +386,6 @@ async def _poll_trades_for_mint(
 # Trades of each collected launch are recorded from finalized Pump program logs
 # for this long after the create notification.
 TRADE_RECORD_WINDOW_SECONDS = 2 * 3600
-PROGRAM_DATA_PREFIX = "Program data: "
 PUMP_TRADE_MINT_OFFSET = 8
 PUBKEY_BYTES = 32
 # discover_trades side for a launch whose trade events are outside the modeled
@@ -404,15 +401,7 @@ def _record_trade_logs(
 ) -> None:
     """Persist every Pump TradeEvent of a tracked mint in one finalized tx."""
     now = time.monotonic()
-    for event_index, line in enumerate(notification.logs):
-        if not line.startswith(PROGRAM_DATA_PREFIX):
-            continue
-        try:
-            payload = base64.b64decode(line[len(PROGRAM_DATA_PREFIX) :], validate=True)
-        except (binascii.Error, ValueError):
-            continue
-        if not payload.startswith(TRADE_EVENT_DISCRIMINATOR):
-            continue
+    for event_index, payload in pump_trade_payloads(notification.logs):
         mint = str(
             Pubkey.from_bytes(
                 payload[PUMP_TRADE_MINT_OFFSET : PUMP_TRADE_MINT_OFFSET + PUBKEY_BYTES]

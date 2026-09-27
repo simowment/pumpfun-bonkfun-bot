@@ -6,8 +6,6 @@ from rugbot.backtest.launch_replay import (
     EXIT_DEV_SELL,
     EXIT_STOP_LOSS,
     EXIT_TAKE_PROFIT,
-    INITIAL_VIRTUAL_BASE,
-    INITIAL_VIRTUAL_QUOTE,
     ExitRule,
     LaunchReplay,
     LaunchReplayError,
@@ -17,6 +15,7 @@ from rugbot.backtest.launch_replay import (
     summarize_rules,
     trades_from_swap_api,
 )
+from rugbot.domain.pump_curve import INITIAL_VIRTUAL_BASE, INITIAL_VIRTUAL_QUOTE
 
 DEV = "dev"
 BUNDLER = "bundler"

@@ -94,6 +94,7 @@ class PumpTradeEventProof:
     real_quote_reserves_base_units: int = 0
     lp_fee_basis_points: int = 0
     lp_fee_base_units: int = 0
+    mayhem_mode: bool = False
 
 
 @dataclass(frozen=True, slots=True)

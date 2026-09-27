@@ -1111,14 +1111,19 @@ def _partial_exit(
 ) -> ExitRuleDecision:
     target = max(state.exited_fraction_ppm, level.sell_fraction_ppm)
     delta_fraction = target - state.exited_fraction_ppm
-    amount = min(
-        current_position_base_units,
-        max(
-            1,
-            original_position_base_units
-            * delta_fraction
-            // PROBABILITY_PPM_DENOMINATOR,
-        ),
+    # A level that reaches 100% sells everything left, never leaving rounding dust.
+    amount = (
+        current_position_base_units
+        if target >= PROBABILITY_PPM_DENOMINATOR
+        else min(
+            current_position_base_units,
+            max(
+                1,
+                original_position_base_units
+                * delta_fraction
+                // PROBABILITY_PPM_DENOMINATOR,
+            ),
+        )
     )
     if level_kind == "take_profit":
         next_state = replace(

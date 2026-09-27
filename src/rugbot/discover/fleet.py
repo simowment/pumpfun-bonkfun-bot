@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from rugbot.backtest.launch_replay import nonstandard_curve_reason
 from rugbot.domain.decisions import AbstainResult
+from rugbot.domain.pump_curve import nonstandard_curve_reason
 from rugbot.ingest.pump.create_decoder import PUMP_PROGRAM_ID
 from rugbot.ingest.pump.create_event_decoder import decode_pump_create_event_logs
 from rugbot.tracker.funding_chain import (

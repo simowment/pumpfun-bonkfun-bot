@@ -7,6 +7,10 @@ from rugbot.domain.amounts import Slot
 BASIS_POINTS_DENOMINATOR = 10_000
 
 
+# Solana charges this per signature on every transaction.
+BASE_SIGNATURE_FEE_LAMPORTS = 5_000
+
+
 @dataclass(frozen=True, slots=True)
 class FeeConfig:
     """Known versioned fee configuration.

@@ -7,9 +7,10 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 import base58
@@ -28,6 +29,7 @@ from rugbot.ingest.pump.swap_event_decoder import EventReader
 from rugbot.storage.jsonl_observation_store import observation_identity
 
 TRADE_EVENT_DISCRIMINATOR = bytes([189, 219, 127, 211, 78, 230, 97, 238])
+PROGRAM_DATA_LOG_PREFIX = "Program data: "
 SHAREHOLDER_ENTRY_BYTES = 32 + 2
 # holder_rewards_bps: u64 + holder_rewards: u64 appended by the current program.
 HOLDER_REWARDS_TAIL_BYTES = 8 + 8
@@ -664,6 +666,21 @@ def _trade_event_instruction_name(instruction_name: str) -> str:
     }.get(instruction_name, instruction_name)
 
 
+def pump_trade_payloads(logs: Sequence[str]) -> Iterator[tuple[int, bytes]]:
+    """Yield ``(log index, payload)`` for each Pump ``TradeEvent`` log record."""
+    for index, line in enumerate(logs):
+        if not line.startswith(PROGRAM_DATA_LOG_PREFIX):
+            continue
+        try:
+            payload = base64.b64decode(
+                line[len(PROGRAM_DATA_LOG_PREFIX) :], validate=True
+            )
+        except (binascii.Error, ValueError):
+            continue
+        if payload.startswith(TRADE_EVENT_DISCRIMINATOR):
+            yield index, payload
+
+
 def decode_pump_trade_event(
     payload: bytes,
     as_of_slot: int,
@@ -696,7 +713,7 @@ def decode_pump_trade_event(
     reader.skip_u64(3)
     reader.skip_i64()
     instruction_name = reader.read_string()
-    reader.skip_bool()
+    mayhem_mode = reader.read_bool()
     reader.skip_u64()
     cashback = reader.read_u64()
     buyback_fee_basis_points = reader.read_u64()
@@ -748,6 +765,7 @@ def decode_pump_trade_event(
         quote_amount_base_units=quote_amount,
         virtual_quote_reserves_base_units=virtual_quote_reserves,
         real_quote_reserves_base_units=real_quote_reserves,
+        mayhem_mode=mayhem_mode,
     )
 
 

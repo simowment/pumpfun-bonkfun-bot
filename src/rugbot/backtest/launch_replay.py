@@ -19,33 +19,22 @@ from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
 from rugbot.backtest.pairs_lab import wilson_interval
-from rugbot.domain.fees import FeeConfig
+from rugbot.domain.amounts import LAMPORTS_PER_SOL
+from rugbot.domain.pump_curve import (
+    CURVE_INVARIANT,
+    INITIAL_VIRTUAL_QUOTE,
+    PUMP_CURVE_FEE_CONFIG,
+    TOKEN_DECIMALS,
+    TOKEN_SUPPLY_UI,
+)
 from rugbot.domain.quote_engine import pump_curve_buy_amounts, pump_curve_sell_amounts
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-LAMPORTS_PER_SOL = 1_000_000_000
-TOKEN_DECIMALS = 6
-TOKEN_SUPPLY_UI = 1_000_000_000
-# Pump curve launch state: 30 SOL x 1.073B tokens virtual, 793.1M tokens real.
-INITIAL_VIRTUAL_QUOTE = 30 * LAMPORTS_PER_SOL
-INITIAL_VIRTUAL_BASE = 1_073_000_000 * 10**TOKEN_DECIMALS
-CURVE_INVARIANT = INITIAL_VIRTUAL_QUOTE * INITIAL_VIRTUAL_BASE
 # priceSol is SOL per whole token; reserves ratio is lamports per base unit.
 PRICE_TO_RESERVE_RATIO = LAMPORTS_PER_SOL // 10**TOKEN_DECIMALS
 PUMP_PROGRAM_LABEL = "pump"
-PUMP_CURVE_FEE_CONFIG = FeeConfig(
-    version="pump-global-v1",
-    protocol_fee_bps=95,
-    creator_fee_bps=30,
-    is_known=True,
-    program_config_version="pump-global-v1",
-    valid_from_slot=0,
-    valid_to_slot=None,
-    source_artifact_version="pump-global-v1",
-    lp_fee_bps=0,
-)
 # PumpSwap charges lp + protocol + creator fees on graduated pools.
 PUMPSWAP_TOTAL_FEE_BPS = 30
 BPS_DENOMINATOR = 10_000
@@ -56,30 +45,6 @@ EXIT_STOP_LOSS = "stop_loss"
 EXIT_DEV_SELL = "dev_sell"
 EXIT_MAX_HOLD = "max_hold"
 EXIT_END_OF_DATA = "end_of_data"
-
-
-# Tolerance when matching a coin's curve invariant to the standard curve.
-CURVE_INVARIANT_TOLERANCE = 0.01
-
-
-def nonstandard_curve_reason(
-    curve_invariant: int | None, *, mayhem: bool
-) -> str | None:
-    """Return why a coin cannot be replayed on the standard curve, if it can't.
-
-    Mayhem-mode coins are traded by Pump's protocol agent on inflated virtual
-    reserves with almost no real SOL, so standard-curve fills would be fiction.
-    """
-    if mayhem:
-        return "Mayhem-mode coin (protocol agent, no real curve liquidity)"
-    if curve_invariant is None:
-        return "curve reserves unavailable"
-    if (
-        abs(curve_invariant - CURVE_INVARIANT)
-        > CURVE_INVARIANT * CURVE_INVARIANT_TOLERANCE
-    ):
-        return "non-standard bonding curve"
-    return None
 
 
 class LaunchReplayError(ValueError):

@@ -22,6 +22,7 @@ from rugbot.decision.risk_gatekeeper import (
     RiskSnapshot,
 )
 from rugbot.domain.decisions import AbstainResult
+from rugbot.domain.fees import BASE_SIGNATURE_FEE_LAMPORTS
 from rugbot.execution.live import LivePumpExecutionPort
 from rugbot.execution.sender import RoutingPolicy
 from rugbot.integrations.solana_rpc import SolanaClient
@@ -57,7 +58,6 @@ if TYPE_CHECKING:
     )
     from rugbot.ingest.pump.pump_stream import ProcessedPumpCreateNotification
 
-BASE_SIGNATURE_FEE_LAMPORTS = 5_000
 BUY_ATA_COUNT = 2
 
 

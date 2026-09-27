@@ -422,10 +422,10 @@ def _load_launch_trades(
 
     from rugbot.backtest.launch_replay import (
         LaunchReplayError,
-        nonstandard_curve_reason,
         trades_from_swap_api,
     )
     from rugbot.domain.decisions import AbstainResult
+    from rugbot.domain.pump_curve import nonstandard_curve_reason
     from rugbot.ingest.pump.create_event_decoder import decode_pump_create_event_logs
     from rugbot.integrations.pumpfun_api import PumpFunApiError, get_client
 
