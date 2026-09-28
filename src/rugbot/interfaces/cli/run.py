@@ -85,7 +85,7 @@ def _funded_fresh_wallets(
                 signature,
                 {
                     "encoding": "jsonParsed",
-                    "maxSupportedTransactionVersion": 0,
+                    "maxSupportedTransactionVersion": 1,
                     "commitment": STREAM_COMMITMENT,
                 },
             ],
