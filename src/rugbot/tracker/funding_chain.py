@@ -66,6 +66,8 @@ CEX_MIN_RECIPIENTS = 50
 _ERR_ADDRESS = "wallet address must be a non-empty string"
 _ERR_MAX_HOPS = "max_hops must be at least 1"
 _ERR_NO_ENDPOINT = "no RPC endpoint is configured"
+_ERR_NO_BALANCES = "transaction payload has no balance evidence"
+_ERR_NO_SIGNATURES = "getSignaturesForAddress returned no list"
 _WARN_CYCLE = "cycle detected in funding chain"
 _WARN_HOP_CAP = "hop cap reached before a hub"
 
@@ -477,6 +479,46 @@ def _is_swap(result: dict) -> bool:
     logs = meta.get("logMessages") if isinstance(meta, dict) else None
     return isinstance(logs, list) and any(
         line.startswith(SWAP_PROGRAM_INVOKES) for line in logs
+    )
+
+
+def fresh_funded_wallets(result: object, *, source: str) -> list[tuple[str, int]]:
+    """Wallets ``source`` funded from a zero balance in one parsed transaction.
+
+    A zero pre-balance means the account did not exist before this transfer,
+    the "virgin address" a rugger funds right before it creates a coin. Each
+    amount is capped at what ``source`` actually paid out in the transaction.
+
+    Raises:
+        FundingChainError: When the payload carries no balance evidence.
+    """
+    parsed = _parsed_balances(result)
+    if parsed is None:
+        raise FundingChainError(_ERR_NO_BALANCES)
+    keys, pre, post = parsed
+    if source not in keys or _is_swap(result):  # type: ignore[arg-type]
+        return []
+    paid = pre[keys.index(source)] - post[keys.index(source)]
+    if paid <= 0:
+        return []
+    return [
+        (key, min(after, paid))
+        for key, before, after in zip(keys, pre, post, strict=False)
+        if key != source and before == 0 and after > 0
+    ]
+
+
+def has_earlier_history(wallet: str, *, funding_signature: str) -> bool:
+    """Whether ``wallet`` has any transaction besides its funding transfer."""
+    signatures = sync_rpc_result(
+        "getSignaturesForAddress",
+        [wallet, {"limit": 2, "commitment": "confirmed"}],
+    )
+    if not isinstance(signatures, list):
+        raise FundingChainError(_ERR_NO_SIGNATURES)
+    return any(
+        isinstance(entry, dict) and entry.get("signature") != funding_signature
+        for entry in signatures
     )
 
 

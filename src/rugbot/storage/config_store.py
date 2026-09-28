@@ -370,6 +370,7 @@ def sniper_to_mapping(cfg: CoreSniperConfig) -> dict[str, Any]:
         "listener": cfg.listener.value,
         "volume_sizing": dataclasses.asdict(cfg.volume_sizing),
         "strategy": dataclasses.asdict(cfg.strategy),
+        "funding": dataclasses.asdict(cfg.funding),
         "rules": {
             "snipe_delay_seconds": cfg.rules.snipe_delay_ms // 1000,
             "min_market_cap_quote_base_units": cfg.rules.min_market_cap_quote_base_units,

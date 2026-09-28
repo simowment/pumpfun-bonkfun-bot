@@ -22,6 +22,7 @@ from rugbot.runtime.config import (
     ExecutionMode,
     SniperConfigError,
     TrackingMode,
+    parse_sniper_config_dict,
     resolve_state_dir,
 )
 from rugbot.storage.config_store import (
@@ -129,6 +130,9 @@ FLAG_KEYS: tuple[tuple[str, str, Callable[[Any], object]], ...] = (
     ("max_losses", "rules.max_consecutive_losses", int),
     ("copy_sells", "rules.sell.copy_sells", str),
     ("sell_delay_ms", "rules.sell.copy_sell_delay_ms", int),
+    ("fund_min", "funding.min_lamports", _lamports),
+    ("fund_max", "funding.max_lamports", _lamports),
+    ("arm_minutes", "funding.arm_seconds", lambda minutes: round(minutes * 60)),
 )
 
 
@@ -185,13 +189,21 @@ def _row(tracker: Tracker) -> str:
     take_profit = _levels(sell["take_profit_levels"])
     if sell["trailing_levels"] and sell["take_profit_levels"]:
         take_profit += " (ignored: trailing on)"
+    funding = mapping["funding"]
+    armed_by = (
+        f"  funds {funding['min_lamports'] / LAMPORTS_PER_SOL:g}-"
+        f"{funding['max_lamports'] / LAMPORTS_PER_SOL:g} SOL, armed "
+        f"{funding['arm_seconds'] // 60} min"
+        if mapping["tracking_mode"] == TrackingMode.FUNDED_WALLET_CREATIONS.value
+        else ""
+    )
     return (
         f"{tracker.wallet:44}  {'on ' if tracker.enabled else 'off'}  "
         f"{tracker.group or '-':10}  {mapping['tracking_mode']:19}  "
         f"{mapping['execution']['mode']:10}  "
         f"{mapping['execution']['quote_size_lamports'] / LAMPORTS_PER_SOL:6.3f}  "
         f"TP {take_profit}  "
-        f"SL {_levels(sell['stop_loss_levels'], '-')}  trail {trail}"
+        f"SL {_levels(sell['stop_loss_levels'], '-')}  trail {trail}{armed_by}"
     )
 
 
@@ -226,6 +238,21 @@ def _edit_flags() -> argparse.ArgumentParser:
         help="when the tracked wallet sells a held coin: sell all, or its %%",
     )
     edit.add_argument("--sell-delay-ms", type=int, help="delay before a copy sell")
+    edit.add_argument(
+        "--fund-min",
+        type=float,
+        help="funded_wallet_creations: smallest transfer (SOL) that arms a wallet",
+    )
+    edit.add_argument(
+        "--fund-max",
+        type=float,
+        help="funded_wallet_creations: largest transfer (SOL) that arms a wallet",
+    )
+    edit.add_argument(
+        "--arm-minutes",
+        type=float,
+        help="funded_wallet_creations: how long a funded wallet stays armed",
+    )
     edit.add_argument("--group")
     edit.add_argument(
         "--set",
@@ -283,7 +310,7 @@ def _run(args: argparse.Namespace, store: ConfigStore) -> str:  # noqa: C901, PL
             preset = store.get_preset(args.preset)
             if preset is None:
                 raise SniperConfigError(f"unknown preset: {args.preset}")
-            mapping = preset
+            mapping = sniper_to_mapping(parse_sniper_config_dict(preset))
         mapping["target"] = {"kind": "wallet", "id": args.wallet}
         tracker = store.save_tracker(
             _apply(mapping, _flag_changes(args)), group=args.group, enabled=True

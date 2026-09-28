@@ -67,8 +67,10 @@ copy sells all/percent + délai), rapport `--report`.
 - [ ] Limits (acheter/vendre à un market cap cible, 10 max), sell after entry
   (N blocs), sell initials (récupérer la mise), auto fees (priorité suivant le
   réseau / surenchère « hardcore »).
-- [ ] Rugger protection auto-follow (last transfer / transfer ranges / hybrid),
-  papier seulement — autorisé par l'utilisateur le 2026-09-27.
+- [x] Rugger protection auto-follow : mode `funded_wallet_creations` (source =
+  adresse mère ou hot wallet d'exchange, plage de montant, wallet vierge,
+  armement temporaire), papier seulement. Reste : « last transfer » seul
+  (armer le dernier destinataire quel que soit le montant) si utile.
 - [ ] Page web + API pour piloter les trackers et voir le desk.
 
 ## Phase 1 — Known-Wallet Sniper P0 (EN COURS)

@@ -6,7 +6,7 @@
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
@@ -77,6 +77,10 @@ class TrackingMode(StrEnum):
     NEW_TOKEN_CREATIONS = "new_token_creations"
     TRACK_BUYS = "track_buys"
     BUY_ON_DEV_SELL = "buy_on_dev_sell"
+    # The tracked wallet is a funding source (mother address or exchange hot
+    # wallet): a fresh wallet it funds within ``funding`` is armed, and that
+    # wallet's next create is bought.
+    FUNDED_WALLET_CREATIONS = "funded_wallet_creations"
 
 
 class ListenerKind(StrEnum):
@@ -158,6 +162,19 @@ class StrategyFilterSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class FundingMatch:
+    """Which transfers from a funding source arm the receiving wallet.
+
+    A transfer of ``min_lamports..max_lamports`` (inclusive) to a wallet with
+    no prior history arms it for ``arm_seconds``; zero bounds match nothing.
+    """
+
+    min_lamports: int = 0
+    max_lamports: int = 0
+    arm_seconds: int = 3600
+
+
+@dataclass(frozen=True, slots=True)
 class CoreSniperConfig:
     """Complete Pump.fun watcher configuration."""
 
@@ -169,6 +186,7 @@ class CoreSniperConfig:
     rules: PlaybookRules = field(default_factory=PlaybookRules)
     volume_sizing: VolumeSizingPolicy = field(default_factory=VolumeSizingPolicy)
     strategy: StrategyFilterSettings = field(default_factory=StrategyFilterSettings)
+    funding: FundingMatch = field(default_factory=FundingMatch)
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,25 +509,51 @@ def parse_sniper_config_dict(
             "volume_sizing",
             "strategy",
             "risk",
+            "funding",
         },
     )
     _require_required_keys(document, {"target", "execution"})  # type: ignore[arg-type]
 
     execution = _parse_execution(document["execution"])  # type: ignore[index]
+    tracking_mode = _parse_tracking_mode(
+        document.get("tracking_mode", TrackingMode.NEW_TOKEN_CREATIONS.value)  # type: ignore[attr-defined]
+    )
+    funding = _parse_funding(document.get("funding"))  # type: ignore[attr-defined]
+    if tracking_mode is TrackingMode.FUNDED_WALLET_CREATIONS and not (
+        0 < funding.min_lamports <= funding.max_lamports
+    ):
+        raise SniperConfigError(
+            "funded_wallet_creations needs 0 < funding.min_lamports <= max_lamports"
+        )
     return CoreSniperConfig(
         target=_parse_target(document["target"]),  # type: ignore[index]
         execution=execution,
         risk=_parse_risk(document.get("risk"), execution),  # type: ignore[attr-defined]
-        tracking_mode=_parse_tracking_mode(
-            document.get("tracking_mode", TrackingMode.NEW_TOKEN_CREATIONS.value)  # type: ignore[attr-defined]
-        ),
+        tracking_mode=tracking_mode,
         listener=_parse_listener(
             document.get("listener", ListenerKind.PUMPPORTAL.value)  # type: ignore[attr-defined]
         ),
         rules=_parse_rules(document.get("rules")),  # type: ignore[attr-defined]
         volume_sizing=_parse_volume_sizing(document.get("volume_sizing")),  # type: ignore[attr-defined]
         strategy=_parse_strategy(document.get("strategy")),  # type: ignore[attr-defined]
+        funding=funding,
     )
+
+
+def _parse_funding(raw: object) -> FundingMatch:
+    if raw is None:
+        return FundingMatch()
+    mapping = _mapping(raw, "funding")
+    _require_known_keys(
+        mapping, {"min_lamports", "max_lamports", "arm_seconds"}, "funding"
+    )
+    values = {**asdict(FundingMatch()), **mapping}
+    for name, value in values.items():
+        if type(value) is not int or value < 0:
+            raise SniperConfigError(f"funding.{name} must be a non-negative integer")
+    if values["min_lamports"] > values["max_lamports"]:
+        raise SniperConfigError("funding.min_lamports must not exceed max_lamports")
+    return FundingMatch(**values)
 
 
 def _parse_risk(

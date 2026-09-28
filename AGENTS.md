@@ -258,15 +258,13 @@ pattern. Classify the target immediately into one archetype:
   (1 token per wallet, no prior history). The deployer cannot be predicted;
   detecting it requires watching upstream funders in real time.
 
-```text
-ASSERT: S1 = Type 1 only. Type 2 automated arming is DEFERRED and MUST NOT be built without separate explicit user authorization.
-```
-
-Type 2 targets remain classifiable and reportable, but the correct action is the
-honest manual instruction to arm an observe-only listener on the funding source.
-An agent MUST NOT add speculative Type 2 arming code (no `TargetKind.FUNDER`, no
-funder watcher) to "complete" this section; under YAGNI its absence is the
-intended state, not a gap.
+Type 2 arming (user authorization, 2026-09-28, paper mode only): the canonical
+path is the `funded_wallet_creations` tracking mode. A tracker on a funding
+source (mother address or exchange hot wallet) arms every wallet it funds from
+a zero balance, within the tracker's amount range and with no other history;
+`rug_run` paper-buys that wallet's creates until the arming expires. Live
+execution of this mode stays forbidden (§10.7). Do not add a parallel funder
+watcher or target kind.
 
 Every target analysis MUST report:
 
@@ -280,7 +278,8 @@ Every target analysis MUST report:
    the dev/bundle's first sell is usually the worst snipe exit and is reported
    only as a comparison, never chosen.
 5. **Next arming action** — Type 1: re-arm on the known dev wallet. Type 2:
-   identify the staged burner or arm observe-only on the upstream funder.
+   arm a `funded_wallet_creations` tracker on the upstream funder with its
+   observed funding amount range.
 
 ## 12. Data Honesty & Realistic Execution
 

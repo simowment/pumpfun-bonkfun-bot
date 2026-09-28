@@ -103,6 +103,10 @@ uv run rug_tracker list [--group burners]
 uv run rug_tracker set <WALLET> --dip 40:0.05 --no-activity 30 --set rules.follow_cooldown_seconds=10
 uv run rug_tracker preset save burner --from <WALLET>   # then: add <WALLET> --preset burner
 uv run rug_tracker disable|enable|show|rm <WALLET>
+# Follow a rugger's funding source (mother address or exchange hot wallet): any
+# brand-new wallet it funds with 1.95-2.05 SOL is armed for 60 min, and its
+# next create is bought
+uv run rug_tracker add <SOURCE> --mode funded_wallet_creations --fund-min 1.95 --fund-max 2.05 --arm-minutes 60 --size 0.1
 ```
 
 TP/SL sell percentages are cumulative, and an active trailing stop overrides
@@ -112,7 +116,11 @@ TP (the list marks it). Invalid rules are rejected before they are saved.
 Paper-trades every enabled `paper` tracker from one `logsSubscribe` on the Pump
 program (confirmed commitment, uses `SOLANA_RPC_HTTP`/`SOLANA_RPC_WEBSOCKET`).
 Modes: `new_token_creations` (snipe a dev's creates), `track_buys` (copy a
-wallet's buys) and `buy_on_dev_sell` (buy when the tracked dev sells). Any
+wallet's buys), `buy_on_dev_sell` (buy when the tracked dev sells) and
+`funded_wallet_creations` (watch a funding source with one extra
+`logsSubscribe`; a wallet it funds from a zero balance, in the amount range and
+with no other history, is armed and its creates are bought). Busy exchange hot
+wallets cost one `getTransaction` per transaction they send. Any
 tracker can mirror its wallet's sells of a held coin with `--copy-sells all`
 or `--copy-sells percent` (same share they sold), optionally after
 `--sell-delay-ms`. A decision in slot `s` fills

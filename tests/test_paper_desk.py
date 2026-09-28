@@ -21,6 +21,7 @@ from rugbot.interfaces.cli.tracker import main as tracker_cli
 from rugbot.runtime.workers.paper_desk import PaperDesk, tx_cost_lamports
 from rugbot.storage.config_store import ConfigStore
 from rugbot.storage.paper_journal import PaperJournal
+from rugbot.tracker.funding_chain import fresh_funded_wallets
 
 FIXTURE = Path(__file__).parent.parent / "fixtures/paper_desk/pump_launch_logs.json"
 SLOT_MS = 400
@@ -224,4 +225,56 @@ def test_buy_on_dev_sell_enters_after_the_wallet_sells(state: Path) -> None:
     assert buy.side == "buy"
     assert buy.reason == "dev_sell"
     assert buy.slot >= sell_slot
+    desk.close()
+
+
+FUNDING_FIXTURE = (
+    Path(__file__).parent.parent
+    / "fixtures/finalized_transactions/native_funding/hub_funds_fresh_dev.json"
+)
+# Recorded: the hub that paid 2 SOL to a brand-new wallet which then created hive.
+HUB = "7rtCHffCHNZrKb78FKVNeYF2ysFhSNnH5SyrJDKaCMs3"
+FUNDED_DEV = "CoaX7BJWN8sdxQdHtbrdbRpnUhn4MxFadzWdo8CpS5jR"
+
+
+def test_fresh_funded_wallets_reads_a_real_hub_transfer() -> None:
+    result = json.loads(FUNDING_FIXTURE.read_text())["result"]
+    assert fresh_funded_wallets(result, source=HUB) == [(FUNDED_DEV, 2_000_000_000)]
+    # The funded wallet did not pay anyone: seen from it there is nothing.
+    assert fresh_funded_wallets(result, source=FUNDED_DEV) == []
+
+
+@pytest.mark.parametrize(
+    ("funded_lamports", "armed_for_ms", "bought"),
+    [
+        (2_000_000_000, 0, True),
+        (1_000_000_000, 0, False),  # below the tracker's range
+        (2_000_000_000, 61_000, False),  # arming expired before the create
+    ],
+)
+def test_funded_wallet_creations_buys_only_an_armed_wallets_create(
+    state: Path, *, funded_lamports: int, armed_for_ms: int, bought: bool
+) -> None:
+    launch = _launch()
+    assert (
+        tracker_cli(
+            [
+                "--state-dir", str(state), "add", HUB,
+                "--mode", "funded_wallet_creations", "--fund-min", "1.5",
+                "--fund-max", "2.5", "--arm-minutes", "1", "--size", "0.1",
+                "--max-mc", "1000",
+            ]
+        )
+        == 0
+    )  # fmt: skip
+    clock = [-armed_for_ms]
+    desk, journal = _desk(state, clock)
+    armed = desk.arm(HUB, launch["creator"], funded_lamports)
+    assert bool(armed) == (funded_lamports == 2_000_000_000)
+    _replay(desk, launch, clock, launch["notifications"])
+    fills = journal.fills(HUB)
+    assert bool(fills) == bought
+    if bought:
+        assert fills[0].side == "buy"
+        assert fills[0].reason == "create"
     desk.close()

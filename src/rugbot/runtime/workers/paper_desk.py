@@ -6,6 +6,9 @@ exact post-trade reserves, so a single socket serves any number of trackers:
 * a tracked dev's create (``new_token_creations``), a tracked wallet's buy
   (``track_buys``) or a tracked dev's sell (``buy_on_dev_sell``) opens a
   pending entry, gated by the tracker's entry rules;
+* for a funding source (``funded_wallet_creations``), each fresh wallet it
+  funds within the tracker's range is armed (``arm``); that wallet's creates
+  open entries until the arming expires;
 * a tracked wallet selling a coin its tracker holds is mirrored when the
   tracker's ``copy_sells`` is ``all`` or ``percent``;
 * every trade of a held coin marks its positions to market through the
@@ -155,6 +158,8 @@ class PaperDesk:
         # Tokens each tracked wallet holds per coin, from trades seen this session.
         self._wallet_tokens: dict[tuple[str, str], int] = {}
         self._slot = 0
+        # Armed wallet -> (funding-source tracker, arming expiry in ms).
+        self._armed: dict[str, tuple[str, int]] = {}
         self._trackers: dict[str, Tracker] = {}
         self.set_trackers(trackers)
 
@@ -201,6 +206,30 @@ class PaperDesk:
         for store in self._stores.values():
             store.close()
 
+    def arm(self, source: str, wallet: str, lamports: int) -> list[str]:
+        """Arm ``wallet``, freshly funded by tracked ``source``, if in range."""
+
+        tracker = self._trackers.get(source)
+        if (
+            tracker is None
+            or tracker.config.tracking_mode
+            is not TrackingMode.FUNDED_WALLET_CREATIONS
+        ):
+            return []
+        funding = tracker.config.funding
+        if not funding.min_lamports <= lamports <= funding.max_lamports:
+            return []
+        now = self._clock_ms()
+        self._armed[wallet] = (source, now + funding.arm_seconds * 1000)
+        return [
+            _line(
+                now,
+                source,
+                f"ARMED {wallet} (funded {lamports / LAMPORTS_PER_SOL:.4f} SOL) "
+                f"for {funding.arm_seconds // 60} min",
+            )
+        ]
+
     def handle_logs(self, slot: int, logs: Sequence[str]) -> list[str]:
         """Process one successful transaction's Pump logs; return event lines."""
 
@@ -230,6 +259,9 @@ class PaperDesk:
         """Fill orders whose slot passed without trades; run no-activity exits."""
 
         now = self._clock_ms()
+        self._armed = {
+            wallet: armed for wallet, armed in self._armed.items() if armed[1] > now
+        }
         lines: list[str] = []
         for order in [item for item in self._pending if item.fill_slot is None]:
             lines += self._advance_entry(order, now)
@@ -251,6 +283,9 @@ class PaperDesk:
             if wallet == create.creator_pubkey
             and tracker.config.tracking_mode is TrackingMode.NEW_TOKEN_CREATIONS
         ]
+        armed = self._armed.get(create.creator_pubkey)
+        if armed is not None and armed[1] > now and armed[0] in self._trackers:
+            trackers.append(armed[0])
         if not trackers:
             return []
         skip = _unsupported_reason(
