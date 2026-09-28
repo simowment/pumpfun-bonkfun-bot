@@ -133,6 +133,7 @@ FLAG_KEYS: tuple[tuple[str, str, Callable[[Any], object]], ...] = (
     ("fund_min", "funding.min_lamports", _lamports),
     ("fund_max", "funding.max_lamports", _lamports),
     ("arm_minutes", "funding.arm_seconds", lambda minutes: round(minutes * 60)),
+    ("hops", "funding.max_hops", int),
 )
 
 
@@ -193,7 +194,7 @@ def _row(tracker: Tracker) -> str:
     armed_by = (
         f"  funds {funding['min_lamports'] / LAMPORTS_PER_SOL:g}-"
         f"{funding['max_lamports'] / LAMPORTS_PER_SOL:g} SOL, armed "
-        f"{funding['arm_seconds'] // 60} min"
+        f"{funding['arm_seconds'] // 60} min, {funding['max_hops']} hops"
         if mapping["tracking_mode"] == TrackingMode.FUNDED_WALLET_CREATIONS.value
         else ""
     )
@@ -247,6 +248,11 @@ def _edit_flags() -> argparse.ArgumentParser:
         "--fund-max",
         type=float,
         help="funded_wallet_creations: largest transfer (SOL) that arms a wallet",
+    )
+    edit.add_argument(
+        "--hops",
+        type=int,
+        help="funded_wallet_creations: also arm wallets funded up to N hops below",
     )
     edit.add_argument(
         "--arm-minutes",

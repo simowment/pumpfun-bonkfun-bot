@@ -261,8 +261,9 @@ pattern. Classify the target immediately into one archetype:
 Type 2 arming (user authorization, 2026-09-28, paper mode only): the canonical
 path is the `funded_wallet_creations` tracking mode. A tracker on a funding
 source (mother address or exchange hot wallet) arms every wallet it funds from
-a zero balance, within the tracker's amount range and with no other history;
-`rug_run` paper-buys that wallet's creates until the arming expires. Live
+a zero balance, within the tracker's amount range and with no other history
+(and, with `funding.max_hops`, every wallet funded from a zero balance below
+it); `rug_run` paper-buys those wallets' creates until the arming expires. Live
 execution of this mode stays forbidden (§10.7). Do not add a parallel funder
 watcher or target kind.
 

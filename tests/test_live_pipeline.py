@@ -30,7 +30,7 @@ from rugbot.ingest.pump.pump_stream import PumpPortalLaunchStream
 from rugbot.ingest.rpc_observer import observe_finalized_transaction
 from rugbot.integrations.pumpfun_api import get_client
 from rugbot.intelligence.token_resolver import resolve_token_or_wallet
-from rugbot.tracker.funding_chain import resolve_relay_terminal
+from rugbot.tracker.funding_chain import descend_to_creators
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUGBOT_LIVE_TESTS") != "1" or not os.environ.get("SOLANA_RPC_HTTP"),
@@ -68,9 +68,8 @@ def test_trade_history_starts_at_creation() -> None:
 
 
 def test_relay_hops_resolve_to_creator() -> None:
-    resolution = resolve_relay_terminal(ZKASH_HUB_RECIPIENT, received_sol=2.0)
-    assert resolution.terminal == ZKASH_CREATOR
-    assert len(resolution.relays) >= 2
+    descent = descend_to_creators(ZKASH_HUB_RECIPIENT)
+    assert descent.creators.get(ZKASH_CREATOR, 0) >= 2
 
 
 def test_replay_ranks_exit_rules_on_real_trades() -> None:

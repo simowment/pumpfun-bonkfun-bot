@@ -278,3 +278,30 @@ def test_funded_wallet_creations_buys_only_an_armed_wallets_create(
         assert fills[0].side == "buy"
         assert fills[0].reason == "create"
     desk.close()
+
+
+def test_wallets_armed_below_a_funded_wallet_are_bought(state: Path) -> None:
+    launch = _launch()
+    relay = FUNDED_DEV  # the funded wallet; the recorded creator sits below it
+    assert (
+        tracker_cli(
+            [
+                "--state-dir", str(state), "add", HUB,
+                "--mode", "funded_wallet_creations", "--fund-min", "1.5",
+                "--fund-max", "2.5", "--arm-minutes", "1", "--hops", "9",
+                "--size", "0.1", "--max-mc", "1000",
+            ]
+        )
+        == 0
+    )  # fmt: skip
+    clock = [0]
+    desk, journal = _desk(state, clock)
+    # Nothing is armed below a wallet that is not itself armed.
+    assert desk.arm_below(HUB, relay, [launch["creator"]]) == []
+    assert desk.arm(HUB, relay, 2_000_000_000)
+    assert desk.arm_below(HUB, relay, [relay, launch["creator"]])
+    assert desk.armed_until(launch["creator"]) == desk.armed_until(relay)
+    _replay(desk, launch, clock, launch["notifications"])
+    buy = journal.fills(HUB)[0]
+    assert (buy.side, buy.reason) == ("buy", "create")
+    desk.close()

@@ -52,10 +52,11 @@ from rugbot.tracker.funder_discovery import STAGED_MAX_SOL, STAGED_MIN_SOL
 from rugbot.tracker.funding_chain import (
     DEFAULT_HISTORY_PAGES,
     DEFAULT_HISTORY_TRANSACTIONS,
+    RELAY_MAX_HOPS,
     FundedTransfer,
     FundingChainError,
+    descend_to_creators,
     enumerate_funded_paged,
-    resolve_relay_terminal,
 )
 from rugbot.utils.logger import get_logger
 
@@ -64,6 +65,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 logger = get_logger(__name__)
+DESCENT_WORKERS = 4
 
 TRADE_FETCH_WORKERS = 3
 BIBLE_MIN_SAMPLES = 10
@@ -127,6 +129,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Only hydrate signatures at or before this slot.",
     )
     parser.add_argument(
+        "--hops",
+        type=int,
+        default=RELAY_MAX_HOPS,
+        help=(
+            "Hops followed below each funded wallet through wallets it funded "
+            f"from a zero balance, to reach the creators (default: {RELAY_MAX_HOPS})."
+        ),
+    )
+    parser.add_argument(
         "--creator",
         action="store_true",
         help="Treat the addresses as serial creator wallets (Type 1) instead of funders.",
@@ -167,29 +178,42 @@ def _launch_fetch(wallet: str) -> list[object] | None:
     return coins if isinstance(coins, list) else None
 
 
-def _through_relays(
-    transfers: Sequence[FundedTransfer],
+def _with_descendant_creators(
+    transfers: Sequence[FundedTransfer], *, max_hops: int
 ) -> tuple[list[FundedTransfer], int]:
-    """Re-point each transfer at the wallet its SOL reached after relay hops.
+    """Add every creator found below each funded wallet, as if funded directly.
+
+    Each funded wallet stays in the list (its own coins come from the creator
+    index); creators found hops below it inherit its funding transfer.
 
     Returns:
-        ``(transfers, relayed)`` where ``relayed`` counts recipients that were
-        relays rather than the final holder of the funds.
+        ``(transfers, descendants)`` where ``descendants`` counts the creators
+        found below a funded wallet rather than at it.
     """
-    received: dict[str, float] = {}
+    first: dict[str, FundedTransfer] = {}
     for transfer in transfers:
-        received[transfer.recipient] = max(
-            received.get(transfer.recipient, 0.0), transfer.amount_sol
+        first.setdefault(transfer.recipient, transfer)
+    with ThreadPoolExecutor(max_workers=DESCENT_WORKERS) as pool:
+        descents = dict(
+            zip(
+                first,
+                pool.map(
+                    lambda wallet: descend_to_creators(wallet, max_hops=max_hops),
+                    first,
+                ),
+                strict=True,
+            )
         )
-    terminals = {
-        recipient: resolve_relay_terminal(recipient, received_sol=amount_sol)
-        for recipient, amount_sol in received.items()
-    }
-    relayed = sum(1 for resolution in terminals.values() if resolution.relays)
-    return [
-        dataclasses.replace(transfer, recipient=terminals[transfer.recipient].terminal)
-        for transfer in transfers
-    ], relayed
+    added = [
+        dataclasses.replace(first[root], recipient=creator)
+        for root, descent in descents.items()
+        for creator, hops in descent.creators.items()
+        if hops > 0
+    ]
+    for root, descent in descents.items():
+        if descent.truncated:
+            logger.warning("%s: descent truncated at wallet cap", root[:8])
+    return [*transfers, *added], len(added)
 
 
 def _format_when(created_at_ms: int | None) -> str:
@@ -426,12 +450,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 min_slot=args.slot_from,
                 max_slot=args.slot_to,
             )
-            resolved, relayed = _through_relays(transfers)
-            if relayed:
+            resolved, descendants = _with_descendant_creators(
+                transfers, max_hops=args.hops
+            )
+            if descendants:
                 logger.info(
-                    "%s: %d recipients were relays; followed to terminal wallets",
+                    "%s: %d creators found below funded wallets",
                     funder[:8],
-                    relayed,
+                    descendants,
                 )
             per_history = build_launch_history(
                 funder,

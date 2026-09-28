@@ -43,6 +43,7 @@ from rugbot.storage.config_store import ConfigStore
 from rugbot.storage.paper_journal import PaperJournal
 from rugbot.tracker.funding_chain import (
     FundingChainError,
+    descend_to_creators,
     fresh_funded_wallets,
     has_earlier_history,
 )
@@ -54,6 +55,9 @@ STREAM_COMMITMENT = "confirmed"
 TICK_SECONDS = 0.5
 TRACKER_RELOAD_SECONDS = 10.0
 JOURNAL_FILENAME = "paper_journal.sqlite3"
+# Operators create minutes after relaying the dev's SOL, so the wallets below
+# an armed wallet are re-read at this pace until its arming ends.
+DESCENT_INTERVAL_SECONDS = 60.0
 POSITIONS_DIRNAME = "paper_positions"
 
 
@@ -106,6 +110,7 @@ async def _watch_funding(
     stream: SolanaLogsStream, sources: dict[str, Tracker], desk: PaperDesk
 ) -> None:
     """Arm every fresh wallet a watched funding source pays within range."""
+    followers: set[asyncio.Task[None]] = set()
     while True:
         notification = await stream.next_notification()
         source = sources.get(notification.wallet)
@@ -118,7 +123,28 @@ async def _watch_funding(
             print(f"funding watch: {funded}", flush=True)
             continue
         for wallet, lamports in funded:
-            _say(desk.arm(source.wallet, wallet, lamports))
+            armed = desk.arm(source.wallet, wallet, lamports)
+            _say(armed)
+            if armed and source.config.funding.max_hops > 1:
+                follower = asyncio.create_task(_arm_descendants(desk, source, wallet))
+                followers.add(follower)
+                follower.add_done_callback(followers.discard)
+
+
+async def _arm_descendants(desk: PaperDesk, source: Tracker, root: str) -> None:
+    """Keep arming the wallets funded below ``root`` while it stays armed."""
+    while (until := desk.armed_until(root)) is not None and until > time.time() * 1000:
+        try:
+            descent = await asyncio.to_thread(
+                descend_to_creators,
+                root,
+                max_hops=source.config.funding.max_hops - 1,
+            )
+        except (RpcAccessError, FundingChainError) as error:
+            print(f"funding watch: descent below {root}: {error}", flush=True)
+        else:
+            _say(desk.arm_below(source.wallet, root, list(descent.wallets)))
+        await asyncio.sleep(DESCENT_INTERVAL_SECONDS)
 
 
 def _say(lines: list[str]) -> None:

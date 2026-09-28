@@ -212,8 +212,7 @@ class PaperDesk:
         tracker = self._trackers.get(source)
         if (
             tracker is None
-            or tracker.config.tracking_mode
-            is not TrackingMode.FUNDED_WALLET_CREATIONS
+            or tracker.config.tracking_mode is not TrackingMode.FUNDED_WALLET_CREATIONS
         ):
             return []
         funding = tracker.config.funding
@@ -229,6 +228,31 @@ class PaperDesk:
                 f"for {funding.arm_seconds // 60} min",
             )
         ]
+
+    def arm_below(self, source: str, root: str, wallets: Sequence[str]) -> list[str]:
+        """Arm wallets found below armed ``root``, until ``root``'s arming ends."""
+
+        armed = self._armed.get(root)
+        if armed is None or armed[0] != source:
+            return []
+        fresh = [wallet for wallet in wallets if wallet not in self._armed]
+        for wallet in fresh:
+            self._armed[wallet] = armed
+        if not fresh:
+            return []
+        return [
+            _line(
+                self._clock_ms(),
+                source,
+                f"ARMED {len(fresh)} wallets funded below {root}",
+            )
+        ]
+
+    def armed_until(self, wallet: str) -> int | None:
+        """Arming expiry (ms) of ``wallet``, or ``None`` when not armed."""
+
+        armed = self._armed.get(wallet)
+        return None if armed is None else armed[1]
 
     def handle_logs(self, slot: int, logs: Sequence[str]) -> list[str]:
         """Process one successful transaction's Pump logs; return event lines."""

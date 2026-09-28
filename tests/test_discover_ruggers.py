@@ -188,7 +188,9 @@ def test_wallet_switching_entity_is_type2_stats_manual(tmp_path, monkeypatch) ->
     assert top.qualification.winrate_pct is None
     assert top.qualification.net_ev_pct is None
     assert top.qualification.optimal_tp_pct is None
-    assert f"rug_intel check {SWITCHER_DEV} --score --entity" in top.qualification.message
+    assert (
+        f"rug_intel check {SWITCHER_DEV} --score --entity" in top.qualification.message
+    )
     # Read-only (§7): recommends arming the funding source, never auto-arms.
     assert CEX_FUNDER in top.next_action
     assert "observe-only" in top.next_action

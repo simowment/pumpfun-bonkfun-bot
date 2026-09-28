@@ -50,6 +50,9 @@ class SniperConfigError(ValueError):
     """Raised when the watcher configuration is malformed."""
 
 
+MAX_FUNDING_HOPS = 16
+
+
 class TrackerDbPathError(ValueError):
     """Raised when the tracker database location cannot be resolved safely."""
 
@@ -167,11 +170,15 @@ class FundingMatch:
 
     A transfer of ``min_lamports..max_lamports`` (inclusive) to a wallet with
     no prior history arms it for ``arm_seconds``; zero bounds match nothing.
+    With ``max_hops`` above 1, every wallet funded from a zero balance below
+    it, down to ``max_hops`` levels, is armed too (operators relay the dev's
+    SOL through single-use wallets).
     """
 
     min_lamports: int = 0
     max_lamports: int = 0
     arm_seconds: int = 3600
+    max_hops: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -545,7 +552,7 @@ def _parse_funding(raw: object) -> FundingMatch:
         return FundingMatch()
     mapping = _mapping(raw, "funding")
     _require_known_keys(
-        mapping, {"min_lamports", "max_lamports", "arm_seconds"}, "funding"
+        mapping, {"min_lamports", "max_lamports", "arm_seconds", "max_hops"}, "funding"
     )
     values = {**asdict(FundingMatch()), **mapping}
     for name, value in values.items():
@@ -553,6 +560,8 @@ def _parse_funding(raw: object) -> FundingMatch:
             raise SniperConfigError(f"funding.{name} must be a non-negative integer")
     if values["min_lamports"] > values["max_lamports"]:
         raise SniperConfigError("funding.min_lamports must not exceed max_lamports")
+    if not 1 <= values["max_hops"] <= MAX_FUNDING_HOPS:
+        raise SniperConfigError(f"funding.max_hops must be 1..{MAX_FUNDING_HOPS}")
     return FundingMatch(**values)
 
 

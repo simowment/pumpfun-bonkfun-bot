@@ -49,14 +49,17 @@ DEFAULT_MAX_HUB_TRANSACTIONS = 60
 DEFAULT_HISTORY_PAGES = 3
 DEFAULT_HISTORY_TRANSACTIONS = 200
 PRODUCTION_PACING_SECONDS = 0.35
-# Downstream relay resolution: a relay is a short-lived pass-through wallet that
-# forwards most of what it received to one account. Operators chain several
-# (including seed-derived accounts) between the hub and the creator burner.
-RELAY_MAX_SIGNATURES = 8
+# Downstream descent: operators pass staging SOL through short-lived wallets,
+# in single-use lines or split-and-merge trees, before the creator burner.
+# Wallets busier than this are services, not single-purpose burners.
+DESCENT_MAX_SIGNATURES = 200
+# A burner funds its children and creates soon after it is funded, so only its
+# oldest transactions are read.
+DESCENT_TXS_PER_WALLET = 12
+DESCENT_MAX_WALLETS = 400
 # Pages walked back to reach a wallet's first transaction (1000 sigs each).
 BIRTH_MAX_PAGES = 20
 RELAY_MAX_HOPS = 5
-RELAY_FORWARD_FRACTION = 0.8
 PUMP_CREATE_LOG = "Program log: Instruction: Create"
 ROLE_ORIGIN = "origin"
 ROLE_RELAY = "relay"
@@ -151,11 +154,14 @@ class FundedTransfer:
 
 
 @dataclass(frozen=True, slots=True)
-class RelayResolution:
-    """Where a funded wallet's SOL ended up after single-use relay hops."""
+class FundingDescent:
+    """Pump creators found below a funded wallet, and how the walk ended."""
 
-    terminal: str
-    relays: tuple[str, ...]
+    # creator -> hops below the funded wallet (0 = the funded wallet itself)
+    creators: dict[str, int]
+    # every wallet reached, with its hop depth
+    wallets: dict[str, int]
+    truncated: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -914,66 +920,57 @@ def _created_pump_token(result: object, wallet: str) -> bool:
     )
 
 
-def resolve_relay_terminal(
+def descend_to_creators(
     wallet: str,
     *,
-    received_sol: float,
     max_hops: int = RELAY_MAX_HOPS,
-    endpoints: RpcEndpoints | Sequence[str] | None = None,
-    transport: Callable[[str, str, list[object]], object] | None = None,
-) -> RelayResolution:
-    """Follow a funded wallet forward through single-use relay hops.
+    max_wallets: int = DESCENT_MAX_WALLETS,
+) -> FundingDescent:
+    """Walk every wallet funded from a zero balance below ``wallet``.
 
-    A wallet is treated as a relay while it has at most
-    ``RELAY_MAX_SIGNATURES`` signatures, never fee-paid a Pump create, and
-    forwarded at least ``RELAY_FORWARD_FRACTION`` of the SOL it received to one
-    account. Value is followed through balance deltas, so hops through
-    seed-derived accounts or decoy program calls are not lost.
+    Breadth-first over each wallet's oldest transactions: a wallet that
+    fee-paid a Pump create is a creator (not descended further); every wallet
+    it funded from a zero balance is queued one hop deeper. Single-use relay
+    lines and split-and-merge trees are both covered.
 
     Args:
-        wallet: Wallet that received SOL from the funder.
-        received_sol: SOL it received; the forwarding threshold scales from it.
-        max_hops: Maximum relay hops followed.
-        endpoints: Resolved endpoints; defaults to precedence resolution.
-        transport: Optional test seam replacing the pooled transport.
+        wallet: Wallet that received the funder's SOL.
+        max_hops: Maximum hops below ``wallet``.
+        max_wallets: Maximum wallets read; the walk reports truncation.
 
     Returns:
-        The terminal wallet (candidate creator) and the relays crossed.
+        The creators found with their hop depth.
     """
-    current = _require_address(wallet)
-    relays: list[str] = []
-    amount_sol = received_sol
-    for _ in range(max_hops):
-        signatures = signature_page(current, endpoints=endpoints, transport=transport)
-        if signatures is None or len(signatures) > RELAY_MAX_SIGNATURES:
-            break
-        forward: tuple[str, float] | None = None
-        created = False
-        for entry in signatures:
-            signature = entry.get("signature")
-            if not isinstance(signature, str) or entry.get("err") is not None:
+    queue = [(_require_address(wallet), 0)]
+    reached = {queue[0][0]: 0}
+    creators: dict[str, int] = {}
+    read = 0
+    while queue and read < max_wallets:
+        current, hops = queue.pop(0)
+        read += 1
+        signatures = signature_page(current, endpoints=None, transport=None)
+        if signatures is None or len(signatures) > DESCENT_MAX_SIGNATURES:
+            continue
+        oldest = [
+            entry["signature"]
+            for entry in reversed(signatures)
+            if entry.get("err") is None and isinstance(entry.get("signature"), str)
+        ][:DESCENT_TXS_PER_WALLET]
+        for signature in oldest:
+            time.sleep(PRODUCTION_PACING_SECONDS)
+            result = parsed_transaction(signature, endpoints=None, transport=None)
+            if result is None:
                 continue
-            if transport is None:
-                time.sleep(PRODUCTION_PACING_SECONDS)
-            result = parsed_transaction(
-                signature, endpoints=endpoints, transport=transport
-            )
             if _created_pump_token(result, current):
-                created = True
+                creators[current] = hops
                 break
-            for counterparty, sent_sol in _counterparty_transfers(
-                result,
-                wallet=current,
-                min_sol=amount_sol * RELAY_FORWARD_FRACTION,
-                receiving=False,
-            ):
-                if forward is None or sent_sol > forward[1]:
-                    forward = (counterparty, sent_sol)
-        if created or forward is None or forward[0] in relays:
-            break
-        relays.append(current)
-        current, amount_sol = forward
-    return RelayResolution(terminal=current, relays=tuple(relays))
+            if hops == max_hops:
+                continue
+            for child, _ in fresh_funded_wallets(result, source=current):
+                if child not in reached:
+                    reached[child] = hops + 1
+                    queue.append((child, hops + 1))
+    return FundingDescent(creators=creators, wallets=reached, truncated=bool(queue))
 
 
 __all__ = [
@@ -990,15 +987,15 @@ __all__ = [
     "FundingChainError",
     "FundingChainNode",
     "FundingChainWalk",
+    "FundingDescent",
     "FundingSource",
-    "RelayResolution",
     "WalletBirth",
+    "descend_to_creators",
     "enumerate_funded",
     "enumerate_funded_paged",
     "enumerate_sources",
     "is_cex_shaped_source",
     "parsed_transaction",
-    "resolve_relay_terminal",
     "signature_page",
     "walk_upstream",
     "wallet_birth",

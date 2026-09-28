@@ -107,6 +107,9 @@ uv run rug_tracker disable|enable|show|rm <WALLET>
 # brand-new wallet it funds with 1.95-2.05 SOL is armed for 60 min, and its
 # next create is bought
 uv run rug_tracker add <SOURCE> --mode funded_wallet_creations --fund-min 1.95 --fund-max 2.05 --arm-minutes 60 --size 0.1
+# Same, for an operator that relays the dev's SOL through single-use wallets:
+# everything funded up to 12 hops below the armed wallet is armed as well
+uv run rug_tracker add <MOTHER> --mode funded_wallet_creations --fund-min 0.8004 --fund-max 0.8005 --hops 12 --arm-minutes 120 --size 0.1
 ```
 
 TP/SL sell percentages are cumulative, and an active trailing stop overrides
@@ -278,6 +281,7 @@ Every analysis tool sits behind one command; `rug_intel` alone lists them.
 uv run rug_intel check <MINT>                          # creator, B0/B1 bundle, rugged
 uv run rug_intel history <DEV> --creator --backtest    # launches + realistic backtest
 uv run rug_intel history <FUNDER> --backtest           # burner launches from a funder
+uv run rug_intel history <MOTHER> --min-sol 0.8004 --max-sol 0.8005 --hops 12 --all-pages --backtest  # through relay trees
 uv run rug_intel chain <BURNER>                        # funding chain up to the hub
 uv run rug_intel graph <SEED>                          # classify the operator's wallets
 uv run rug_intel profile <FUNDER_OR_MINT>              # burner set + launch outcomes
