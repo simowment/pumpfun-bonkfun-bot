@@ -4,7 +4,8 @@ Every successful Pump transaction arrives on one ``logsSubscribe``. Create
 events become launches (their logs are stored so readers decode the create
 event, reserves and Mayhem flag exactly as for a fetched transaction); every
 trade of a launch is recorded for ``TRADE_RECORD_WINDOW_SECONDS`` after its
-create. No per-launch RPC calls are made.
+create. No per-launch RPC calls are made; each launch's metadata JSON and
+image are fetched once, in the background, as the create arrives.
 
 The Pump program executes in essentially every slot, so a notification slot
 jumping past ``STREAM_GAP_SLOTS`` means the socket dropped events: the gap is
@@ -22,10 +23,17 @@ import time
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
+import aiohttp
 from solders.pubkey import Pubkey
 
+from rugbot.discover.launch_metadata import (
+    FETCH_TIMEOUT_SECONDS,
+    METADATA_OK,
+    fetch_launch_metadata,
+)
 from rugbot.discover.store import (
     ensure_discover_schema,
+    record_launch_metadata,
     record_stream_gap,
     upsert_launch,
     upsert_trade,
@@ -51,6 +59,7 @@ from rugbot.storage.database import DatabaseManager
 from rugbot.utils.logger import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 logger = get_logger(__name__)
@@ -75,6 +84,8 @@ class CollectStats:
     launches: int = 0
     trades: int = 0
     gaps: int = 0
+    metadata_ok: int = 0
+    metadata_failed: int = 0
     errors: int = 0
 
 
@@ -148,12 +159,13 @@ def _record_trades(
     return recorded
 
 
-def _process(
+def _process(  # noqa: PLR0913
     db: DatabaseManager,
     notification: WalletLogNotification,
     tracked_until: dict[str, float],
     stats: CollectStats,
     last_slot: int | None,
+    capture_metadata: Callable[[str, str], None],
 ) -> int:
     """Record one notification's create and trades; return the newest slot."""
     stats.notifications += 1
@@ -169,8 +181,38 @@ def _process(
         _record_create(db, notification, create)
         tracked_until[create.mint_pubkey] = now + TRADE_RECORD_WINDOW_SECONDS
         stats.launches += 1
+        capture_metadata(create.mint_pubkey, create.uri)
     stats.trades += _record_trades(db, notification, tracked_until, now)
     return max(last_slot or 0, notification.slot)
+
+
+class MetadataCapture:
+    """Fetch each new launch's metadata in the background and persist it."""
+
+    def __init__(self, db: DatabaseManager, stats: CollectStats) -> None:
+        self._db = db
+        self._stats = stats
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=FETCH_TIMEOUT_SECONDS)
+        )
+        self._pending: set[asyncio.Task[None]] = set()
+
+    def schedule(self, mint: str, uri: str) -> None:
+        task = asyncio.create_task(self._capture(mint, uri))
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+
+    async def _capture(self, mint: str, uri: str) -> None:
+        captured = await fetch_launch_metadata(self._session, uri)
+        record_launch_metadata(self._db, mint=mint, uri=uri, captured=captured)
+        if captured.status == METADATA_OK:
+            self._stats.metadata_ok += 1
+        else:
+            self._stats.metadata_failed += 1
+
+    async def close(self) -> None:
+        await asyncio.gather(*self._pending)
+        await self._session.close()
 
 
 def _write_health(path: Path, status: str, stats: CollectStats) -> None:
@@ -216,6 +258,7 @@ async def run_collect(
     tracked_until: dict[str, float] = {}
     last_slot: int | None = None
     next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
+    metadata = MetadataCapture(db, stats)
     logger.info("rug_discover collect started state_dir=%s", state_dir)
     try:
         while not stop_event.is_set():
@@ -233,8 +276,11 @@ async def run_collect(
                 )
             except TimeoutError:
                 continue
-            last_slot = _process(db, notification, tracked_until, stats, last_slot)
+            last_slot = _process(
+                db, notification, tracked_until, stats, last_slot, metadata.schedule
+            )
     finally:
+        await metadata.close()
         await stream.close()
         pid_path.unlink(missing_ok=True)
         _write_health(health_path, "stopped", stats)

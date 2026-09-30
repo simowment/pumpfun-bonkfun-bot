@@ -7,10 +7,13 @@ through relay hops.
 """
 
 import asyncio
+import io
 import json
 import os
 
+import aiohttp
 import pytest
+from PIL import Image
 
 from rugbot.backtest.launch_replay import (
     LaunchReplay,
@@ -20,6 +23,12 @@ from rugbot.backtest.launch_replay import (
     trades_from_swap_api,
 )
 from rugbot.discover.fleet import create_facts
+from rugbot.discover.launch_metadata import (
+    METADATA_OK,
+    THUMBNAIL_PX,
+    LaunchMetadata,
+    fetch_launch_metadata,
+)
 from rugbot.discover.screen import ScreenFilters, screen_launches
 from rugbot.execution.auto_router import AutoRouter, RouteVenue
 from rugbot.ingest.pump.create_event_decoder import decode_pump_create_event_logs
@@ -184,3 +193,27 @@ def test_screen_lists_sol_curve_launches_in_the_age_window() -> None:
 def test_create_facts_skip_failed_transactions_before_the_create() -> None:
     creator, _ = create_facts(FAILED_FIRST_TX_MINT)
     assert creator == FAILED_FIRST_TX_CREATOR
+
+
+# A pump.fun create whose metadata and image both sit on ipfs.io, which
+# refuses plain HTTP clients; IPFS content never changes.
+IPFS_IO_METADATA_URI = (
+    "https://ipfs.io/ipfs/bafkreie2mticbhpvv7jzarmch6kwxt76uyuspntaewaxtmtzu6ktwjnugm"
+)
+
+
+def test_launch_metadata_capture_reads_ipfs_io_launches() -> None:
+    async def fetch() -> LaunchMetadata:
+        async with aiohttp.ClientSession() as session:
+            return await fetch_launch_metadata(session, IPFS_IO_METADATA_URI)
+
+    captured = asyncio.run(fetch())
+    assert captured.status == METADATA_OK, captured.error
+    assert captured.metadata is not None
+    assert captured.metadata["name"] == "创世记 42"
+    assert captured.image_dhash is not None
+    assert len(captured.image_dhash) == 16
+    assert captured.thumbnail_webp is not None
+    with Image.open(io.BytesIO(captured.thumbnail_webp)) as thumbnail:
+        assert thumbnail.format == "WEBP"
+        assert max(thumbnail.size) <= THUMBNAIL_PX

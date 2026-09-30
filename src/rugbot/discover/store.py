@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from rugbot.storage.database import DatabaseManager
 
 if TYPE_CHECKING:
+    from rugbot.discover.launch_metadata import LaunchMetadata
     from rugbot.integrations.solscan import SolscanMintTransactionCandidate
     from rugbot.intelligence.entity_mint_index import FinalizedEntityMint
 
@@ -67,6 +68,21 @@ def ensure_discover_schema(db: DatabaseManager) -> None:
             from_slot INTEGER NOT NULL,
             to_slot INTEGER NOT NULL,
             detected_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS discover_launch_metadata (
+            mint TEXT PRIMARY KEY,
+            uri TEXT NOT NULL,
+            fetched_at_ms INTEGER NOT NULL,
+            fetch_ms INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            error TEXT,
+            metadata_json TEXT,
+            image_dhash TEXT,
+            thumbnail_webp BLOB
         )
         """
     )
@@ -208,6 +224,30 @@ def record_stream_gap(db: DatabaseManager, *, from_slot: int, to_slot: int) -> N
         "INSERT INTO discover_stream_gaps(from_slot, to_slot, detected_at) "
         "VALUES (?, ?, ?)",
         (from_slot, to_slot, int(time.time())),
+    )
+    db.connection.commit()
+
+
+def record_launch_metadata(
+    db: DatabaseManager, *, mint: str, uri: str, captured: LaunchMetadata
+) -> None:
+    """Persist what a launch's metadata uri served when it was first fetched."""
+
+    db.connection.execute(
+        "INSERT OR IGNORE INTO discover_launch_metadata(mint, uri, fetched_at_ms, "
+        "fetch_ms, status, error, metadata_json, image_dhash, thumbnail_webp) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            mint,
+            uri,
+            captured.fetched_at_ms,
+            captured.fetch_ms,
+            captured.status,
+            captured.error,
+            None if captured.metadata is None else json.dumps(captured.metadata),
+            captured.image_dhash,
+            captured.thumbnail_webp,
+        ),
     )
     db.connection.commit()
 

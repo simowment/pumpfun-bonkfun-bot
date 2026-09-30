@@ -254,6 +254,7 @@ def test_collector_records_a_recorded_launch_and_flags_stream_gaps(
     stats = collector.CollectStats()
     tracked: dict[str, float] = {}
     last_slot = None
+    captured: list[tuple[str, str]] = []
     for index, recorded in enumerate(launch["notifications"]):
         notification = WalletLogNotification(
             wallet=PUMP_PROGRAM_ID,
@@ -262,13 +263,21 @@ def test_collector_records_a_recorded_launch_and_flags_stream_gaps(
             logs=tuple(recorded["logs"]),
         )
         last_slot = collector._process(
-            database, notification, tracked, stats, last_slot
+            database,
+            notification,
+            tracked,
+            stats,
+            last_slot,
+            lambda mint, uri: captured.append((mint, uri)),
         )
     row = database.connection.execute(
         "SELECT creator, created_slot, raw_json FROM discover_launches WHERE mint = ?",
         (launch["mint"],),
     ).fetchone()
     assert row["creator"] == launch["creator"]
+    # The create schedules exactly one metadata capture for its uri.
+    assert [mint for mint, _ in captured] == [launch["mint"]]
+    assert captured[0][1].startswith("https://")
     # The stored create logs decode like a fetched create transaction.
     logs = json.loads(row["raw_json"])["meta"]["logMessages"]
     assert decode_pump_create_event_logs(logs, as_of_slot=row["created_slot"])
