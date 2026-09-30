@@ -34,7 +34,10 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="Collect runs headless (PID .state/discover/rug_discover.pid). Candidates/dossier read same WAL DB concurrently. Web can stay closed.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    collect = sub.add_parser("collect", help="headless PumpPortal collect daemon")
+    collect = sub.add_parser(
+        "collect",
+        help="record every Pump launch and its trades from one finalized log stream",
+    )
     collect.add_argument(
         "--state-dir",
         type=Path,
@@ -42,27 +45,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="state directory (default: .state/discover)",
     )
     collect.add_argument(
-        "--jsonl",
-        action="store_true",
-        help="also append per-mint JSONL observations",
-    )
-    collect.add_argument(
         "--endpoint",
         type=str,
         default=None,
-        help="override SOLANA_RPC_HTTP endpoint",
+        help="override SOLANA_RPC_HTTP endpoint (its WebSocket is used)",
     )
     collect.add_argument(
         "--duration-seconds",
         type=float,
         default=None,
         help="stop after a bounded duration; omitted means run continuously",
-    )
-    collect.add_argument(
-        "--record-trades",
-        action="store_true",
-        help="record every collected launch's trades from finalized Pump program "
-        "logs (Solana WebSocket) so scans read the DB instead of pump.fun",
     )
 
     enrich = sub.add_parser("enrich", help="historique batch enrich for wallet or mint")
@@ -975,10 +967,8 @@ def main(argv: list[str] | None = None) -> int:
             asyncio.run(
                 run_collect(
                     state_dir,
-                    use_jsonl=bool(args.jsonl),
                     endpoint=args.endpoint,
                     duration_seconds=args.duration_seconds,
-                    record_trades=bool(args.record_trades),
                 )
             )
         except KeyboardInterrupt:

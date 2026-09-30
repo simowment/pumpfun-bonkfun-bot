@@ -263,11 +263,12 @@ Statut au 2026-08-26: (1) partiel via `funder_discovery`/`cluster_graph` mais pa
 
 > Demande utilisateur : collecteur headless longue durée + suivi complet par lancement + enrichisseur historique + file interrogeable. Survit à la fermeture du Web.
 
-- [ ] **Collecteur headless `uv run rug_discover collect`** : écoute toutes les créations PumpPortal, s'abonne aux trades des nouveaux tokens, écrit événements réels dans SQLite/JSONL. Pas de synthèse inventée.
+- [x] **Collecteur headless `uv run rug_discover collect`** : un seul `logsSubscribe` finalized sur le programme Pump ; créations + tous les trades 2 h après chaque create, dans SQLite. Trous de flux (> 20 slots) enregistrés dans `discover_stream_gaps`. Vérifié live 2026-09-30 : 52 lancements / 1664 trades en 120 s, complétude = swap-api pump.fun (219/219, 194/194, 168/168).
+- [ ] **Dataset ML** : `rug_discover dataset` — features au moment de la décision + labels `LaunchReplay`, exclut les lancements chevauchant un trou de flux.
 - [ ] **Suivi complet par lancement** : création/créateur, achats bundle + ordre tx, signataires/fee payer, market cap à 1s, volume, ATH, ventes dev/bundlers, dump/sweep/durée d'inactivité. Source : PumpPortal + RPC finalized. GMGN optionnel.
 - [ ] **Enrichisseur historique batch** : `uv run rug_discover enrich <wallet|mint>` — anciens mints via Solscan/Pump.fun, bundles par lancement, autres tokens achetés, paniers croisés, cycles financement→achat→vente→sweep. Réutilise `rug_intel check --trace-funding --score --entity` dedup path.
 - [ ] **File dossiers interrogeable** : `uv run rug_discover candidates --since 24h --json` + `uv run rug_discover dossier <wallet> --json`. L'opérateur lance la collecte, parcourt, compare et restitue les ruggers.
-- [ ] **Processus persistant** : `rug_discover collect` tourne en arrière-plan hors Web (PID file + `rugged` health). `candidates`/`dossier` lisent la même base.
+- [x] **Processus persistant** : `rug_discover collect` tourne en arrière-plan hors Web (PID file + `health.json`). `candidates`/`dossier` lisent la même base.
 
 ## Phase 5 — Newpairs Alpha Extraction (EN COURS — spec 2026-09-06)
 

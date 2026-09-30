@@ -1,6 +1,15 @@
-"""Headless rug_discover collect daemon."""
+"""Headless rug_discover collect daemon: one finalized Pump program log stream.
 
-# ruff: noqa: C901, PLR0912, PLR0913, PLR0915, BLE001, TRY003, TC001, TC003
+Every successful Pump transaction arrives on one ``logsSubscribe``. Create
+events become launches (their logs are stored so readers decode the create
+event, reserves and Mayhem flag exactly as for a fetched transaction); every
+trade of a launch is recorded for ``TRADE_RECORD_WINDOW_SECONDS`` after its
+create. No per-launch RPC calls are made.
+
+The Pump program executes in essentially every slot, so a notification slot
+jumping past ``STREAM_GAP_SLOTS`` means the socket dropped events: the gap is
+persisted so datasets can exclude launches whose trades may be incomplete.
+"""
 
 from __future__ import annotations
 
@@ -11,35 +20,27 @@ import os
 import signal
 import time
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-import base58
-from sol_trade_sdk.solana.provider_pool import RpcHttpTransport, RpcProviderPool
 from solders.pubkey import Pubkey
 
-from rugbot.backtest.trajectory.finalized_trade_builder import (
-    decode_pump_trade_event_proofs,
-)
 from rugbot.discover.store import (
-    append_observation,
     ensure_discover_schema,
-    update_launch_metrics,
+    record_stream_gap,
     upsert_launch,
     upsert_trade,
 )
-from rugbot.domain.decisions import AbstainReason, AbstainResult
-from rugbot.domain.observations import RawChainObservation
+from rugbot.domain.amounts import Slot
+from rugbot.domain.decisions import AbstainResult
 from rugbot.ingest.pump.create_decoder import PUMP_PROGRAM_ID
-from rugbot.ingest.pump.pump_create_observation import decode_pump_create_v2_observation
-from rugbot.ingest.pump.pump_stream import (
-    PumpPortalLaunchNotification,
-    PumpPortalLaunchStream,
+from rugbot.ingest.pump.create_event_decoder import (
+    PumpCreateEvent,
+    decode_pump_create_event_logs,
 )
 from rugbot.ingest.pump.trade_event_decoder import (
     decode_pump_trade_event,
     pump_trade_payloads,
 )
-from rugbot.ingest.rpc_observer import observe_address, observe_finalized_transaction
 from rugbot.integrations.rpc_access import resolve_websocket_endpoint
 from rugbot.integrations.solana_logs_stream import (
     SolanaLogsStream,
@@ -49,35 +50,23 @@ from rugbot.runtime.config import load_provider_settings, resolve_dotenv
 from rugbot.storage.database import DatabaseManager
 from rugbot.utils.logger import get_logger
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 logger = get_logger(__name__)
 
 HEARTBEAT_SECONDS = 60
-POLL_TRADES_SECONDS = 30
-RECONNECT_MIN_SECONDS = 1.0
-RECONNECT_MAX_SECONDS = 30.0
-STALE_RETRY_SECONDS = 2.0
-# Finalization lags the processed PumpPortal event by ~32 slots (~13 s); waiting
-# first avoids burning RPC credits on guaranteed-pending getTransaction calls.
-FINALITY_DELAY_SECONDS = 14.0
-STALE_TIMEOUT_SECONDS = 60
-# Rate-limit/transport abstains are transient: back off and retry within a
-# bounded budget so throttled launches eventually hydrate instead of being
-# dropped forever (previously 282 launches lost to RpcProviderPoolError).
-RATE_LIMIT_BACKOFF_MAX_SECONDS = 8.0
-RATE_LIMIT_RETRY_BUDGET_SECONDS = 120.0
-SEMAPHORE_LIMIT = 4
-RPC_MINIMUM_INTERVAL_SECONDS = 0.25
-TRADE_POLL_MIN_INTERVAL_SECONDS = 5
-TRADE_HISTORY_LIMIT = 10
-TRADE_MONITOR_SECONDS = 15 * 60
-# Trade polling cost: ~2 req per mint per POLL_TRADES_SECONDS while active.
-# Gated behind RUGBOT_DISCOVER_TRADE_POLL_ENABLED to avoid idle RPC burn.
-PENDING_FINALIZED_TRANSACTION_MESSAGE = (
-    "getTransaction returned no complete finalized transaction"
-)
-INCONSISTENT_FINALIZED_SLOT_MESSAGE = (
-    "getTransaction returned an inconsistent finalized slot"
-)
+STREAM_COMMITMENT = "finalized"
+# Trades of each launch are recorded for this long after its create.
+TRADE_RECORD_WINDOW_SECONDS = 2 * 3600
+# More slots than this between two Pump notifications means lost events.
+STREAM_GAP_SLOTS = 20
+LAUNCH_SOURCE = "pump_logs"
+# discover_trades side for a launch whose trade events are outside the modeled
+# fee set (holder rewards); scans skip such launches instead of using a gap.
+UNMODELED_SIDE = "unmodeled"
+PUMP_TRADE_MINT_OFFSET = 8
+PUBKEY_BYTES = 32
 
 
 @dataclass(slots=True)
@@ -85,324 +74,36 @@ class CollectStats:
     notifications: int = 0
     launches: int = 0
     trades: int = 0
+    gaps: int = 0
     errors: int = 0
 
 
-def _payload_result(observation: RawChainObservation) -> dict[str, object] | None:
-    """Narrow the persisted JSON-RPC response to its result object."""
-
-    if observation.raw_source_payload is None:
-        return None
-    payload = json.loads(observation.raw_source_payload)
-    if not isinstance(payload, dict):
-        return None
-    result = payload.get("result")
-    return result if isinstance(result, dict) else None
-
-
-def _transaction_actors(
-    observation: RawChainObservation,
-) -> tuple[str | None, tuple[str, ...]]:
-    """Return fee payer and required signers proven by the RPC transaction."""
-
-    result = _payload_result(observation)
-    transaction = result.get("transaction") if result is not None else None
-    if not isinstance(transaction, dict):
-        return None, ()
-    message = transaction.get("message")
-    if not isinstance(message, dict):
-        return None, ()
-    header = message.get("header")
-    account_keys = message.get("accountKeys")
-    if not isinstance(account_keys, list):
-        return None, ()
-    pubkeys: list[str] = []
-    if isinstance(header, dict):
-        required = header.get("numRequiredSignatures")
-        if not isinstance(required, int) or required < 1:
-            return None, ()
-        for item in account_keys[:required]:
-            if isinstance(item, str):
-                pubkeys.append(item)
-            elif isinstance(item, dict) and isinstance(item.get("pubkey"), str):
-                pubkeys.append(item["pubkey"])
-            else:
-                return None, ()
-    else:
-        for item in account_keys:
-            if (
-                isinstance(item, dict)
-                and item.get("signer") is True
-                and isinstance(item.get("pubkey"), str)
-            ):
-                pubkeys.append(item["pubkey"])
-    return (pubkeys[0] if pubkeys else None), tuple(pubkeys)
-
-
-def _created_at(observation: RawChainObservation) -> str | None:
-    """Return finalized block time as UTC ISO-8601 when the RPC supplied it."""
-
-    result = _payload_result(observation)
-    block_time = result.get("blockTime") if result is not None else None
-    if not isinstance(block_time, int):
-        return None
-    return dt.datetime.fromtimestamp(block_time, tz=dt.UTC).isoformat()
-
-
-def _trade_event_json(event: object) -> str:
-    """Serialize decoded proof fields without duplicating binary event bytes."""
-
-    fields = asdict(event)
-    fields.pop("encoded_event", None)
-    return json.dumps(fields, sort_keys=True)
-
-
-def _is_rate_limit_abstain(result: object) -> bool:
-    """Return True when an abstain was caused by RPC throttling or transport loss.
-
-    The RPC layer emits MISSING_FEATURE abstains with messages shaped like
-    "<method> was rate-limited by the available RPC providers" or
-    "<method> transport failed: RpcProviderPoolError". Both are transient and
-    worth retrying with backoff rather than dropping the launch permanently.
-    """
-
-    if getattr(result, "reason", None) is not AbstainReason.MISSING_FEATURE:
-        return False
-    message = getattr(result, "message", None)
-    if not isinstance(message, str):
-        return False
-    lowered = message.lower()
-    return "rate-limited" in lowered or "transport failed" in lowered
-
-
-async def _observe_finalized_with_retry(
-    signature: str,
-    *,
-    endpoint: str,
-    source_id: str,
-    semaphore: asyncio.Semaphore,
-    transport: RpcHttpTransport | None,
-) -> object:
-    start = time.monotonic()
-    rate_limit_attempts = 0
-    async with semaphore:
-        while True:
-            result = await observe_finalized_transaction(
-                signature,
-                expected_slot=None,
-                endpoint=endpoint,
-                source_id=source_id,
-                observer_id="rug_discover",
-                receive_sequence=1,
-                transport=transport,
-            )
-            if not hasattr(result, "reason"):
-                return result
-            # AbstainResult
-            is_pending_transaction = (
-                getattr(result, "reason", None) is AbstainReason.MISSING_FEATURE
-                and getattr(result, "message", None)
-                == PENDING_FINALIZED_TRANSACTION_MESSAGE
-            )
-            is_provider_slot_lag = (
-                getattr(result, "reason", None) is AbstainReason.UNKNOWN_PROTOCOL_STATE
-                and getattr(result, "message", None)
-                == INCONSISTENT_FINALIZED_SLOT_MESSAGE
-            )
-            if (
-                getattr(result, "reason", None) is AbstainReason.STALE_STATE
-                or is_pending_transaction
-                or is_provider_slot_lag
-            ):
-                if time.monotonic() - start > STALE_TIMEOUT_SECONDS:
-                    return result
-                await asyncio.sleep(STALE_RETRY_SECONDS)
-                continue
-            if _is_rate_limit_abstain(result):
-                if time.monotonic() - start > RATE_LIMIT_RETRY_BUDGET_SECONDS:
-                    return result
-                backoff = min(
-                    RECONNECT_MIN_SECONDS * (2**rate_limit_attempts),
-                    RATE_LIMIT_BACKOFF_MAX_SECONDS,
-                )
-                rate_limit_attempts += 1
-                await asyncio.sleep(backoff)
-                continue
-            return result
-
-
-def _discover_trade_poll_enabled() -> bool:
-    """Return True only when trade polling is explicitly opted in via env.
-
-    Continuous bonding-curve trade polling is OFF by default because it
-    burns ~2 RPC calls per mint per interval. Set
-    RUGBOT_DISCOVER_TRADE_POLL_ENABLED to a truthy value (1/true/yes/on)
-    to re-enable ATH/dump/dev-sell evidence collection.
-    """
-    return os.environ.get("RUGBOT_DISCOVER_TRADE_POLL_ENABLED", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
-def _discover_trade_poll_interval_seconds() -> float:
-    """Resolve trade poll interval from env RUGBOT_DISCOVER_TRADE_POLL_SECONDS."""
-    raw = os.environ.get("RUGBOT_DISCOVER_TRADE_POLL_SECONDS", "").strip()
-    if not raw:
-        return float(POLL_TRADES_SECONDS)
-    try:
-        value = float(raw)
-    except ValueError as error:
-        raise ValueError(
-            "RUGBOT_DISCOVER_TRADE_POLL_SECONDS must be a number"
-        ) from error
-    if value < TRADE_POLL_MIN_INTERVAL_SECONDS:
-        raise ValueError(
-            "RUGBOT_DISCOVER_TRADE_POLL_SECONDS must be >= "
-            f"{TRADE_POLL_MIN_INTERVAL_SECONDS}"
-        )
-    return value
-
-
-async def _poll_trades_for_mint(
-    mint: str,
-    bonding_curve: str,
-    *,
-    creator: str,
-    quote_mint: str,
-    quote_is_sol: bool,
-    endpoint: str,
-    db: DatabaseManager,
-    state_dir: Path,
-    stop_event: asyncio.Event,
-    stats: CollectStats,
-    use_jsonl: bool,
-    transport: RpcHttpTransport | None,
-    poll_semaphore: asyncio.Semaphore,
+def _record_create(
+    db: DatabaseManager, notification: WalletLogNotification, create: PumpCreateEvent
 ) -> None:
-    if not _discover_trade_poll_enabled():
-        return
-    poll_interval = _discover_trade_poll_interval_seconds()
-    started_at = time.monotonic()
-    while (
-        not stop_event.is_set()
-        and time.monotonic() - started_at < TRADE_MONITOR_SECONDS
-    ):
-        try:
-            async with poll_semaphore:
-                result = await observe_address(
-                    bonding_curve,
-                    endpoint=endpoint,
-                    source_id=f"discover:{mint}",
-                    max_signatures=TRADE_HISTORY_LIMIT,
-                    max_transactions=TRADE_HISTORY_LIMIT,
-                    transport=transport,
-                    standard_history_only=True,
-                )
-            if isinstance(result, AbstainResult):
-                await asyncio.sleep(poll_interval)
-                continue
-            inserted = 0
-            for observation in result:
-                decoded_events = decode_pump_trade_event_proofs(observation)
-                if isinstance(decoded_events, AbstainResult):
-                    continue
-                matching_events = tuple(
-                    (event_index, event)
-                    for event_index, event in decoded_events
-                    if event.mint == mint
-                )
-                if not matching_events or observation.signature is None:
-                    continue
-                if use_jsonl:
-                    append_observation(state_dir, observation, mint=mint)
-                signature = base58.b58encode(observation.signature).decode("ascii")
-                fee_payer, signers = _transaction_actors(observation)
-                for event_index, event in matching_events:
-                    quote_amount = (
-                        event.quote_amount_base_units or event.sol_amount_base_units
-                    )
-                    quote_reserves = (
-                        event.virtual_quote_reserves_base_units
-                        or event.virtual_sol_reserves_base_units
-                    )
-                    price_ppm = None
-                    if event.virtual_token_reserves_base_units > 0:
-                        price_ppm = (
-                            quote_reserves
-                            * 1_000_000
-                            // event.virtual_token_reserves_base_units
-                        )
-                    if upsert_trade(
-                        db,
-                        mint=mint,
-                        signature=signature,
-                        event_index=event_index,
-                        slot=observation.slot,
-                        side="buy" if event.is_buy else "sell",
-                        tx_index=observation.transaction_index,
-                        wallet=event.user,
-                        quote_amount_base_units=quote_amount,
-                        quote_mint=quote_mint,
-                        base_amount=event.token_amount_base_units,
-                        fee_payer=fee_payer,
-                        signers_json=json.dumps(signers),
-                        price_ppm=price_ppm,
-                        raw_json=_trade_event_json(event),
-                    ):
-                        inserted += 1
-                        if not event.is_buy and event.user == creator:
-                            update_launch_metrics(
-                                db,
-                                mint,
-                                dev_sell_slot=observation.slot,
-                                dump_slot=observation.slot,
-                            )
-            if inserted:
-                stats.trades += inserted
-                if quote_is_sol:
-                    row = db.connection.execute(
-                        "SELECT SUM(quote_amount_base_units) AS volume, "
-                        "MAX(price_ppm) AS ath "
-                        "FROM discover_trades WHERE mint = ?",
-                        (mint,),
-                    ).fetchone()
-                    metrics: dict[str, int] = {}
-                    if row is not None and isinstance(row["volume"], int):
-                        metrics["volume_lamports"] = row["volume"]
-                    if row is not None and isinstance(row["ath"], int):
-                        metrics["ath_quote_lamports"] = row["ath"]
-                    if metrics:
-                        update_launch_metrics(db, mint, **metrics)
-        except Exception:
-            stats.errors += 1
-            logger.warning("poll trades error for %s", mint, exc_info=True)
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=poll_interval)
-        except TimeoutError:
-            continue
+    upsert_launch(
+        db,
+        mint=create.mint_pubkey,
+        creator=create.creator_pubkey,
+        created_signature=notification.signature,
+        created_slot=notification.slot,
+        symbol=create.symbol,
+        name=create.name,
+        created_at=dt.datetime.fromtimestamp(create.timestamp, tz=dt.UTC).isoformat(),
+        bonding_curve=create.bonding_curve_pubkey,
+        source=LAUNCH_SOURCE,
+        raw_json=json.dumps({"meta": {"logMessages": list(notification.logs)}}),
+    )
 
 
-# Trades of each collected launch are recorded from finalized Pump program logs
-# for this long after the create notification.
-TRADE_RECORD_WINDOW_SECONDS = 2 * 3600
-PUMP_TRADE_MINT_OFFSET = 8
-PUBKEY_BYTES = 32
-# discover_trades side for a launch whose trade events are outside the modeled
-# fee set (holder rewards); scans skip such launches instead of using a gap.
-UNMODELED_SIDE = "unmodeled"
-
-
-def _record_trade_logs(
+def _record_trades(
     db: DatabaseManager,
     notification: WalletLogNotification,
     tracked_until: dict[str, float],
-    stats: CollectStats,
-) -> None:
-    """Persist every Pump TradeEvent of a tracked mint in one finalized tx."""
-    now = time.monotonic()
+    now: float,
+) -> int:
+    """Persist every Pump TradeEvent of a tracked mint; return how many."""
+    recorded = 0
     for event_index, payload in pump_trade_payloads(notification.logs):
         mint = str(
             Pubkey.from_bytes(
@@ -413,6 +114,7 @@ def _record_trade_logs(
             continue
         event = decode_pump_trade_event(payload, notification.slot)
         if isinstance(event, AbstainResult):
+            # Marks the launch as not replayable instead of leaving a gap.
             upsert_trade(
                 db,
                 mint=mint,
@@ -442,304 +144,98 @@ def _record_trade_logs(
                 }
             ),
         )
-        stats.trades += 1
+        recorded += 1
+    return recorded
 
 
-async def _run_trade_recorder(
-    stream: SolanaLogsStream,
+def _process(
     db: DatabaseManager,
+    notification: WalletLogNotification,
     tracked_until: dict[str, float],
     stats: CollectStats,
-) -> None:
-    """Consume finalized Pump program logs and record tracked mints' trades."""
-    await stream.reconcile([PUMP_PROGRAM_ID])
-    while True:
-        try:
-            notification = await stream.next_notification()
-        except Exception as exc:
-            stats.errors += 1
-            logger.warning("pump logs stream error: %s", exc)
-            await asyncio.sleep(RECONNECT_MIN_SECONDS)
-            continue
-        _record_trade_logs(db, notification, tracked_until, stats)
+    last_slot: int | None,
+) -> int:
+    """Record one notification's create and trades; return the newest slot."""
+    stats.notifications += 1
+    if last_slot is not None and notification.slot - last_slot > STREAM_GAP_SLOTS:
+        record_stream_gap(db, from_slot=last_slot, to_slot=notification.slot)
+        stats.gaps += 1
+        logger.warning("stream gap %d..%d", last_slot, notification.slot)
+    now = time.monotonic()
+    create = decode_pump_create_event_logs(
+        notification.logs, as_of_slot=Slot(notification.slot)
+    )
+    if isinstance(create, PumpCreateEvent):
+        _record_create(db, notification, create)
+        tracked_until[create.mint_pubkey] = now + TRADE_RECORD_WINDOW_SECONDS
+        stats.launches += 1
+    stats.trades += _record_trades(db, notification, tracked_until, now)
+    return max(last_slot or 0, notification.slot)
+
+
+def _write_health(path: Path, status: str, stats: CollectStats) -> None:
+    payload = {"status": status, **asdict(stats), "timestamp": int(time.time())}
+    payload["pid"] = os.getpid()
+    try:
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    except OSError:
+        logger.warning("could not write %s", path, exc_info=True)
 
 
 async def run_collect(
     state_dir: Path,
     *,
-    use_jsonl: bool = False,
     endpoint: str | None = None,
-    pumpportal_url: str | None = None,
     duration_seconds: float | None = None,
-    record_trades: bool = False,
 ) -> None:
-    """Daemon loop: PumpPortal -> finalized hydration -> SQLite/JSONL -> trade polling."""
+    """Record every Pump launch and its trades from one finalized log stream."""
 
     resolve_dotenv()
-    providers = load_provider_settings()
-    rpc_endpoint = endpoint or providers.rpc_http
-    if not rpc_endpoint:
-        raise ValueError("SOLANA_RPC_HTTP is required for rug_discover collect")
+    websocket = resolve_websocket_endpoint(
+        endpoint or load_provider_settings().rpc_http
+    )
+    if websocket is None:
+        raise ValueError("SOLANA_RPC_HTTP or SOLANA_RPC_WEBSOCKET is required")  # noqa: TRY003
     if duration_seconds is not None and duration_seconds <= 0:
-        raise ValueError("duration_seconds must be positive")
-
+        raise ValueError("duration_seconds must be positive")  # noqa: TRY003
     state_dir.mkdir(parents=True, exist_ok=True)
-    (state_dir / "observations").mkdir(parents=True, exist_ok=True)
     db = DatabaseManager(state_dir / "rugbot.db")
     ensure_discover_schema(db)
-
     pid_path = state_dir / "rug_discover.pid"
     health_path = state_dir / "health.json"
-    try:
-        pid_path.write_text(str(os.getpid()), encoding="utf-8")
-    except OSError:
-        logger.warning("could not write pid file", exc_info=True)
+    pid_path.write_text(str(os.getpid()), encoding="utf-8")
 
-    stream = PumpPortalLaunchStream(
-        websocket_endpoint=pumpportal_url or "wss://pumpportal.fun/api/data",
-        api_key=providers.pumpportal_api_key,
-    )
-    semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
-    trade_poll_semaphore = asyncio.Semaphore(1)
-    rpc_transport = (
-        RpcProviderPool(
-            (rpc_endpoint, *providers.rpc_http_fallbacks),
-            minimum_interval_seconds=RPC_MINIMUM_INTERVAL_SECONDS,
-        )
-        if endpoint is None and providers.rpc_http_fallbacks
-        else None
-    )
+    stream = SolanaLogsStream(websocket, commitment=STREAM_COMMITMENT)
+    await stream.reconcile([PUMP_PROGRAM_ID])
     stats = CollectStats()
     stop_event = asyncio.Event()
-    trade_tasks: dict[str, asyncio.Task[None]] = {}
-    hydration_tasks: set[asyncio.Task[None]] = set()
-    tracked_until: dict[str, float] = {}
-    recorder_task: asyncio.Task[None] | None = None
-    if record_trades:
-        websocket_endpoint = resolve_websocket_endpoint(rpc_endpoint)
-        if websocket_endpoint is None:
-            raise ValueError("record_trades needs a Solana WebSocket endpoint")
-        recorder_task = asyncio.create_task(
-            _run_trade_recorder(
-                SolanaLogsStream(websocket_endpoint), db, tracked_until, stats
-            )
-        )
-
-    def _handle_signal(*_args: object) -> None:
-        stop_event.set()
-
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _handle_signal)
-        except (NotImplementedError, ValueError, RuntimeError):
-            pass
-
-    async def _hydrate_and_store(
-        notification: PumpPortalLaunchNotification,
-    ) -> None:
-        """Hydrate one create once finalized, persist it, and start trade polling."""
-        await asyncio.sleep(FINALITY_DELAY_SECONDS)
-        result = await _observe_finalized_with_retry(
-            notification.signature,
-            endpoint=rpc_endpoint,
-            source_id="rug_discover",
-            semaphore=semaphore,
-            transport=rpc_transport,
-        )
-        if result is None or hasattr(result, "reason"):
-            stats.errors += 1
-            logger.warning(
-                "finalized hydration abstained for %s: %s: %s",
-                notification.signature,
-                getattr(result, "reason", "unknown"),
-                getattr(result, "message", "no detail"),
-            )
-            return
-
-        obs = result  # RawChainObservation
-        # persist observation
-        if use_jsonl:
-            try:
-                append_observation(
-                    state_dir,
-                    obs,  # type: ignore[arg-type]
-                    mint=notification.mint_pubkey,
-                )
-            except Exception:
-                logger.warning("jsonl append failed", exc_info=True)
-
-        # decode create_v2
-        try:
-            decoded = decode_pump_create_v2_observation(obs)  # type: ignore[arg-type]
-        except Exception as exc:
-            logger.warning(
-                "decode failed for %s: %s",
-                notification.signature,
-                exc,
-                exc_info=True,
-            )
-            return
-        if decoded is None or hasattr(decoded, "reason"):
-            # not a create_v2 or abstained
-            return
-
-        mint = decoded.mint_pubkey  # type: ignore[union-attr]
-        creator = (
-            decoded.creator_pubkey
-            if hasattr(decoded, "creator_pubkey")
-            else notification.creator_pubkey
-        )  # type: ignore[union-attr]
-        bonding_curve = decoded.bonding_curve_pubkey  # type: ignore[union-attr]
-
-        raw_json = None
-        try:
-            raw_json = (
-                obs.raw_source_payload.decode("utf-8")
-                if obs.raw_source_payload
-                else None
-            )  # type: ignore[union-attr]
-        except Exception:
-            raw_json = None
-
-        try:
-            upsert_launch(
-                db,
-                mint=mint,
-                creator=creator,
-                created_signature=notification.signature,
-                created_slot=obs.slot,  # type: ignore[union-attr]
-                symbol=decoded.symbol,  # type: ignore[union-attr]
-                name=decoded.name,  # type: ignore[union-attr]
-                created_at=_created_at(obs),  # type: ignore[arg-type]
-                bonding_curve=bonding_curve,
-                source="pumpportal",
-                raw_json=raw_json,
-            )
-        except Exception as exc:
-            logger.warning("upsert launch failed for %s: %s", mint, exc, exc_info=True)
-            return
-
-        stats.launches += 1
-        logger.info("launch %s creator %s slot %s", mint, creator, obs.slot)  # type: ignore[union-attr]
-
-        # subscribe trades for bonding_curve if available (gated by env flag)
-        if bonding_curve and mint not in trade_tasks and _discover_trade_poll_enabled():
-            task = asyncio.create_task(
-                _poll_trades_for_mint(
-                    mint,
-                    bonding_curve,
-                    creator=creator,
-                    quote_mint=decoded.quote_mint_pubkey,  # type: ignore[union-attr]
-                    quote_is_sol=decoded.quote_asset == "SOL",  # type: ignore[union-attr]
-                    endpoint=rpc_endpoint,
-                    db=db,
-                    state_dir=state_dir,
-                    stop_event=stop_event,
-                    stats=stats,
-                    use_jsonl=use_jsonl,
-                    transport=rpc_transport,
-                    poll_semaphore=trade_poll_semaphore,
-                )
-            )
-            trade_tasks[mint] = task
-            task.add_done_callback(
-                lambda _task, tracked_mint=mint: trade_tasks.pop(tracked_mint, None)
-            )
-
-    last_heartbeat = time.monotonic()
-    deadline = (
-        time.monotonic() + duration_seconds if duration_seconds is not None else None
-    )
-
-    logger.info(
-        "rug_discover collect started state_dir=%s endpoint=%s", state_dir, rpc_endpoint
-    )
-
+        loop.add_signal_handler(sig, stop_event.set)
+    deadline = None if duration_seconds is None else time.monotonic() + duration_seconds
+    tracked_until: dict[str, float] = {}
+    last_slot: int | None = None
+    next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
+    logger.info("rug_discover collect started state_dir=%s", state_dir)
     try:
         while not stop_event.is_set():
-            remaining = deadline - time.monotonic() if deadline is not None else None
-            if remaining is not None and remaining <= 0:
+            now = time.monotonic()
+            if deadline is not None and now >= deadline:
                 break
-            # heartbeat
-            if time.monotonic() - last_heartbeat >= HEARTBEAT_SECONDS:
-                health = {
-                    "status": "ok",
-                    "notifications": stats.notifications,
-                    "launches": stats.launches,
-                    "trades": stats.trades,
-                    "errors": stats.errors,
-                    "timestamp": int(time.time()),
-                    "pid": os.getpid(),
-                }
-                try:
-                    health_path.write_text(json.dumps(health), encoding="utf-8")
-                except OSError:
-                    pass
-                logger.info(
-                    "heartbeat notifications=%d launches=%d trades=%d errors=%d",
-                    stats.notifications,
-                    stats.launches,
-                    stats.trades,
-                    stats.errors,
-                )
-                last_heartbeat = time.monotonic()
-
-            # next_global_notification already handles reconnect exponential 1->30s internally
+            if now >= next_heartbeat:
+                tracked_until = {m: t for m, t in tracked_until.items() if t > now}
+                _write_health(health_path, "ok", stats)
+                logger.info("heartbeat %s tracked=%d", stats, len(tracked_until))
+                next_heartbeat = now + HEARTBEAT_SECONDS
             try:
                 notification = await asyncio.wait_for(
-                    stream.next_global_notification(),
-                    timeout=min(HEARTBEAT_SECONDS, remaining)
-                    if remaining is not None
-                    else HEARTBEAT_SECONDS,
+                    stream.next_notification(), timeout=HEARTBEAT_SECONDS
                 )
             except TimeoutError:
                 continue
-            except Exception as exc:
-                stats.errors += 1
-                logger.warning("pumpportal stream error: %s", exc, exc_info=True)
-                await asyncio.sleep(RECONNECT_MIN_SECONDS)
-                continue
-
-            stats.notifications += 1
-            tracked_until[notification.mint_pubkey] = (
-                time.monotonic() + TRADE_RECORD_WINDOW_SECONDS
-            )
-            task = asyncio.create_task(_hydrate_and_store(notification))
-            hydration_tasks.add(task)
-            task.add_done_callback(hydration_tasks.discard)
+            last_slot = _process(db, notification, tracked_until, stats, last_slot)
     finally:
-        stop_event.set()
-        pending = [*hydration_tasks, *trade_tasks.values()]
-        if recorder_task is not None:
-            pending.append(recorder_task)
-        for task in pending:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        try:
-            await stream.close()
-        except Exception:
-            logger.warning("could not close PumpPortal stream", exc_info=True)
-        # cleanup pid
-        try:
-            if pid_path.exists():
-                pid_path.unlink()
-        except OSError:
-            pass
-        health = {
-            "status": "stopped",
-            "notifications": stats.notifications,
-            "launches": stats.launches,
-            "trades": stats.trades,
-            "errors": stats.errors,
-            "timestamp": int(time.time()),
-            "pid": os.getpid(),
-        }
-        try:
-            health_path.write_text(json.dumps(health), encoding="utf-8")
-        except OSError:
-            logger.warning("could not write final health", exc_info=True)
-        logger.info("rug_discover collect stopped")
+        await stream.close()
+        pid_path.unlink(missing_ok=True)
+        _write_health(health_path, "stopped", stats)
+        logger.info("rug_discover collect stopped %s", stats)

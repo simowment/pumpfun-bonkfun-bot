@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from rugbot.discover import collector, ruggers
+from rugbot.discover import ruggers
 from rugbot.discover.store import ensure_discover_schema, upsert_launch
 from rugbot.runtime.config import (
     DEFAULT_MAX_RPC_CALLS_PER_COMMAND,
@@ -29,18 +29,6 @@ def test_resolve_max_rpc_calls_garbage_fail_closed() -> None:
             resolve_max_rpc_calls_per_command({"RUGBOT_MAX_RPC_CALLS": raw})
             == DEFAULT_MAX_RPC_CALLS_PER_COMMAND
         )
-
-
-def test_trade_poll_default_off(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """Trade polling is off unless the env opt-in is set."""
-    monkeypatch.delenv("RUGBOT_DISCOVER_TRADE_POLL_ENABLED", raising=False)
-    assert collector._discover_trade_poll_enabled() is False
-
-
-def test_trade_poll_opt_in(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """Setting RUGBOT_DISCOVER_TRADE_POLL_ENABLED=1 re-enables polling."""
-    monkeypatch.setenv("RUGBOT_DISCOVER_TRADE_POLL_ENABLED", "1")
-    assert collector._discover_trade_poll_enabled() is True
 
 
 def test_budget_exceeded_returns_partial_with_note(tmp_path) -> None:  # type: ignore[no-untyped-def]

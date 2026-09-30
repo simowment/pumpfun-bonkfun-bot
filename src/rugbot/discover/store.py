@@ -7,12 +7,11 @@ from __future__ import annotations
 import datetime as dt
 import json
 import sqlite3
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rugbot.domain.observations import RawChainObservation
 from rugbot.storage.database import DatabaseManager
-from rugbot.storage.jsonl_observation_store import JsonlObservationStore
 
 if TYPE_CHECKING:
     from rugbot.integrations.solscan import SolscanMintTransactionCandidate
@@ -62,6 +61,15 @@ def ensure_discover_schema(db: DatabaseManager) -> None:
             )
     except Exception:  # noqa: BLE001, S110
         pass
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS discover_stream_gaps (
+            from_slot INTEGER NOT NULL,
+            to_slot INTEGER NOT NULL,
+            detected_at INTEGER NOT NULL
+        )
+        """
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS discover_trades (
@@ -191,6 +199,17 @@ def ensure_discover_schema(db: DatabaseManager) -> None:
         "CREATE INDEX IF NOT EXISTS idx_discover_launches_created_at ON discover_launches(created_at)"
     )
     conn.commit()
+
+
+def record_stream_gap(db: DatabaseManager, *, from_slot: int, to_slot: int) -> None:
+    """Persist a slot range in which the collector's stream may have lost events."""
+
+    db.connection.execute(
+        "INSERT INTO discover_stream_gaps(from_slot, to_slot, detected_at) "
+        "VALUES (?, ?, ?)",
+        (from_slot, to_slot, int(time.time())),
+    )
+    db.connection.commit()
 
 
 def upsert_launch(
@@ -363,29 +382,6 @@ def update_launch_metrics(
         except sqlite3.Error:
             pass
         raise
-
-
-def jsonl_path_for_mint(state_dir: Path, mint: str) -> Path:
-    """Return JSONL path for one mint."""
-
-    return state_dir / "observations" / f"{mint}.jsonl"
-
-
-def append_observation(
-    state_dir: Path,
-    observation: RawChainObservation,
-    *,
-    mint: str | None = None,
-) -> bool:
-    """Append observation to per-mint JSONL via JsonlObservationStore."""
-
-    path = (
-        jsonl_path_for_mint(state_dir, mint)
-        if mint
-        else state_dir / "observations" / "unknown.jsonl"
-    )
-    store = JsonlObservationStore(path)
-    return store.append(observation)
 
 
 def upsert_candidate(

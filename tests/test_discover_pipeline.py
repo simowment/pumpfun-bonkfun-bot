@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+import itertools
 import json
 from pathlib import Path
 from time import monotonic_ns, time_ns
@@ -15,14 +15,7 @@ from rugbot.backtest.trajectory.finalized_trade_builder import (
 )
 from rugbot.discover import collector
 from rugbot.discover.candidates import query_candidates
-from rugbot.discover.collector import (
-    _created_at,
-    _is_rate_limit_abstain,
-    _observe_finalized_with_retry,
-    _transaction_actors,
-)
 from rugbot.discover.store import (
-    append_observation,
     ensure_discover_schema,
     fetch_entity_mint_windows,
     fetch_wallet_basket_scan,
@@ -35,6 +28,9 @@ from rugbot.discover.store import (
 )
 from rugbot.domain.decisions import AbstainReason, AbstainResult
 from rugbot.domain.observations import RawChainObservation
+from rugbot.ingest.pump.create_decoder import PUMP_PROGRAM_ID
+from rugbot.ingest.pump.create_event_decoder import decode_pump_create_event_logs
+from rugbot.integrations.solana_logs_stream import WalletLogNotification
 from rugbot.integrations.solscan import SolscanMintTransactionCandidate
 from rugbot.intelligence.entity_mint_index import FinalizedEntityMint
 from rugbot.storage.database import DatabaseManager
@@ -97,13 +93,8 @@ def test_recorded_finalized_trade_is_decoded_with_real_amounts_and_actors() -> N
     assert event.token_amount_base_units == 357_666_547
     assert event.user == "CvoPbuS2AghzVBYJx7HfQGhALiqif4YwWgHvXmhehuJZ"
 
-    fee_payer, signers = _transaction_actors(observation)
-    assert fee_payer is not None
-    assert signers[0] == fee_payer
-    assert _created_at(observation) is not None
 
-
-def test_store_keeps_multiple_events_per_signature_and_mint_jsonl(
+def test_store_keeps_multiple_events_per_signature(
     tmp_path: Path,
 ) -> None:
     database = DatabaseManager(tmp_path / "rugbot.db")
@@ -126,12 +117,6 @@ def test_store_keeps_multiple_events_per_signature_and_mint_jsonl(
         "SELECT COUNT(*) AS count FROM discover_trades"
     ).fetchone()
     assert count["count"] == 2
-
-    observation = _recorded_observation()
-    mint = common["mint"]
-    assert append_observation(tmp_path, observation, mint=mint) is True
-    assert (tmp_path / "observations" / f"{mint}.jsonl").exists()
-    assert not (tmp_path / "observations" / "unknown.jsonl").exists()
 
 
 def test_candidates_require_finalized_time_and_do_not_auto_qualify(
@@ -258,87 +243,49 @@ def _rate_limit_abstain(message: str) -> AbstainResult:
     )
 
 
-def test_is_rate_limit_abstain_matches_only_throttle_and_transport() -> None:
-    assert _is_rate_limit_abstain(
-        _rate_limit_abstain(
-            "getTransaction was rate-limited by the available RPC providers"
-        )
-    )
-    assert _is_rate_limit_abstain(
-        _rate_limit_abstain("getTransaction transport failed: RpcProviderPoolError")
-    )
-    # A different MISSING_FEATURE gap is not transient and must not be retried.
-    assert not _is_rate_limit_abstain(_rate_limit_abstain("unsupported program"))
-    # A non-MISSING_FEATURE reason is never treated as throttling.
-    assert not _is_rate_limit_abstain(
-        AbstainResult(
-            reason=AbstainReason.STALE_STATE, message="rate-limited", as_of_slot=0
-        )
-    )
-    # A hydrated observation (no ``reason``) is not an abstain at all.
-    assert not _is_rate_limit_abstain(object())
-
-
-def test_observe_finalized_retries_rate_limit_then_hydrates(
-    monkeypatch,
+def test_collector_records_a_recorded_launch_and_flags_stream_gaps(
+    tmp_path: Path,
 ) -> None:
-    """A throttled launch must eventually hydrate instead of being dropped."""
-    hydrated = _recorded_observation()
-    calls = {"count": 0}
-
-    async def fake_observe(signature: str, **kwargs: object) -> object:
-        calls["count"] += 1
-        if calls["count"] == 1:
-            return _rate_limit_abstain(
-                "getTransaction was rate-limited by the available RPC providers"
-            )
-        return hydrated
-
-    monkeypatch.setattr(collector, "observe_finalized_transaction", fake_observe)
-    # Keep the backoff negligible so the test does not actually sleep.
-    monkeypatch.setattr(collector, "RECONNECT_MIN_SECONDS", 0.001)
-
-    result = asyncio.run(
-        _observe_finalized_with_retry(
-            "signature",
-            endpoint="https://rpc.example",
-            source_id="test",
-            semaphore=asyncio.Semaphore(1),
-            transport=None,
+    """One recorded Pump log stream: create -> launch, trades, and a gap."""
+    fixture = Path(__file__).parent.parent / "fixtures/paper_desk/pump_launch_logs.json"
+    launch = json.loads(fixture.read_text())
+    database = DatabaseManager(tmp_path / "rugbot.db")
+    ensure_discover_schema(database)
+    stats = collector.CollectStats()
+    tracked: dict[str, float] = {}
+    last_slot = None
+    for index, recorded in enumerate(launch["notifications"]):
+        notification = WalletLogNotification(
+            wallet=PUMP_PROGRAM_ID,
+            signature=f"recorded-{index}",
+            slot=recorded["slot"],
+            logs=tuple(recorded["logs"]),
         )
-    )
-
-    assert result is hydrated
-    assert calls["count"] == 2  # abstained once, then hydrated on retry
-
-
-def test_observe_finalized_returns_abstain_when_budget_exhausted(
-    monkeypatch,
-) -> None:
-    """Once the retry budget lapses the abstain is surfaced, not swallowed."""
-    abstain = _rate_limit_abstain(
-        "getTransaction transport failed: RpcProviderPoolError"
-    )
-    calls = {"count": 0}
-
-    async def fake_observe(signature: str, **kwargs: object) -> object:
-        calls["count"] += 1
-        return abstain
-
-    monkeypatch.setattr(collector, "observe_finalized_transaction", fake_observe)
-    # A negative budget means the retry window is already exhausted on entry
-    # (deterministic across coarse monotonic clocks), so no retry/sleep occurs.
-    monkeypatch.setattr(collector, "RATE_LIMIT_RETRY_BUDGET_SECONDS", -1.0)
-
-    result = asyncio.run(
-        _observe_finalized_with_retry(
-            "signature",
-            endpoint="https://rpc.example",
-            source_id="test",
-            semaphore=asyncio.Semaphore(1),
-            transport=None,
+        last_slot = collector._process(
+            database, notification, tracked, stats, last_slot
         )
-    )
-
-    assert result is abstain
-    assert calls["count"] == 1  # budget already spent; no infinite retry loop
+    row = database.connection.execute(
+        "SELECT creator, created_slot, raw_json FROM discover_launches WHERE mint = ?",
+        (launch["mint"],),
+    ).fetchone()
+    assert row["creator"] == launch["creator"]
+    # The stored create logs decode like a fetched create transaction.
+    logs = json.loads(row["raw_json"])["meta"]["logMessages"]
+    assert decode_pump_create_event_logs(logs, as_of_slot=row["created_slot"])
+    trades = database.connection.execute(
+        "SELECT COUNT(*) AS n FROM discover_trades WHERE mint = ?", (launch["mint"],)
+    ).fetchone()["n"]
+    assert trades == stats.trades > 0
+    # This fixture holds one coin's transactions only, so its slot jumps are
+    # real silences; each one above the threshold must be recorded exactly.
+    slots = [recorded["slot"] for recorded in launch["notifications"]]
+    expected = [
+        (earlier, later)
+        for earlier, later in itertools.pairwise(slots)
+        if later - earlier > collector.STREAM_GAP_SLOTS
+    ]
+    gaps = database.connection.execute(
+        "SELECT from_slot, to_slot FROM discover_stream_gaps ORDER BY from_slot"
+    ).fetchall()
+    assert [tuple(gap) for gap in gaps] == expected
+    assert stats.gaps == len(expected)

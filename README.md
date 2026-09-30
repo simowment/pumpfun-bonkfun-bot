@@ -287,6 +287,7 @@ uv run rug_intel graph <SEED>                          # classify the operator's
 uv run rug_intel profile <FUNDER_OR_MINT>              # burner set + launch outcomes
 uv run rug_intel wallet <MINT_OR_WALLET> --backtest    # resolve + intelligence + optimizer
 uv run rug_discover fleet <MINT>                       # bundle wallets -> operator history
+uv run rug_discover collect --state-dir .state/collect # record every launch + 2 h of trades
 ```
 Backtests optimize a fixed take-profit (grid plus a level under each launch's
 ATH) and print a TP sweep: hit rate, average win and loss after fees. Add
